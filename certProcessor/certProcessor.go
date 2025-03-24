@@ -10,12 +10,6 @@ import (
 	"time"
 )
 
-const (
-	letterBytes  = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	specialBytes = "!@#$%^&*()_+-=[]{}\\|;':\",.<>/?`~"
-	numBytes     = "0123456789"
-)
-
 func GeneratePassword(length int, includeNumber bool, includeSpecial bool) string {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -56,7 +50,7 @@ func GeneratePassword(length int, includeNumber bool, includeSpecial bool) strin
 // -----
 // Internally this function calls out to the ``keytool`` command-line tool.
 
-func create_truststore(cert string, password string) ([]byte, string, error) {
+func Create_truststore(cert string, password string) ([]byte, string, error) {
 	if password == "" {
 		password = GeneratePassword(24, true, false)
 	}
