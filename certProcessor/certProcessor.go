@@ -16,7 +16,7 @@ const (
 	numBytes     = "0123456789"
 )
 
-func generatePassword(length int, includeNumber bool, includeSpecial bool) string {
+func GeneratePassword(length int, includeNumber bool, includeSpecial bool) string {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	var password []byte
@@ -58,7 +58,7 @@ func generatePassword(length int, includeNumber bool, includeSpecial bool) strin
 
 func create_truststore(cert string, password string) ([]byte, string, error) {
 	if password == "" {
-		password = generatePassword(24, true, false)
+		password = GeneratePassword(24, true, false)
 	}
 	file, err := os.CreateTemp("", "ca_cert_")
 	if err != nil {
