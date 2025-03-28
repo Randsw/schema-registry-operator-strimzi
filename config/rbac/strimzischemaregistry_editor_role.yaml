@@ -1,0 +1,27 @@
+# permissions for end users to edit strimzischemaregistries.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-schema
+    app.kubernetes.io/managed-by: kustomize
+  name: strimzischemaregistry-editor-role
+rules:
+- apiGroups:
+  - strimziregistryoperator.randsw.code
+  resources:
+  - strimzischemaregistries
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - strimziregistryoperator.randsw.code
+  resources:
+  - strimzischemaregistries/status
+  verbs:
+  - get
