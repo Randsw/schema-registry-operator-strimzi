@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -28,8 +29,13 @@ type StrimziSchemaRegistrySpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// Foo is an example field of StrimziSchemaRegistry. Edit strimzischemaregistry_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	StrimziVersion     string                 `json:"strimziversion"`
+	Listener           string                 `json:"listener,omitempty"`
+	SecurityProtocol   string                 `json:"securityprotocol,omitempty"`
+	CompatibilityLevel string                 `json:"compatibilitylevel,omitempty"`
+	SecureHTTP         bool                   `json:"securehttp"`
+	TLSSecretName      string                 `json:"tlssecretname,omitempty"`
+	Template           corev1.PodTemplateSpec `json:"template" protobuf:"bytes,6,opt,name=template"`
 }
 
 // StrimziSchemaRegistryStatus defines the observed state of StrimziSchemaRegistry
