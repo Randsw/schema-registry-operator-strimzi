@@ -3669,6 +3669,7 @@ spec:
             required:
             - securehttp
             - strimziversion
+            - template
             type: object
           status:
             type: object

@@ -193,13 +193,8 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	var podSpec = instance.Spec.Template
 
-	if instance.Spec.Template.Spec.Containers[0].Image == "" {
-		instance.Spec.Template.Spec.Containers[0].Image = "confluentinc/cp-schema-registry:7.6.5"
-	}
-
 	podSpec.Labels = ls
 
-	podSpec.Spec.Volumes[0].ConfigMap.Name = instance.Name + "-cm"
 	// Use special service account for cascade scenarion controller. SA created by heml-chart
 	podSpec.Spec.ServiceAccountName = "schema-registry-operator"
 
