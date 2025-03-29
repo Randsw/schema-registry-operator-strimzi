@@ -23,7 +23,7 @@ import (
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
 	apps "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -131,7 +131,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
 		Owns(&apps.Deployment{}).
 		Watches(
-			&corev1.Secret{}, // Watch the Busybox CR
+			&v1.Secret{}, // Watch the Busybox CR
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				// Check if the Busybox resource has the label 'backup-needed: "true"'
 				if _, ok := obj.GetLabels()["strimzi.io/component-type"]; ok {
@@ -175,7 +175,103 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	podSpec.Spec.Volumes[0].ConfigMap.Name = instance.Name + "-cm"
 	// Use special service account for cascade scenarion controller. SA created by heml-chart
-	podSpec.Spec.ServiceAccountName = "cascade-scenario"
+	podSpec.Spec.ServiceAccountName = "schema-registry-operator"
+
+	// Create Schema registry configuration
+	var podEnv []v1.EnvVar
+	var podVolume []v1.Volume
+	var containerVolumeMount []v1.VolumeMount
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_HOST_NAME", ValueFrom: &v1.EnvVarSource{
+		FieldRef: &v1.ObjectFieldSelector{
+			FieldPath: "status.podIP",
+		},
+	},
+	})
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL", Value: instance.Spec.CompatibilityLevel})
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL", Value: instance.Spec.SecurityProtocol})
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_MASTER_ELIGIBILITY", Value: "true"})
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_HEAP_OPTS", Value: "-Xms512M -Xmx512M"})
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", Value: "registry-schemas"})
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION", Value: "/var/schemaregistry/keystore.jks"})
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"})
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+		SecretKeyRef: &v1.SecretKeySelector{
+			LocalObjectReference: v1.LocalObjectReference{
+				Name: instance.Name + "jks",
+			},
+			Key: "keystore_password",
+		},
+	},
+	})
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+		SecretKeyRef: &v1.SecretKeySelector{
+			LocalObjectReference: v1.LocalObjectReference{
+				Name: instance.Name + "jks",
+			},
+			Key: "truststore_password",
+		},
+	},
+	})
+
+	// Mount secret to container
+	containerVolumeMount = append(containerVolumeMount, v1.VolumeMount{
+		Name:      "tls",
+		MountPath: "/var/schemaregistry",
+		ReadOnly:  true,
+	})
+
+	if instance.Spec.SecureHTTP {
+		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "https://0.0.0.0:8085"})
+		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"})
+		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+			SecretKeyRef: &v1.SecretKeySelector{
+				LocalObjectReference: v1.LocalObjectReference{
+					Name: instance.Name + "jks",
+				},
+				Key: "truststore_password",
+			},
+		},
+		})
+		if instance.Spec.TLSSecretName == "" {
+			//TODO Create own server key and cert and sign with kafka-cluster-ca-cert. Keystore and key are same!!!!!
+			//TODO Mount as volume
+			//TODO keystore env add
+		} else {
+			podVolume = append(podVolume, v1.Volume{Name: "http-tls",
+				VolumeSource: v1.VolumeSource{
+					Secret: &v1.SecretVolumeSource{
+						SecretName: instance.Name + "jks",
+					}},
+			})
+			podSpec.Spec.Volumes[0].Secret.SecretName = instance.Spec.TLSSecretName
+			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+				SecretKeyRef: &v1.SecretKeySelector{
+					LocalObjectReference: v1.LocalObjectReference{
+						Name: instance.Name + "jks",
+					},
+					Key: "truststore_password",
+				},
+			},
+			})
+		}
+	} else {
+		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
+	}
+	var defaultMode int32 = 420
+	// Mount secret as volumes
+	podVolume = append(podVolume, v1.Volume{Name: "tls",
+		VolumeSource: v1.VolumeSource{
+			Secret: &v1.SecretVolumeSource{
+				SecretName:  instance.Name + "jks",
+				DefaultMode: &defaultMode,
+			}},
+	})
+
+	podSpec.Spec.Containers[0].Env = podEnv
+
+	podSpec.Spec.Volumes = podVolume
+
+	podSpec.Spec.Containers[0].VolumeMounts = containerVolumeMount
 
 	dep := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -194,7 +290,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	// Set CascadeAutoOperator instance as the owner and controller
 	err := ctrl.SetControllerReference(instance, dep, r.Scheme)
 	if err != nil {
-		logger.Error(err, "Failed to set CascadeAutoOperator instance as the owner and controller")
+		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
 	}
 	return dep
 }
