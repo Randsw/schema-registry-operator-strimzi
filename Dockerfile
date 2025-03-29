@@ -1,5 +1,5 @@
 # Build the kubeinfo binary
-FROM golang:1.23 as builder
+FROM golang:1.23 AS builder
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
@@ -14,11 +14,18 @@ COPY . .
 # Build
 RUN make build
 
-# Use distroless as minimal base image to package the kubeinfo binary
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+# Use ubuntu image to install keytool binary
+# Openssl image already present in Ubuntu
+FROM ubuntu:24.04
 WORKDIR /
-COPY --from=builder /workspace/sr-operator .
+RUN apt update && apt -y install --no-install-recommends default-jre openssl && apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /workspace/bin/manager .
 USER 65532:65532
+ENTRYPOINT ["/manager"]
 
-ENTRYPOINT ["/sr-operator"]
+# FROM gcr.io/distroless/static:nonroot
+# WORKDIR /
+# COPY --from=builder /workspace/sr-operator .
+# USER 65532:65532
+
+# ENTRYPOINT ["/sr-operator"]
