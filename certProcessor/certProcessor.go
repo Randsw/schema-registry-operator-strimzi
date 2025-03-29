@@ -3,6 +3,7 @@
 package certprocessor
 
 import (
+	"encoding/base64"
 	"fmt"
 	"math/rand"
 	"os"
@@ -233,4 +234,12 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 	}
 
 	return b, password, nil
+}
+
+func Decode_secret_field(str string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(str)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }

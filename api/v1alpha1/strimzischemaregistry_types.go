@@ -35,7 +35,7 @@ type StrimziSchemaRegistrySpec struct {
 	CompatibilityLevel string                 `json:"compatibilitylevel,omitempty"`
 	SecureHTTP         bool                   `json:"securehttp"`
 	TLSSecretName      string                 `json:"tlssecretname,omitempty"`
-	Template           corev1.PodTemplateSpec `json:"template" protobuf:"bytes,6,opt,name=template"`
+	Template           corev1.PodTemplateSpec `json:"template,omitempty" protobuf:"bytes,6,opt,name=template"`
 }
 
 // StrimziSchemaRegistryStatus defines the observed state of StrimziSchemaRegistry
