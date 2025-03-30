@@ -121,6 +121,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, err
 		}
 		// Deployment created successfully - return and requeue
+		logger.Info("Deployment created successfully", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
 		return ctrl.Result{Requeue: true}, nil
 	} else if err != nil {
 		logger.Error(err, "Failed to get Deployment")
@@ -432,10 +433,12 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		return nil, err
 	}
 
-	clientp12, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.p12"]))
+	userPassword, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.password"]))
 	if err != nil {
 		return nil, err
 	}
+
+	clientp12 := string(userSecret.Data["user.p12"])
 
 	jks_secret := &v1.Secret{}
 	jks_secret_name := instance.Name + "-jks"
@@ -453,51 +456,47 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		if err != nil {
 			return nil, err
 		}
-
 	}
 	if err != nil && !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to get Deployment")
 		return nil, err
 	}
 	logger.Info("Creating new JKS secret", "Secret Name", jks_secret_name)
-
 	truststore, truststore_password, err := certprocessor.CreateTruststore(clusterCACert, "")
 	if err != nil {
 		return nil, err
 	}
-	// logger.Info("Print trusstore", "Value", truststore)
-	// logger.Info("Print trusstore password", "Value", truststore_password)
-	// logger.Info("Print clientCACert", "Value", clientCACert)
-	// logger.Info("Creating clientCert", "Value", clientCert)
-	// logger.Info("Creating clientKey", "Value", clientKey)
-	// logger.Info("Creating clientp12", "Value", clientp12)
-	keystore, keystore_password, err := certprocessor.CreateKeystore(clientCACert, clientCert, clientKey, clientp12, "")
+	keystore, keystore_password, err := certprocessor.CreateKeystore(clientCACert, clientCert, clientKey, clientp12, userPassword)
 	if err != nil {
 		return nil, err
 	}
-
-	jks_secret = &v1.Secret{}
-
-	jks_secret.Name = jks_secret_name
-
-	jks_secret.Annotations[CAVersionKey] = clusterCASecret.ObjectMeta.ResourceVersion
-
-	jks_secret.Annotations[userVersionKey] = userCASecret.ObjectMeta.ResourceVersion
-
-	jks_secret.Type = "Opaque"
-
-	jks_secret.Data = map[string][]byte{
-		"truststore.jks":      []byte(base64.StdEncoding.EncodeToString([]byte(truststore))),
-		"keystore.jks":        []byte(base64.StdEncoding.EncodeToString([]byte(keystore))),
-		"truststore_password": []byte(base64.StdEncoding.EncodeToString([]byte(truststore_password))),
-		"keystore_password":   []byte(base64.StdEncoding.EncodeToString([]byte(keystore_password))),
+	logger.Info("Creating Secret", "Name", jks_secret_name)
+	jks_secret = &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jks_secret_name,
+			Namespace: instance.Namespace,
+			Labels: map[string]string{
+				"app":  "strimzi-chema-registry",
+				"user": instance.Name,
+			},
+			Annotations: map[string]string{
+				CAVersionKey:   clusterSecret.ObjectMeta.ResourceVersion,
+				userVersionKey: userSecret.ObjectMeta.ResourceVersion,
+			},
+		},
+		Type: v1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"truststore.jks":      []byte(base64.StdEncoding.EncodeToString([]byte(truststore))),
+			"keystore.jks":        []byte(base64.StdEncoding.EncodeToString([]byte(keystore))),
+			"truststore_password": []byte(base64.StdEncoding.EncodeToString([]byte(truststore_password))),
+			"keystore_password":   []byte(base64.StdEncoding.EncodeToString([]byte(keystore_password))),
+		},
 	}
 
 	err = ctrl.SetControllerReference(instance, jks_secret, r.Scheme)
 	if err != nil {
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
 	}
-
 	return jks_secret, nil
 }
 

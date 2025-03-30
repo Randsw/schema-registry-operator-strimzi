@@ -367,7 +367,7 @@ func TestCreateKeystorep12(t *testing.T) {
 		t.Error(err)
 	}
 	if len(keystore) <= 0 {
-		t.Error("Empty Keystore")
+		t.Error("Empty Keystore. Bad")
 		return
 	}
 	if password != "test1234" {

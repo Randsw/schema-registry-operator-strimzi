@@ -494,10 +494,11 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Namespace: namespace.Name,
 				},
 				Data: map[string][]byte{
-					"ca.crt":   []byte(base64.StdEncoding.EncodeToString([]byte(userCACert()))),
-					"user.crt": []byte(base64.StdEncoding.EncodeToString([]byte(userCert()))),
-					"user.key": []byte(base64.StdEncoding.EncodeToString([]byte(userKey()))),
-					"user.p12": []byte([]byte(userp12())),
+					"ca.crt":        []byte(base64.StdEncoding.EncodeToString([]byte(userCACert()))),
+					"user.crt":      []byte(base64.StdEncoding.EncodeToString([]byte(userCert()))),
+					"user.key":      []byte(base64.StdEncoding.EncodeToString([]byte(userKey()))),
+					"user.p12":      []byte(userp12()),
+					"user.password": []byte(base64.StdEncoding.EncodeToString([]byte("test1234"))),
 				},
 			}
 			Expect(k8sClient.Create(ctx, clientSecret)).To(Succeed())
@@ -589,6 +590,17 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
 				return k8sClient.Get(ctx, typeNamespaceName, found)
 			}, time.Minute*2, time.Second).Should(Succeed())
+
+			By("Reconciling the created resource")
+			controllerReconciler = &StrimziSchemaRegistryReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
 
 			By("Checking if service was successfully created in the reconciliation")
 			Eventually(func() error {

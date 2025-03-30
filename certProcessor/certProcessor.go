@@ -200,6 +200,7 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 			return nil, "", err
 		}
 	} else {
+		fmt.Println("Using p12")
 		userKeyFilep12, err := os.CreateTemp("", "user.p12")
 		if err != nil {
 			fmt.Println(err.Error())
@@ -223,9 +224,11 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 	keystore_path := tempDir + "/" + "client.keystore.jks"
 	defer os.Remove(keystore_path)
 	// Generate keystore
+	fmt.Println("Generate keystore")
 	cmd := exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystore_path,
 		"-deststoretype", "jks", "-srckeystore", p12_path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
-	_, err := cmd.Output()
+	out, err := cmd.Output()
+	fmt.Println(string(out))
 	if err != nil {
 		fmt.Println(err.Error())
 	}
