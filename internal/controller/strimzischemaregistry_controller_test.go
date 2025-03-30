@@ -401,35 +401,44 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 						Version: ptr.To("3.9.0"),
 					},
 				},
-				Status: &kafka.KafkaStatus{
-					ClusterId: ptr.To("Ypb68J1GSu-jqq0N0ama0w"),
-					Listeners: []kafka.KafkaStatusListenersElem{
-						{
-							Addresses: []kafka.KafkaStatusListenersElemAddressesElem{
-								{
-									Host: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc"),
-									Port: ptr.To(int32(9092)),
-								},
+			}
+			status := &kafka.KafkaStatus{
+				ClusterId: ptr.To("Ypb68J1GSu-jqq0N0ama0w"),
+				Listeners: []kafka.KafkaStatusListenersElem{
+					{
+						Addresses: []kafka.KafkaStatusListenersElemAddressesElem{
+							{
+								Host: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc"),
+								Port: ptr.To(int32(9092)),
 							},
-							BootstrapServers: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc:9092"),
-							Name:             ptr.To("plain"),
 						},
-						{
-							Addresses: []kafka.KafkaStatusListenersElemAddressesElem{
-								{
-									Host: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc"),
-									Port: ptr.To(int32(9093)),
-								},
+						BootstrapServers: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc:9092"),
+						Name:             ptr.To("plain"),
+					},
+					{
+						Addresses: []kafka.KafkaStatusListenersElemAddressesElem{
+							{
+								Host: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc"),
+								Port: ptr.To(int32(9093)),
 							},
-							BootstrapServers: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc:9093"),
-							Name:             ptr.To("TLS"),
-							Certificates:     []string{cert},
 						},
+						BootstrapServers: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc:9093"),
+						Name:             ptr.To("TLS"),
+						Certificates:     []string{cert},
 					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, Cluster)).To(Succeed())
 			Expect(err).To(Not(HaveOccurred()))
+			// Update Status of Kafka CR
+			UpdateCluser := &kafka.Kafka{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, UpdateCluser)
+			Expect(err).To(Not(HaveOccurred()))
+
+			UpdateCluser.Status = status
+			By("Updating Kafka Cluster")
+			Expect(k8sClient.Status().Update(ctx, UpdateCluser)).To(Succeed())
+
 			// Create Kafka User
 			By("creating Kafka User")
 			User := &kafka.KafkaUser{
@@ -507,8 +516,11 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 						Namespace: namespace.Name,
 					},
 					Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
-						StrimziVersion: "v1beta2",
-						SecureHTTP:     false,
+						StrimziVersion:     "v1beta2",
+						SecureHTTP:         false,
+						Listener:           "TLS",
+						CompatibilityLevel: "forward",
+						SecurityProtocol:   "SSL",
 						Template: corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{

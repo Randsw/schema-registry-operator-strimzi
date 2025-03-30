@@ -144,6 +144,7 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 	tempDir := os.TempDir()
 
 	if userp12 == "" {
+
 		// Create temporary file
 		userCAFile, err := os.CreateTemp("", "user_ca.crt")
 		if err != nil {
@@ -183,7 +184,7 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 
 		p12_path = tempDir + "/" + "user.p12"
 
-		// Generate trustore
+		// Generate p12 format bundle
 		cmd := exec.Command("openssl", "pkcs12", "-export", "-in", userCertFile.Name(), "-inkey", userKeyFile.Name(), "-chain", "-CAfile",
 			userCAFile.Name(), "-name", "confluent-schema-registry", "-passout", "pass:"+password, "-out", p12_path)
 
@@ -191,8 +192,9 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 
 		if err != nil {
 			fmt.Println(err.Error())
+			return nil, "", err
 		}
-		// Check if trustore exist
+		// Check if p12 format bundle exist
 		if _, err := os.Stat(p12_path); os.IsNotExist(err) {
 			fmt.Println("File not exist")
 			return nil, "", err
@@ -201,24 +203,29 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 		userKeyFilep12, err := os.CreateTemp("", "user.p12")
 		if err != nil {
 			fmt.Println(err.Error())
+			return nil, "", err
 		}
-		defer os.Remove(userKeyFilep12.Name())
+
 		// Save p12 certificate to temporary file
-		_, err = userKeyFilep12.WriteString(userp12)
+		p12Data, err := Decode_secret_field(userp12)
 		if err != nil {
 			fmt.Println(err.Error())
+			return nil, "", err
+		}
+		_, err = userKeyFilep12.Write([]byte(p12Data))
+		if err != nil {
+			fmt.Println(err.Error())
+			return nil, "", err
 		}
 		p12_path = userKeyFilep12.Name()
-
 	}
-
+	defer os.Remove(p12_path)
 	keystore_path := tempDir + "/" + "client.keystore.jks"
 	defer os.Remove(keystore_path)
-	// Generate trustore
+	// Generate keystore
 	cmd := exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystore_path,
 		"-deststoretype", "jks", "-srckeystore", p12_path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
 	_, err := cmd.Output()
-
 	if err != nil {
 		fmt.Println(err.Error())
 	}

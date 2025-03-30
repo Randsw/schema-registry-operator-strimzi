@@ -130,7 +130,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	foundSvc := &v1.Service{}
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, foundSvc)
 	if err != nil && errors.IsNotFound(err) {
-		svc := r.getService(instance, &logger)
+		svc := r.createService(instance, &logger)
 		logger.Info("Creating a new Service", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
 		err = r.Create(ctx, svc)
 		if err != nil {
@@ -189,6 +189,7 @@ func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication(ctx conte
 }
 
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) *apps.Deployment {
+	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Service.Name", instance.Name+"-deploy")
 	ls := labelsForCascadeAutoOperator(instance.Name, instance.Name)
 
 	var podSpec = instance.Spec.Template
@@ -203,7 +204,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	var podVolume []v1.Volume
 	var containerVolumeMount []v1.VolumeMount
 
-	kafkaBootstrapServer, kafkaClusterName, err := r.getKafkaBootstrapServers(instance, ctx, logger)
+	kafkaBootstrapServer, kafkaClusterName, err := r.getKafkaBootstrapServers(instance, ctx, *logger)
 	if err != nil {
 		logger.Error(err, "Fail to get Kafka bootstrap servers")
 		return nil
@@ -308,6 +309,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podSpec.Spec.Containers[0].Env = podEnv
 	podSpec.Spec.Volumes = podVolume
 	podSpec.Spec.Containers[0].VolumeMounts = containerVolumeMount
+	podSpec.Spec.ServiceAccountName = instance.Name
 	dep := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name + "-deploy",
@@ -321,7 +323,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			Template: podSpec, // PodSec
 		},
 	}
-
+	logger.Info("Got Kafka Deployment", "Deployment", dep.Spec)
 	secret, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
 	if err != nil {
 		logger.Error(err, "Failed to format secret")
@@ -344,7 +346,7 @@ func labelsForCascadeAutoOperator(name_app string, name_cr string) map[string]st
 	return map[string]string{"app": name_app, "strimzi-schema-registry": name_cr}
 }
 
-func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) (string, string, error) {
+func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger logr.Logger) (string, string, error) {
 
 	// Get Kafka cluster name. Finding KafkaUser CR with name equal to our SchemaRegistry
 	// and read name from it
@@ -354,11 +356,13 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	if err != nil {
 		return "", "", err
 	}
+	logger.Info("Got Kafka User", "Number", len(kafkaUsers.Items))
 	for _, kafkaUser := range kafkaUsers.Items {
 		if kafkaUser.Name == instance.Name {
 			kafkaClusterName = kafkaUser.Labels["strimzi.io/cluster"]
 		}
 	}
+	logger.Info("Found kafka cluster CR", "Name", kafkaClusterName)
 	// Find bootstap server address
 	var kafkaBootstrapServer string
 	kafkaCluster := &kafka.Kafka{}
@@ -370,12 +374,15 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	if kafkaListener == "" {
 		kafkaListener = "tls"
 	}
+	logger.Info("Found kafka linsteners", "Number", kafkaCluster.Status.Listeners)
 	for _, listener := range kafkaCluster.Status.Listeners {
+		logger.Info("Found kafka listeners.", "Listener", *listener.Name)
 		if *listener.Name == kafkaListener {
 			kafkaBootstrapServer = *listener.BootstrapServers
-			logger.Info("Found specified kafka cluster listeners - %s. Address - %s", instance.Spec.Listener, kafkaBootstrapServer)
+			logger.Info("Found specified kafka cluster listeners.", "Listener", kafkaListener, "kafkaBootstap", kafkaBootstrapServer)
 		}
 	}
+	logger.Info("KafkaBootstap", "Address", kafkaBootstrapServer)
 	return kafkaBootstrapServer, kafkaClusterName, nil
 }
 
@@ -384,41 +391,48 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	keyPrefix := "strimziregistryoperator.randsw.code"
 	CAVersionKey := keyPrefix + "/caSecretVersion"
 	userVersionKey := keyPrefix + "/clientSecretVersion"
-
+	clusterSecret := &v1.Secret{}
+	userSecret := &v1.Secret{}
 	// Get cluster secret
 	if clusterCASecret == nil {
-		err := r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca-cert", Namespace: instance.Namespace}, clusterCASecret)
+		logger.Info("Searching for secret", "Secret", clusterName+"-cluster-ca-cert")
+		err := r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca-cert", Namespace: instance.Namespace}, clusterSecret)
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		clusterSecret = clusterCASecret
 	}
-	logger.Info("Cluster CA certificate version: %s", clusterCASecret.ObjectMeta.ResourceVersion)
-	clusterCACert, err := certprocessor.Decode_secret_field(string(clusterCASecret.Data["ca.crt"]))
+	logger.Info("Cluster CA certificate version", "Version", clusterSecret.ObjectMeta.ResourceVersion)
+	clusterCACert, err := certprocessor.Decode_secret_field(string(clusterSecret.Data["ca.crt"]))
 	if err != nil {
 		return nil, err
 	}
 
 	if userCASecret == nil {
-		err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, clusterCASecret)
+		logger.Info("Searching for secret", "Secret", instance.Name+"-cluster-ca-cert")
+		err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		userSecret = userCASecret
 	}
-	logger.Info("Client certification version: %s", userCASecret.ObjectMeta.ResourceVersion)
-	clientCACert, err := certprocessor.Decode_secret_field(string(userCASecret.Data["ca.crt"]))
+	logger.Info("Client certification version", "Version", userSecret.ObjectMeta.ResourceVersion)
+	clientCACert, err := certprocessor.Decode_secret_field(string(userSecret.Data["ca.crt"]))
 	if err != nil {
 		return nil, err
 	}
-	clientCert, err := certprocessor.Decode_secret_field(string(userCASecret.Data["user.crt"]))
+	clientCert, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.crt"]))
 	if err != nil {
 		return nil, err
 	}
-	clientKey, err := certprocessor.Decode_secret_field(string(userCASecret.Data["user.key"]))
+	clientKey, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.key"]))
 	if err != nil {
 		return nil, err
 	}
 
-	clientp12, err := certprocessor.Decode_secret_field(string(userCASecret.Data["user.p12"]))
+	clientp12, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.p12"]))
 	if err != nil {
 		return nil, err
 	}
@@ -426,30 +440,37 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	jks_secret := &v1.Secret{}
 	jks_secret_name := instance.Name + "-jks"
 	err = r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
-	if err != nil {
+	if err == nil {
+		if jks_secret.ObjectMeta.Annotations[CAVersionKey] == clusterSecret.ObjectMeta.ResourceVersion &&
+			jks_secret.ObjectMeta.Annotations[userVersionKey] == userSecret.ObjectMeta.ResourceVersion {
+			logger.Info("JKS secret is up-to-date")
+			return nil, nil
+		}
+
+		logger.Info("About to delete JKS secret")
+
+		err = r.Delete(ctx, jks_secret)
+		if err != nil {
+			return nil, err
+		}
+
+	}
+	if err != nil && !errors.IsNotFound(err) {
+		logger.Error(err, "Failed to get Deployment")
 		return nil, err
 	}
-
-	if jks_secret.ObjectMeta.Annotations[CAVersionKey] == clusterCASecret.ObjectMeta.ResourceVersion &&
-		jks_secret.ObjectMeta.Annotations[userVersionKey] == userCASecret.ObjectMeta.ResourceVersion {
-		logger.Info("JKS secret is up-to-date")
-		return nil, nil
-	}
-
-	logger.Info("About to delete JKS secret")
-
-	err = r.Delete(ctx, jks_secret)
-	if err != nil {
-		return nil, err
-	}
-
-	logger.Info("Creating new JKS secret -%s", jks_secret_name)
+	logger.Info("Creating new JKS secret", "Secret Name", jks_secret_name)
 
 	truststore, truststore_password, err := certprocessor.CreateTruststore(clusterCACert, "")
 	if err != nil {
 		return nil, err
 	}
-
+	// logger.Info("Print trusstore", "Value", truststore)
+	// logger.Info("Print trusstore password", "Value", truststore_password)
+	// logger.Info("Print clientCACert", "Value", clientCACert)
+	// logger.Info("Creating clientCert", "Value", clientCert)
+	// logger.Info("Creating clientKey", "Value", clientKey)
+	// logger.Info("Creating clientp12", "Value", clientp12)
 	keystore, keystore_password, err := certprocessor.CreateKeystore(clientCACert, clientCert, clientKey, clientp12, "")
 	if err != nil {
 		return nil, err
@@ -481,7 +502,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 }
 
 // Create service for scenario controller
-func (r *StrimziSchemaRegistryReconciler) getService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger *logr.Logger) *v1.Service {
+func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger *logr.Logger) *v1.Service {
 	var source string
 	var port []v1.ServicePort
 	if instance.Spec.SecureHTTP {
