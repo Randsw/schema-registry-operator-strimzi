@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/base64"
+	"strings"
 
 	kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
 	"github.com/go-logr/logr"
@@ -191,7 +192,9 @@ func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication(ctx conte
 
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) *apps.Deployment {
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Service.Name", instance.Name+"-deploy")
-	ls := labelsForCascadeAutoOperator(instance.Name, instance.Name)
+	keyPrefix := "strimziregistryoperator.randsw.code"
+
+	ls := labelsForCascadeAutoOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image)
 
 	var podSpec = instance.Spec.Template
 
@@ -311,20 +314,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podSpec.Spec.Volumes = podVolume
 	podSpec.Spec.Containers[0].VolumeMounts = containerVolumeMount
 	podSpec.Spec.ServiceAccountName = instance.Name
-	dep := &apps.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      instance.Name + "-deploy",
-			Namespace: instance.Namespace,
-			Labels:    instance.Labels,
-		},
-		Spec: apps.DeploymentSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: ls,
-			},
-			Template: podSpec, // PodSec
-		},
-	}
-	logger.Info("Got Kafka Deployment", "Deployment", dep.Spec)
+
 	secret, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
 	if err != nil {
 		logger.Error(err, "Failed to format secret")
@@ -335,6 +325,20 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		logger.Error(err, "Failed to create secret")
 	}
 
+	dep := &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        instance.Name + "-deploy",
+			Namespace:   instance.Namespace,
+			Labels:      instance.Labels,
+			Annotations: map[string]string{keyPrefix + "/jksVersion": secret.ObjectMeta.ResourceVersion},
+		},
+		Spec: apps.DeploymentSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: ls,
+			},
+			Template: podSpec, // PodSec
+		},
+	}
 	// Set StrimziSchemaRegistry instance as the owner and controller
 	err = ctrl.SetControllerReference(instance, dep, r.Scheme)
 	if err != nil {
@@ -343,8 +347,13 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	return dep
 }
 
-func labelsForCascadeAutoOperator(name_app string, name_cr string) map[string]string {
-	return map[string]string{"app": name_app, "strimzi-schema-registry": name_cr}
+func labelsForCascadeAutoOperator(name_app string, name_cr string, image string) map[string]string {
+	return map[string]string{"app": name_app, "strimzi-schema-registry": name_cr,
+		"app.kubernetes.io/instance":   name_app,
+		"app.kubernetes.io/managed-by": "strimzi-registry-operator",
+		"app.kubernetes.io/name":       "strimzischemaregistry",
+		"app.kubernetes.io/part-of":    name_app,
+		"app.kubernetes.io/version":    strings.Split(image, ":")[1]} //schema-registry image tag
 }
 
 func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger logr.Logger) (string, string, error) {
@@ -375,7 +384,6 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	if kafkaListener == "" {
 		kafkaListener = "tls"
 	}
-	logger.Info("Found kafka linsteners", "Number", kafkaCluster.Status.Listeners)
 	for _, listener := range kafkaCluster.Status.Listeners {
 		logger.Info("Found kafka listeners.", "Listener", *listener.Name)
 		if *listener.Name == kafkaListener {
@@ -462,11 +470,13 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		return nil, err
 	}
 	logger.Info("Creating new JKS secret", "Secret Name", jks_secret_name)
-	truststore, truststore_password, err := certprocessor.CreateTruststore(clusterCACert, "")
+
+	cp := certprocessor.NewCertProcessor(logger)
+	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
 	if err != nil {
 		return nil, err
 	}
-	keystore, keystore_password, err := certprocessor.CreateKeystore(clientCACert, clientCert, clientKey, clientp12, userPassword)
+	keystore, keystore_password, err := cp.CreateKeystore(clientCACert, clientCert, clientKey, clientp12, userPassword)
 	if err != nil {
 		return nil, err
 	}

@@ -4,11 +4,12 @@ package certprocessor
 
 import (
 	"encoding/base64"
-	"fmt"
 	"math/rand"
 	"os"
 	"os/exec"
 	"time"
+
+	"github.com/go-logr/logr"
 )
 
 func GeneratePassword(length int, includeNumber bool, includeSpecial bool) string {
@@ -51,21 +52,21 @@ func GeneratePassword(length int, includeNumber bool, includeSpecial bool) strin
 // -----
 // Internally this function calls out to the ``keytool`` command-line tool.
 
-func CreateTruststore(cert string, password string) ([]byte, string, error) {
+func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte, string, error) {
 	if password == "" {
 		password = GeneratePassword(24, true, false)
 	}
 	// Create temporary file
 	file, err := os.CreateTemp("", "ca_cert")
 	if err != nil {
-		fmt.Println(err.Error())
+		cp.log.Error(err, "Failed to create temp file", "File", "ca_cert")
 	}
 	defer os.Remove(file.Name())
 
 	// Save certificate to temporary file
 	_, err = file.WriteString(cert)
 	if err != nil {
-		fmt.Println(err.Error())
+		cp.log.Error(err, "Failed to write cert to temp file", "File", "ca_cert")
 	}
 	// Set trustore output file
 	tempDir := os.TempDir()
@@ -76,20 +77,22 @@ func CreateTruststore(cert string, password string) ([]byte, string, error) {
 	cmd := exec.Command("keytool", "-importcert", "-keystore", output_path, "-alias", "CARoot", "-file",
 		file.Name(), "-storepass", password, "-storetype", "jks", "-trustcacerts", "-noprompt")
 
-	_, err = cmd.Output()
+	out, err := cmd.Output()
 
 	if err != nil {
-		fmt.Println(err.Error())
+		cp.log.Error(err, "Error while exec command", "cmdout", out)
 	}
 	// Check if trustore exist
 	if _, err := os.Stat(output_path); os.IsNotExist(err) {
-		fmt.Println("File not exist")
+
+		cp.log.Error(err, "File not exist", "File", output_path)
 		return nil, "", err
 	}
 	// Read trustore from file to save in kubernetes secret
 	b, err := os.ReadFile(output_path) // just pass the file name
 	if err != nil {
-		fmt.Println(err.Error())
+		cp.log.Error(err, "File read fail", "File", output_path)
+		return nil, "", err
 	}
 
 	return b, password, nil
@@ -134,7 +137,11 @@ func CreateTruststore(cert string, password string) ([]byte, string, error) {
 // Internally this function calls out to the ``openssl`` and ``keytool``
 // command-line tool.
 
-func CreateKeystore(userCACert string, userCert string, userKey string, userp12 string, password string) ([]byte, string, error) {
+type CertProcessor struct {
+	log *logr.Logger
+}
+
+func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, userKey string, userp12 string, password string) ([]byte, string, error) {
 
 	if password == "" {
 		password = GeneratePassword(24, true, false)
@@ -148,38 +155,38 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 		// Create temporary file
 		userCAFile, err := os.CreateTemp("", "user_ca.crt")
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Failed to create temp file", "File", "user_ca.crt")
 		}
 		defer os.Remove(userCAFile.Name())
 
 		// Save ca certificate to temporary file
 		_, err = userCAFile.WriteString(userCACert)
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Error writing to temp file", "File", "user_ca.crt")
 		}
 
 		userCertFile, err := os.CreateTemp("", "user.crt")
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Failed to create temp file", "File", "user.crt")
 		}
 		defer os.Remove(userCertFile.Name())
 
 		// Save user certificate to temporary file
 		_, err = userCertFile.WriteString(userCert)
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Error writing to temp file", "File", "user.crt")
 		}
 
 		userKeyFile, err := os.CreateTemp("", "user.key")
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Failed to create temp file", "File", "user.key")
 		}
 		defer os.Remove(userKeyFile.Name())
 
 		// Save user key to temporary file
 		_, err = userKeyFile.WriteString(userKey)
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Error writing to temp file", "File", "user.key")
 		}
 
 		p12_path = tempDir + "/" + "user.p12"
@@ -188,34 +195,34 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 		cmd := exec.Command("openssl", "pkcs12", "-export", "-in", userCertFile.Name(), "-inkey", userKeyFile.Name(), "-chain", "-CAfile",
 			userCAFile.Name(), "-name", "confluent-schema-registry", "-passout", "pass:"+password, "-out", p12_path)
 
-		_, err = cmd.Output()
+		out, err := cmd.Output()
 
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Error while exec command", "cmdout", out)
 			return nil, "", err
 		}
 		// Check if p12 format bundle exist
 		if _, err := os.Stat(p12_path); os.IsNotExist(err) {
-			fmt.Println("File not exist")
+			cp.log.Error(err, "File not exist", "File", p12_path)
 			return nil, "", err
 		}
 	} else {
-		fmt.Println("Using p12")
+		cp.log.Info("Using p12 cert store")
 		userKeyFilep12, err := os.CreateTemp("", "user.p12")
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Failed to create temp file", "File", "user.p12")
 			return nil, "", err
 		}
 
 		// Save p12 certificate to temporary file
 		p12Data, err := Decode_secret_field(userp12)
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Failed to decode p12 content from base64")
 			return nil, "", err
 		}
 		_, err = userKeyFilep12.Write([]byte(p12Data))
 		if err != nil {
-			fmt.Println(err.Error())
+			cp.log.Error(err, "Error writing to temp file", "File", userKeyFilep12.Name())
 			return nil, "", err
 		}
 		p12_path = userKeyFilep12.Name()
@@ -224,26 +231,31 @@ func CreateKeystore(userCACert string, userCert string, userKey string, userp12 
 	keystore_path := tempDir + "/" + "client.keystore.jks"
 	defer os.Remove(keystore_path)
 	// Generate keystore
-	fmt.Println("Generate keystore")
+	cp.log.Info("Generate keystore")
 	cmd := exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystore_path,
 		"-deststoretype", "jks", "-srckeystore", p12_path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
 	out, err := cmd.Output()
-	fmt.Println(string(out))
 	if err != nil {
-		fmt.Println(err.Error())
+		cp.log.Error(err, "Error while exec command", "cmdout", out)
+		return nil, "", err
 	}
 	// Check if trustore exist
 	if _, err := os.Stat(keystore_path); os.IsNotExist(err) {
-		fmt.Println("File not exist")
+		cp.log.Error(err, "File not exist", "File", keystore_path)
 		return nil, "", err
 	}
 	// Read trustore from file to save in kubernetes secret
 	b, err := os.ReadFile(keystore_path) // just pass the file name
 	if err != nil {
-		fmt.Println(err.Error())
+		cp.log.Error(err, "File read fail", "File", keystore_path)
+		return nil, "", err
 	}
 
 	return b, password, nil
+}
+
+func NewCertProcessor(logger *logr.Logger) *CertProcessor {
+	return &CertProcessor{logger}
 }
 
 func Decode_secret_field(str string) (string, error) {

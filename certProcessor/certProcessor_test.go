@@ -3,6 +3,8 @@ package certprocessor
 import (
 	"testing"
 	"unicode"
+
+	"github.com/go-logr/logr"
 )
 
 func clusterCACert() string {
@@ -330,7 +332,8 @@ func TestGeneratePasswordSpecial(t *testing.T) {
 }
 
 func TestCreate_truststore(t *testing.T) {
-	truststore, password, err := CreateTruststore(clusterCACert(), "test1234")
+	cp := NewCertProcessor(&logr.Logger{})
+	truststore, password, err := cp.CreateTruststore(clusterCACert(), "test1234")
 	if err != nil {
 		t.Error(err)
 	}
@@ -346,7 +349,8 @@ func TestCreate_truststore(t *testing.T) {
 }
 
 func TestCreateKeystore(t *testing.T) {
-	keystore, password, err := CreateKeystore(userCACert(), userCert(), userKey(), "", "test1234")
+	cp := NewCertProcessor(&logr.Logger{})
+	keystore, password, err := cp.CreateKeystore(userCACert(), userCert(), userKey(), "", "test1234")
 	if err != nil {
 		t.Error(err)
 	}
@@ -362,7 +366,8 @@ func TestCreateKeystore(t *testing.T) {
 }
 
 func TestCreateKeystorep12(t *testing.T) {
-	keystore, password, err := CreateKeystore(userCACert(), userCert(), userKey(), userp12(), "test1234")
+	cp := NewCertProcessor(&logr.Logger{})
+	keystore, password, err := cp.CreateKeystore(userCACert(), userCert(), userKey(), userp12(), "test1234")
 	if err != nil {
 		t.Error(err)
 	}
