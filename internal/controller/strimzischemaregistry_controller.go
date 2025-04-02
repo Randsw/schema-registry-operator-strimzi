@@ -330,7 +330,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			Name:        instance.Name + "-deploy",
 			Namespace:   instance.Namespace,
 			Labels:      instance.Labels,
-			Annotations: map[string]string{keyPrefix + "/jksVersion": secret.ObjectMeta.ResourceVersion},
+			Annotations: map[string]string{keyPrefix + "/jksVersion": secret.ResourceVersion},
 		},
 		Spec: apps.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
@@ -412,7 +412,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	} else {
 		clusterSecret = clusterCASecret
 	}
-	logger.Info("Cluster CA certificate version", "Version", clusterSecret.ObjectMeta.ResourceVersion)
+	logger.Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
 	clusterCACert, err := certprocessor.Decode_secret_field(string(clusterSecret.Data["ca.crt"]))
 	if err != nil {
 		return nil, err
@@ -427,7 +427,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	} else {
 		userSecret = userCASecret
 	}
-	logger.Info("Client certification version", "Version", userSecret.ObjectMeta.ResourceVersion)
+	logger.Info("Client certification version", "Version", userSecret.ResourceVersion)
 	clientCACert, err := certprocessor.Decode_secret_field(string(userSecret.Data["ca.crt"]))
 	if err != nil {
 		return nil, err

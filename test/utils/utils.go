@@ -23,7 +23,7 @@ import (
 	"strings"
 
 	//lint:ignore ST1001 This is test package
-	. "github.com/onsi/ginkgo/v2" //nolint:golint,revive
+	. "github.com/onsi/ginkgo/v2" //nolint:golint,revive,staticcheck
 )
 
 const (
@@ -136,6 +136,6 @@ func GetProjectDir() (string, error) {
 	if err != nil {
 		return wd, err
 	}
-	wd = strings.Replace(wd, "/test/e2e", "", -1)
+	wd = strings.ReplaceAll(wd, "/test/e2e", "")
 	return wd, nil
 }

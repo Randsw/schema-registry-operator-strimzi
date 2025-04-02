@@ -61,7 +61,12 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 	if err != nil {
 		cp.log.Error(err, "Failed to create temp file", "File", "ca_cert")
 	}
-	defer os.Remove(file.Name())
+	defer func() {
+		err = os.Remove(file.Name())
+		if err != nil {
+			cp.log.Error(err, "Failed to delete file", "File", file.Name())
+		}
+	}()
 
 	// Save certificate to temporary file
 	_, err = file.WriteString(cert)
@@ -71,8 +76,12 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 	// Set trustore output file
 	tempDir := os.TempDir()
 	output_path := tempDir + "/" + "client.truststore.jks"
-	defer os.Remove(output_path)
-
+	defer func() {
+		err = os.Remove(output_path)
+		if err != nil {
+			cp.log.Error(err, "Failed to delete file", "File", output_path)
+		}
+	}()
 	// Generate trustore
 	cmd := exec.Command("keytool", "-importcert", "-keystore", output_path, "-alias", "CARoot", "-file",
 		file.Name(), "-storepass", password, "-storetype", "jks", "-trustcacerts", "-noprompt")
@@ -157,7 +166,12 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 		if err != nil {
 			cp.log.Error(err, "Failed to create temp file", "File", "user_ca.crt")
 		}
-		defer os.Remove(userCAFile.Name())
+		defer func() {
+			err = os.Remove(userCAFile.Name())
+			if err != nil {
+				cp.log.Error(err, "Failed to delete file", "File", userCAFile.Name())
+			}
+		}()
 
 		// Save ca certificate to temporary file
 		_, err = userCAFile.WriteString(userCACert)
@@ -169,7 +183,12 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 		if err != nil {
 			cp.log.Error(err, "Failed to create temp file", "File", "user.crt")
 		}
-		defer os.Remove(userCertFile.Name())
+		defer func() {
+			err = os.Remove(userCertFile.Name())
+			if err != nil {
+				cp.log.Error(err, "Failed to delete file", "File", userCertFile.Name())
+			}
+		}()
 
 		// Save user certificate to temporary file
 		_, err = userCertFile.WriteString(userCert)
@@ -181,7 +200,12 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 		if err != nil {
 			cp.log.Error(err, "Failed to create temp file", "File", "user.key")
 		}
-		defer os.Remove(userKeyFile.Name())
+		defer func() {
+			err = os.Remove(userKeyFile.Name())
+			if err != nil {
+				cp.log.Error(err, "Failed to delete file", "File", userKeyFile.Name())
+			}
+		}()
 
 		// Save user key to temporary file
 		_, err = userKeyFile.WriteString(userKey)
@@ -228,8 +252,21 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 		p12_path = userKeyFilep12.Name()
 	}
 	defer os.Remove(p12_path)
+	defer func() {
+		err := os.Remove(p12_path)
+		if err != nil {
+			cp.log.Error(err, "Failed to delete file", "File", p12_path)
+		}
+	}()
+
 	keystore_path := tempDir + "/" + "client.keystore.jks"
 	defer os.Remove(keystore_path)
+	defer func() {
+		err := os.Remove(keystore_path)
+		if err != nil {
+			cp.log.Error(err, "Failed to delete file", "File", keystore_path)
+		}
+	}()
 	// Generate keystore
 	cp.log.Info("Generate keystore")
 	cmd := exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystore_path,
