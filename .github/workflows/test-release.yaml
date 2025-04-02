@@ -1,0 +1,86 @@
+name: Lint, Test and Release
+on:
+  push:
+    branches:
+      - 'develop'
+      - 'feat/**'
+      - 'fix/**'
+      - 'cicd/**'
+      - 'test/**'
+      - 'main'
+      - "[0-9]+-"
+    paths:
+      - '**.go'
+      - '**.mod'
+      - '**.sum'
+      - 'Dockerfile'
+  pull_request:
+    branches:
+      - 'main'
+    paths:
+      - '**.go'
+      - '**.mod'
+      - '**.sum'
+      - 'Dockerfile'
+env:
+  GO_VERSION: 1.23.0
+jobs:
+    # build workflow
+    Test:
+      needs: Lint
+      runs-on: ubuntu-latest
+      steps:
+      - name: set up go ${{env.GO_VERSION}}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{env.GO_VERSION}}
+        id: go
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Run build
+        run: make build
+      - name: Test
+        run: make test
+    Lint:
+      runs-on: ubuntu-latest
+      steps:
+        - name: set up go ${{env.GO_VERSION}}
+          uses: actions/setup-go@v5
+          with:
+            go-version: ${{env.GO_VERSION}}
+          id: go
+        - name: Check out code into the Go module directory
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 1
+        - name: golangci-lint
+          uses: golangci/golangci-lint-action@v7
+          with:
+            args: --timeout 5m
+            skip-cache: true
+    Semantic-Release:
+      if: ${{ github.event_name == 'push' }}
+      needs: Test
+      runs-on: ubuntu-latest
+      steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+            with:
+              fetch-depth: 0
+              token: ${{ secrets.SEMANTIC_TOKEN }}
+          - name: Setup NodeJS
+            uses: actions/setup-node@v4
+  
+          - name: Setup package.json
+            run: echo '{"name":"semantic-release", "devDependencies":{"@semantic-release/changelog":"^6.0.1","@semantic-release/exec":"^6.0.3","@semantic-release/git":"^10.0.1","@semantic-release/release-notes-generator":"^10.0.3","conventional-changelog-conventionalcommits":"^5.0.0","semantic-release":"^21.0.2"}}' > package.json
+          
+          - name: Install dependencies
+            run: npm install
+          
+          - name: Release
+            run: npx semantic-release
+            env:
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              GH_TOKEN: ${{ secrets.SEMANTIC_TOKEN }}

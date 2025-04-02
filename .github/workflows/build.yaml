@@ -1,0 +1,78 @@
+name: Build and Push
+on:
+  push:
+    tags:
+        - '*.*.*'
+permissions:
+    contents: write
+    packages: write
+jobs:
+    Deploy:
+      # The type of runner that the job will run on
+      runs-on: ubuntu-latest
+      steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/randsw/strimzi-schema-registry-operator
+          flavor: latest=true
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to Github Packages
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build image and push to GitHub Container Registry
+        uses: docker/build-push-action@v6
+        with:
+          # relative path to the place where source code with Dockerfile is located
+          context: .
+          # Note: tags has to be all lower-case
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: true
+    Release:
+        needs: Deploy
+        name: "Release"
+        runs-on: "ubuntu-latest"
+        steps:
+        - name: Config Git # https://github.com/rickstaa/action-contains-tag/pull/18
+          run: git config --global remote.origin.followRemoteHEAD never
+        - name: Checkout
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+        - name: Check if tag belong to commit in main branch
+          uses: rickstaa/action-contains-tag@v1
+          id: contains_tag_main
+          with:
+            reference: "main"
+            tag: "${{ github.ref }}"
+        - name: Check if tag belong to commit in develop branch
+          uses: rickstaa/action-contains-tag@v1
+          id: contains_tag_develop
+          with:
+            reference: "develop"
+            tag: "${{ github.ref }}"
+        - name: Release
+          uses: softprops/action-gh-release@v2
+          with:
+            generate_release_notes: true
+          if: ${{ steps.contains_tag_main.outputs.retval == 'true'}}
+        - name: Pre-Release
+          uses: softprops/action-gh-release@v2
+          with:
+            prerelease: true
+            generate_release_notes: true
+          if: ${{ steps.contains_tag_develop.outputs.retval == 'true'}}
