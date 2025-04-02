@@ -60,6 +60,7 @@ jobs:
             reference: "main"
             tag: "${{ github.ref }}"
         - name: Check if tag belong to commit in develop branch
+          continue-on-error: true
           uses: rickstaa/action-contains-tag@v1
           id: contains_tag_develop
           with:
