@@ -452,8 +452,8 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	jks_secret_name := instance.Name + "-jks"
 	err = r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
 	if err == nil {
-		if jks_secret.ObjectMeta.Annotations[CAVersionKey] == clusterSecret.ObjectMeta.ResourceVersion &&
-			jks_secret.ObjectMeta.Annotations[userVersionKey] == userSecret.ObjectMeta.ResourceVersion {
+		if jks_secret.Annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
+			jks_secret.Annotations[userVersionKey] == userSecret.ResourceVersion {
 			logger.Info("JKS secret is up-to-date")
 			return nil, nil
 		}
@@ -490,8 +490,8 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 				"user": instance.Name,
 			},
 			Annotations: map[string]string{
-				CAVersionKey:   clusterSecret.ObjectMeta.ResourceVersion,
-				userVersionKey: userSecret.ObjectMeta.ResourceVersion,
+				CAVersionKey:   clusterSecret.ResourceVersion,
+				userVersionKey: userSecret.ResourceVersion,
 			},
 		},
 		Type: v1.SecretTypeOpaque,

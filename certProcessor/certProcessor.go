@@ -251,7 +251,6 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 		}
 		p12_path = userKeyFilep12.Name()
 	}
-	defer os.Remove(p12_path)
 	defer func() {
 		err := os.Remove(p12_path)
 		if err != nil {
@@ -260,7 +259,6 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 	}()
 
 	keystore_path := tempDir + "/" + "client.keystore.jks"
-	defer os.Remove(keystore_path)
 	defer func() {
 		err := os.Remove(keystore_path)
 		if err != nil {
