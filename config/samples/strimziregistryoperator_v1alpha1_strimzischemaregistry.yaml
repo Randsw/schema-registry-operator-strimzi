@@ -1,0 +1,9 @@
+apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+kind: StrimziSchemaRegistry
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-schema
+    app.kubernetes.io/managed-by: kustomize
+  name: strimzischemaregistry-sample
+spec:
+  # TODO(user): Add fields here

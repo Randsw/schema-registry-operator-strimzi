@@ -1,0 +1,23 @@
+# permissions for end users to view strimzischemaregistries.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-schema
+    app.kubernetes.io/managed-by: kustomize
+  name: strimzischemaregistry-viewer-role
+rules:
+- apiGroups:
+  - strimziregistryoperator.randsw.code
+  resources:
+  - strimzischemaregistries
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - strimziregistryoperator.randsw.code
+  resources:
+  - strimzischemaregistries/status
+  verbs:
+  - get

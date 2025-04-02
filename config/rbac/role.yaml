@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - strimziregistryoperator.randsw.code
+  resources:
+  - strimzischemaregistries
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - strimziregistryoperator.randsw.code
+  resources:
+  - strimzischemaregistries/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - strimziregistryoperator.randsw.code
+  resources:
+  - strimzischemaregistries/status
+  verbs:
+  - get
+  - patch
+  - update

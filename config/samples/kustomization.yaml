@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- strimziregistryoperator_v1alpha1_strimzischemaregistry.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
