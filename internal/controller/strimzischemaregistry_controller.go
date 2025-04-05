@@ -78,6 +78,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		//TODO Renew cluster secret
 	}
 
+	//TODO Take secret and ssr by name and check if secret not changed
+
 	// ssrList := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
 	// err := r.List(ctx, ssrList)
 	// if err != nil {
