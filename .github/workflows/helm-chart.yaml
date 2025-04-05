@@ -10,12 +10,12 @@ on:
       - 'main'
       - "[0-9]+-.*"
     paths:
-      - 'helm-chart/strimzi-schema-registry-operator/**/*.yaml'
+      - 'helm-chart/ssr-operator/**/*.yaml'
   pull_request:
     branches:
       - 'main'
     paths:
-      - 'helm-chart/strimzi-schema-registry-operator/**/*.yaml'
+      - 'helm-chart/ssr-operator/**/*.yaml'
 permissions:
   contents: write
 jobs:
@@ -45,8 +45,8 @@ jobs:
         with:
           files_yaml: |
             helm:
-              - helm-chart/strimzi-schema-registry-operator/**/*.{yaml,tpl}
-              - '!helm-chart/strimzi-schema-registry-operator/Chart.yaml'
+              - helm-chart/ssr-operator/**/*.{yaml,tpl}
+              - '!helm-chart/ssr-operator/Chart.yaml'
 
       - name: Run chart-testing (lint)
         run: ct lint --config ct.yaml --all
@@ -83,10 +83,10 @@ jobs:
         with:
           files_yaml: |
             helm:
-              - helm-chart/strimzi-schema-registry-operator/*.{yaml,tpl}
-              - '!helm-chart/strimzi-schema-registry-operator/Chart.yaml'
+              - helm-chart/ssr-operator/*.{yaml,tpl}
+              - '!helm-chart/ssr-operator/Chart.yaml'
             chart_version:
-              - 'helm-chart/strimzi-schema-registry-operator/Chart.yaml'
+              - 'helm-chart/ssr-operator/Chart.yaml'
 
       - name: Install PyBump
         run: |
@@ -97,14 +97,14 @@ jobs:
       - name: Automated Version Bump
         id: version-bump
         run: |
-          echo "VER=$(pybump bump --file helm-chart/strimzi-schema-registry-operator/Chart.yaml --level patch)" >> $GITHUB_OUTPUT
+          echo "VER=$(pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch)" >> $GITHUB_OUTPUT
         shell: bash
         if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true' && steps.changed-files-helm-chart.outputs.chart_version_any_changed != 'true' && github.ref == 'refs/heads/main'
 
       - name: Output Name
         id: chart-name
         run: |
-          echo "::set-output name=chart::$(basename helm-chart/strimzi-schema-registry-operator)"
+          echo "::set-output name=chart::$(basename helm-chart/ssr-operator)"
         shell: bash
         if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true' && steps.changed-files-helm-chart.outputs.chart_version_any_changed != 'true' && github.ref == 'refs/heads/main'
 
@@ -116,7 +116,7 @@ jobs:
 
       - name: GIT Commit
         run: |
-          git add helm-chart/strimzi-schema-registry-operator/Chart.yaml
+          git add helm-chart/ssr-operator/Chart.yaml
           git commit -m "Automatic bump Helm chart version to ${{ steps.version-bump.outputs.VER }}"
         if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true' && steps.changed-files-helm-chart.outputs.chart_version_any_changed != 'true' && github.ref == 'refs/heads/main'
 
