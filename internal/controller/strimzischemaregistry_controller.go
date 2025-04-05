@@ -197,13 +197,16 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		).
 		WithEventFilter(predicate.Funcs{
 			DeleteFunc: func(e event.DeleteEvent) bool {
-				return true
+				return false
 			},
 			CreateFunc: func(e event.CreateEvent) bool {
 				return true
 			},
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				return true
+			},
+			GenericFunc: func(e event.GenericEvent) bool {
+				return false
 			},
 		}).
 		Complete(r)
