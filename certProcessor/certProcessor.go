@@ -239,11 +239,7 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 		}
 
 		// Save p12 certificate to temporary file
-		p12Data, err := Decode_secret_field(userp12)
-		if err != nil {
-			cp.log.Error(err, "Failed to decode p12 content from base64")
-			return nil, "", err
-		}
+		p12Data := userp12
 		_, err = userKeyFilep12.Write([]byte(p12Data))
 		if err != nil {
 			cp.log.Error(err, "Error writing to temp file", "File", userKeyFilep12.Name())

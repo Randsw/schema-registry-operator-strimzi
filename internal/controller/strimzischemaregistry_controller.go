@@ -18,7 +18,8 @@ package controller
 
 import (
 	"context"
-	"encoding/base64"
+
+	go_err "errors"
 	"strings"
 
 	kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
@@ -37,6 +38,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -68,6 +70,29 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	_ = log.FromContext(ctx)
 	logger := log.FromContext(ctx).WithValues("StrimziSchemaRegistry", req.NamespacedName)
 
+	// Reconcile watch deployment, StrimziSchemaRegistry and secret managed by Strimzi operator
+
+	//TODO Check if reconcile triggered by secret change and renew secret
+
+	if strings.HasSuffix(req.Name, "cluster-ca-cert") {
+		logger.Info("Kafka cluster ca cert is changed")
+		//TODO Renew cluster secret
+	}
+
+	//TODO Take secret and ssr by name and check if secret not changed
+
+	// ssrList := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+	// err := r.List(ctx, ssrList)
+	// if err != nil {
+	// 	logger.Info("Schema registry not found. No action is needed")
+	// 	return ctrl.Result{}, nil
+	// }
+	// for _, ssr := range ssrList{
+	// 	if strings.HasSuffix(ssr.Name, "cluster-ca-cert")
+	// 		logger.Info("Cluster secret")
+	// 	}
+	// }
+
 	logger.Info("Reconciling StrimziSchemaRegistry", "Request name", req.Name, "request namespace", req.Namespace)
 
 	instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
@@ -83,12 +108,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		// Error reading the object - requeue the request.
 		logger.Error(err, "Failed to get StrimziSchemaRegistry. May be it is a Secret")
-		//TODO Secret renew
 		return ctrl.Result{}, err
 	}
 	// Add finalizer for metrics
 	if !controllerutil.ContainsFinalizer(instance, finalizer) {
-		logger.Info("Adding Finalizer for CascadeAutoOperator")
+		logger.Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
 		controllerutil.AddFinalizer(instance, finalizer)
 		if err = r.Update(ctx, instance); err != nil {
 			logger.Error(err, "Failed to update custom resource to add finalizer")
@@ -153,27 +177,17 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
-		Owns(&apps.Deployment{}).
+		Owns(&apps.Deployment{}).WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
-			&v1.Secret{}, // Watch the Busybox CR
+			&v1.Secret{}, // Watch the secret
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// Check if the Busybox resource has the label 'backup-needed: "true"'
-				if _, ok := obj.GetLabels()["strimzi.io/component-type"]; ok {
+				// Check if the Secret resource has the label 'strimzi.io/cluster'
+				if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
 					return []reconcile.Request{
 						{
 							NamespacedName: types.NamespacedName{
-								Name:      obj.GetName(),      // Reconcile the associated BackupBusybox resource
-								Namespace: obj.GetNamespace(), // Use the namespace of the changed Busybox
-							},
-						},
-					}
-				}
-				if _, ok := obj.GetLabels()["strimzi.io/component-type"]; ok {
-					return []reconcile.Request{
-						{
-							NamespacedName: types.NamespacedName{
-								Name:      obj.GetName(),      // Reconcile the associated BackupBusybox resource
-								Namespace: obj.GetNamespace(), // Use the namespace of the changed Busybox
+								Name:      obj.GetName(),      // Reconcile the associated secret resource
+								Namespace: obj.GetNamespace(), // Use the namespace of the changed secret
 							},
 						},
 					}
@@ -182,7 +196,20 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 				return []reconcile.Request{}
 			}),
 		).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		WithEventFilter(predicate.Funcs{
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				return false
+			},
+			CreateFunc: func(e event.CreateEvent) bool {
+				return true
+			},
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				return true
+			},
+			GenericFunc: func(e event.GenericEvent) bool {
+				return false
+			},
+		}).
 		Complete(r)
 }
 
@@ -193,15 +220,12 @@ func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication(ctx conte
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) *apps.Deployment {
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Service.Name", instance.Name+"-deploy")
 	keyPrefix := "strimziregistryoperator.randsw.code"
-
-	ls := labelsForCascadeAutoOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image)
+	var defaultMode int32 = 420
+	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image)
 
 	var podSpec = instance.Spec.Template
 
 	podSpec.Labels = ls
-
-	// Use special service account for strimzi-schema-registry-operator. SA created by heml-chart
-	podSpec.Spec.ServiceAccountName = "strimzi-schema-registry-operator"
 
 	// Create Schema registry configuration
 	var podEnv []v1.EnvVar
@@ -240,7 +264,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 		SecretKeyRef: &v1.SecretKeySelector{
 			LocalObjectReference: v1.LocalObjectReference{
-				Name: instance.Name + "jks",
+				Name: instance.Name + "-jks",
 			},
 			Key: "keystore_password",
 		},
@@ -249,7 +273,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 		SecretKeyRef: &v1.SecretKeySelector{
 			LocalObjectReference: v1.LocalObjectReference{
-				Name: instance.Name + "jks",
+				Name: instance.Name + "-jks",
 			},
 			Key: "truststore_password",
 		},
@@ -265,16 +289,17 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	if instance.Spec.SecureHTTP {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "https://0.0.0.0:8085"})
-		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"})
-		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
-			SecretKeyRef: &v1.SecretKeySelector{
-				LocalObjectReference: v1.LocalObjectReference{
-					Name: instance.Name + "jks",
-				},
-				Key: "truststore_password",
-			},
-		},
-		})
+		//TODO Trustore if client use tls auth to schema registry
+		//podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"})
+		// podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+		// 	SecretKeyRef: &v1.SecretKeySelector{
+		// 		LocalObjectReference: v1.LocalObjectReference{
+		// 			Name: instance.Name + "-jks",
+		// 		},
+		// 		Key: "truststore_password",
+		// 	},
+		// },
+		// })
 		if instance.Spec.TLSSecretName == "" {
 			//TODO Create own server key and cert and sign with kafka-cluster-ca-cert. Keystore and key are same!!!!!
 			//TODO Mount as volume
@@ -283,16 +308,32 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			podVolume = append(podVolume, v1.Volume{Name: "http-tls",
 				VolumeSource: v1.VolumeSource{
 					Secret: &v1.SecretVolumeSource{
-						SecretName: instance.Name + "jks",
+						SecretName:  instance.Spec.TLSSecretName,
+						DefaultMode: &defaultMode,
 					}},
 			})
-			podSpec.Spec.Volumes[0].Secret.SecretName = instance.Spec.TLSSecretName
+			containerVolumeMount = append(containerVolumeMount, v1.VolumeMount{
+				Name:      "http-tls",
+				MountPath: "/var/tls",
+				ReadOnly:  true,
+			})
 			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 				SecretKeyRef: &v1.SecretKeySelector{
 					LocalObjectReference: v1.LocalObjectReference{
-						Name: instance.Name + "jks",
+						Name: instance.Name + "-tls",
 					},
-					Key: "truststore_password",
+					Key: "tls-password",
+				},
+			},
+			})
+			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", Value: "NONE"})
+			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", Value: "/var/tls/tls-keystore.jks"})
+			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEY_PASSWORD", ValueFrom: &v1.EnvVarSource{
+				SecretKeyRef: &v1.SecretKeySelector{
+					LocalObjectReference: v1.LocalObjectReference{
+						Name: instance.Name + "-tls",
+					},
+					Key: "tls-password",
 				},
 			},
 			})
@@ -300,12 +341,12 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	} else {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
 	}
-	var defaultMode int32 = 420
+
 	// Mount secret as volumes
 	podVolume = append(podVolume, v1.Volume{Name: "tls",
 		VolumeSource: v1.VolumeSource{
 			Secret: &v1.SecretVolumeSource{
-				SecretName:  instance.Name + "jks",
+				SecretName:  instance.Name + "-jks",
 				DefaultMode: &defaultMode,
 			}},
 	})
@@ -313,7 +354,6 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podSpec.Spec.Containers[0].Env = podEnv
 	podSpec.Spec.Volumes = podVolume
 	podSpec.Spec.Containers[0].VolumeMounts = containerVolumeMount
-	podSpec.Spec.ServiceAccountName = instance.Name
 
 	secret, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
 	if err != nil {
@@ -347,7 +387,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	return dep
 }
 
-func labelsForCascadeAutoOperator(name_app string, name_cr string, image string) map[string]string {
+func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string, image string) map[string]string {
 	return map[string]string{"app": name_app, "strimzi-schema-registry": name_cr,
 		"app.kubernetes.io/instance":   name_app,
 		"app.kubernetes.io/managed-by": "strimzi-registry-operator",
@@ -389,10 +429,12 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 		if *listener.Name == kafkaListener {
 			kafkaBootstrapServer = *listener.BootstrapServers
 			logger.Info("Found specified kafka cluster listeners.", "Listener", kafkaListener, "kafkaBootstap", kafkaBootstrapServer)
+			logger.Info("KafkaBootstap", "Address", kafkaBootstrapServer)
+			return kafkaBootstrapServer, kafkaClusterName, nil
 		}
 	}
-	logger.Info("KafkaBootstap", "Address", kafkaBootstrapServer)
-	return kafkaBootstrapServer, kafkaClusterName, nil
+	logger.Info("No listeners found. Check CR config", "Listener", kafkaListener)
+	return "", "", go_err.New("cant find bootstrap address")
 }
 
 func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger,
@@ -404,7 +446,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	userSecret := &v1.Secret{}
 	// Get cluster secret
 	if clusterCASecret == nil {
-		logger.Info("Searching for secret", "Secret", clusterName+"-cluster-ca-cert")
+		logger.Info("Searching for cluster CA secret", "Secret", clusterName+"-cluster-ca-cert")
 		err := r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca-cert", Namespace: instance.Namespace}, clusterSecret)
 		if err != nil {
 			return nil, err
@@ -413,14 +455,12 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		clusterSecret = clusterCASecret
 	}
 	logger.Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
-	clusterCACert, err := certprocessor.Decode_secret_field(string(clusterSecret.Data["ca.crt"]))
-	if err != nil {
-		return nil, err
-	}
+
+	clusterCACert := string(clusterSecret.Data["ca.crt"])
 
 	if userCASecret == nil {
-		logger.Info("Searching for secret", "Secret", instance.Name+"-cluster-ca-cert")
-		err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
+		logger.Info("Searching for user CA secret", "Secret", instance.Name)
+		err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
 		if err != nil {
 			return nil, err
 		}
@@ -428,29 +468,16 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		userSecret = userCASecret
 	}
 	logger.Info("Client certification version", "Version", userSecret.ResourceVersion)
-	clientCACert, err := certprocessor.Decode_secret_field(string(userSecret.Data["ca.crt"]))
-	if err != nil {
-		return nil, err
-	}
-	clientCert, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.crt"]))
-	if err != nil {
-		return nil, err
-	}
-	clientKey, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.key"]))
-	if err != nil {
-		return nil, err
-	}
-
-	userPassword, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.password"]))
-	if err != nil {
-		return nil, err
-	}
-
+	clientCACert := string(userSecret.Data["ca.crt"])
+	clientCert := string(userSecret.Data["user.crt"])
+	clientKey := string(userSecret.Data["user.key"])
+	userPassword := string(userSecret.Data["user.password"])
 	clientp12 := string(userSecret.Data["user.p12"])
 
+	logger.Info("Creating secret for schema registry")
 	jks_secret := &v1.Secret{}
 	jks_secret_name := instance.Name + "-jks"
-	err = r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
+	err := r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
 	if err == nil {
 		if jks_secret.Annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
 			jks_secret.Annotations[userVersionKey] == userSecret.ResourceVersion {
@@ -466,7 +493,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		}
 	}
 	if err != nil && !errors.IsNotFound(err) {
-		logger.Error(err, "Failed to get Deployment")
+		logger.Error(err, "Failed to get schema registry secret")
 		return nil, err
 	}
 	logger.Info("Creating new JKS secret", "Secret Name", jks_secret_name)
@@ -496,10 +523,10 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		},
 		Type: v1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			"truststore.jks":      []byte(base64.StdEncoding.EncodeToString([]byte(truststore))),
-			"keystore.jks":        []byte(base64.StdEncoding.EncodeToString([]byte(keystore))),
-			"truststore_password": []byte(base64.StdEncoding.EncodeToString([]byte(truststore_password))),
-			"keystore_password":   []byte(base64.StdEncoding.EncodeToString([]byte(keystore_password))),
+			"truststore.jks":      []byte(truststore),
+			"keystore.jks":        []byte(keystore),
+			"truststore_password": []byte(truststore_password),
+			"keystore_password":   []byte(keystore_password),
 		},
 	}
 
@@ -538,7 +565,7 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 
 	err := ctrl.SetControllerReference(instance, svc, r.Scheme)
 	if err != nil {
-		logger.Error(err, "Failed to set CascadeAutoOperator instance as the owner and controller for service")
+		logger.Error(err, "Failed to set StrimziSchemaRegistryOperator instance as the owner and controller for service")
 	}
 	return svc
 }
