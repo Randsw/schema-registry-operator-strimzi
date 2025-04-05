@@ -69,6 +69,10 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	_ = log.FromContext(ctx)
 	logger := log.FromContext(ctx).WithValues("StrimziSchemaRegistry", req.NamespacedName)
 
+	// Reconcile watch deployment, StrimziSchemaRegistry and secret managed by Strimzi operator
+
+	//TODO Check if reconcile triggered by secret change and renew secret
+
 	logger.Info("Reconciling StrimziSchemaRegistry", "Request name", req.Name, "request namespace", req.Namespace)
 
 	instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
@@ -84,7 +88,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		// Error reading the object - requeue the request.
 		logger.Error(err, "Failed to get StrimziSchemaRegistry. May be it is a Secret")
-		//TODO Secret renew
 		return ctrl.Result{}, err
 	}
 	// Add finalizer for metrics
