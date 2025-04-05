@@ -220,7 +220,7 @@ func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication(ctx conte
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) *apps.Deployment {
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Service.Name", instance.Name+"-deploy")
 	keyPrefix := "strimziregistryoperator.randsw.code"
-
+	var defaultMode int32 = 420
 	ls := labelsForCascadeAutoOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image)
 
 	var podSpec = instance.Spec.Template
@@ -264,7 +264,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 		SecretKeyRef: &v1.SecretKeySelector{
 			LocalObjectReference: v1.LocalObjectReference{
-				Name: instance.Name + "jks",
+				Name: instance.Name + "-jks",
 			},
 			Key: "keystore_password",
 		},
@@ -273,7 +273,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 		SecretKeyRef: &v1.SecretKeySelector{
 			LocalObjectReference: v1.LocalObjectReference{
-				Name: instance.Name + "jks",
+				Name: instance.Name + "-jks",
 			},
 			Key: "truststore_password",
 		},
@@ -289,16 +289,17 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	if instance.Spec.SecureHTTP {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "https://0.0.0.0:8085"})
-		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"})
-		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
-			SecretKeyRef: &v1.SecretKeySelector{
-				LocalObjectReference: v1.LocalObjectReference{
-					Name: instance.Name + "jks",
-				},
-				Key: "truststore_password",
-			},
-		},
-		})
+		//TODO Trustore if client use tls auth to schema registry
+		//podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"})
+		// podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+		// 	SecretKeyRef: &v1.SecretKeySelector{
+		// 		LocalObjectReference: v1.LocalObjectReference{
+		// 			Name: instance.Name + "-jks",
+		// 		},
+		// 		Key: "truststore_password",
+		// 	},
+		// },
+		// })
 		if instance.Spec.TLSSecretName == "" {
 			//TODO Create own server key and cert and sign with kafka-cluster-ca-cert. Keystore and key are same!!!!!
 			//TODO Mount as volume
@@ -307,16 +308,32 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			podVolume = append(podVolume, v1.Volume{Name: "http-tls",
 				VolumeSource: v1.VolumeSource{
 					Secret: &v1.SecretVolumeSource{
-						SecretName: instance.Name + "jks",
+						SecretName:  instance.Spec.TLSSecretName,
+						DefaultMode: &defaultMode,
 					}},
 			})
-			podSpec.Spec.Volumes[0].Secret.SecretName = instance.Spec.TLSSecretName
+			containerVolumeMount = append(containerVolumeMount, v1.VolumeMount{
+				Name:      "http-tls",
+				MountPath: "/var/tls",
+				ReadOnly:  true,
+			})
 			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 				SecretKeyRef: &v1.SecretKeySelector{
 					LocalObjectReference: v1.LocalObjectReference{
-						Name: instance.Name + "jks",
+						Name: instance.Name + "-tls",
 					},
-					Key: "truststore_password",
+					Key: "tls-password",
+				},
+			},
+			})
+			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", Value: "NONE"})
+			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", Value: "/var/tls/tls-keystore.jks"})
+			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEY_PASSWORD", ValueFrom: &v1.EnvVarSource{
+				SecretKeyRef: &v1.SecretKeySelector{
+					LocalObjectReference: v1.LocalObjectReference{
+						Name: instance.Name + "-tls",
+					},
+					Key: "tls-password",
 				},
 			},
 			})
@@ -324,7 +341,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	} else {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
 	}
-	var defaultMode int32 = 420
+
 	// Mount secret as volumes
 	podVolume = append(podVolume, v1.Volume{Name: "tls",
 		VolumeSource: v1.VolumeSource{
