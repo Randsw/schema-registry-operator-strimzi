@@ -73,6 +73,23 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 
 	//TODO Check if reconcile triggered by secret change and renew secret
 
+	if strings.HasSuffix(req.Name, "cluster-ca-cert") {
+		logger.Info("Kafka cluster ca cert is changed")
+		//TODO Renew cluster secret
+	}
+
+	// ssrList := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+	// err := r.List(ctx, ssrList)
+	// if err != nil {
+	// 	logger.Info("Schema registry not found. No action is needed")
+	// 	return ctrl.Result{}, nil
+	// }
+	// for _, ssr := range ssrList{
+	// 	if strings.HasSuffix(ssr.Name, "cluster-ca-cert")
+	// 		logger.Info("Cluster secret")
+	// 	}
+	// }
+
 	logger.Info("Reconciling StrimziSchemaRegistry", "Request name", req.Name, "request namespace", req.Namespace)
 
 	instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
@@ -178,10 +195,10 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		).
 		WithEventFilter(predicate.Funcs{
 			DeleteFunc: func(e event.DeleteEvent) bool {
-				return false
+				return true
 			},
 			CreateFunc: func(e event.CreateEvent) bool {
-				return false
+				return true
 			},
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				return true
