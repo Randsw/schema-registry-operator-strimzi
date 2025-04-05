@@ -37,6 +37,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -153,12 +154,12 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
-		Owns(&apps.Deployment{}).
+		Owns(&apps.Deployment{}).WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
 			&v1.Secret{}, // Watch the Busybox CR
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				// Check if the Secret resource has the label 'strimzi.io/component-type'
-				if _, ok := obj.GetLabels()["strimzi.io/component-type"]; ok {
+				if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
 					return []reconcile.Request{
 						{
 							NamespacedName: types.NamespacedName{
@@ -172,7 +173,17 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 				return []reconcile.Request{}
 			}),
 		).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		WithEventFilter(predicate.Funcs{
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				return false
+			},
+			CreateFunc: func(e event.CreateEvent) bool {
+				return false
+			},
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				return true
+			},
+		}).
 		Complete(r)
 }
 
