@@ -1,0 +1,191 @@
+# Default values for cascadeAutoOperator.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/randsw/strimzi-schema-registry-operator
+  pullPolicy: Always
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "latest"
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
+  securityContext:
+    allowPrivilegeEscalation: false
+    # capabilities:
+    #   drop:
+    #   - ALL
+    # readOnlyRootFilesystem: true
+    # runAsNonRoot: true
+    # runAsUser: 1000
+
+imagePullSecrets: []
+nameOverride: "strimzi-schema-registry-operator"
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: "strimzi-schema-registry-operator"
+
+podAnnotations:
+  kubectl.kubernetes.io/default-container: manager
+
+podSecurityContext:
+  runAsNonRoot: true
+
+service:
+  type: ClusterIP
+  port: 8443
+
+terminationGracePeriodSeconds: 10
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# RBAC Configuration for operator
+cluster_roles:
+  - enabled: true
+    cluster_role_binding: true
+    name: "manager-role"
+    kind: "ServiceAccount"
+    labels: {}
+    rules:
+      - apiGroups:
+        - "apps"
+        resources:
+        - deployments
+        verbs:
+        - create
+        - delete
+        - get
+        - list
+        - patch
+        - update
+        - watch
+      - apiGroups:
+        - strimziregistryoperator.randsw.code
+        resources:
+        - strimzischemaregistrys
+        verbs:
+        - create
+        - delete
+        - get
+        - list
+        - patch
+        - update
+        - watch
+      - apiGroups:
+        - strimziregistryoperator.randsw.code
+        resources:
+        - strimzischemaregistrys/finalizers
+        verbs:
+        - update
+      - apiGroups:
+        - strimziregistryoperator.randsw.code
+        resources:
+        - strimzischemaregistrys/status
+        verbs:
+        - get
+        - patch
+        - update
+      - apiGroups:
+        - ""
+        resources:
+        - secrets
+        - services
+        verbs:
+        - create
+        - delete
+        - get
+        - list
+        - patch
+        - update
+        - watch
+  - enabled: true
+    name: "metrics-reader"
+    cluster_role_binding: false
+    kind: "ServiceAccount"
+    labels: {}
+    rules:
+      - nonResourceURLs:
+        - /metrics
+        verbs:
+          - get
+  - enabled: true
+    name: "proxy-role"
+    cluster_role_binding: true
+    kind: "ServiceAccount"
+    labels: {}
+    rules:
+      - apiGroups:
+        - authentication.k8s.io
+        resources:
+        - tokenreviews
+        verbs:
+        - create
+      - apiGroups:
+        - authorization.k8s.io
+        resources:
+        - subjectaccessreviews
+        verbs:
+        - create
+
+roles:
+  - enabled: true
+    name: "leader-election-role"
+    kind: "ServiceAccount"
+    role_binding: true
+    labels: {}
+    rules:
+      - apiGroups:
+        - ""
+        resources:
+        - configmaps
+        verbs:
+        - get
+        - list
+        - watch
+        - create
+        - update
+        - patch
+        - delete
+      - apiGroups:
+        - coordination.k8s.io
+        resources:
+        - leases
+        verbs:
+        - get
+        - list
+        - watch
+        - create
+        - update
+        - patch
+        - delete
+      - apiGroups:
+        - ""
+        resources:
+        - events
+        verbs:
+        - create
+        - patch
