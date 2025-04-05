@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/base64"
 	"os"
 	"time"
 
@@ -480,7 +479,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Namespace: namespace.Name,
 				},
 				Data: map[string][]byte{
-					"ca.crt": []byte(base64.StdEncoding.EncodeToString([]byte(clusterCACert()))),
+					"ca.crt": []byte(clusterCACert()),
 				},
 			}
 			Expect(k8sClient.Create(ctx, clusterSecret)).To(Succeed())
@@ -494,11 +493,11 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Namespace: namespace.Name,
 				},
 				Data: map[string][]byte{
-					"ca.crt":        []byte(base64.StdEncoding.EncodeToString([]byte(userCACert()))),
-					"user.crt":      []byte(base64.StdEncoding.EncodeToString([]byte(userCert()))),
-					"user.key":      []byte(base64.StdEncoding.EncodeToString([]byte(userKey()))),
+					"ca.crt":        []byte(userCACert()),
+					"user.crt":      []byte(userCert()),
+					"user.key":      []byte(userKey()),
 					"user.p12":      []byte(userp12()),
-					"user.password": []byte(base64.StdEncoding.EncodeToString([]byte("test1234"))),
+					"user.password": []byte("test1234"),
 				},
 			}
 			Expect(k8sClient.Create(ctx, clientSecret)).To(Succeed())

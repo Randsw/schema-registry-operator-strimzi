@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/base64"
 
 	go_err "errors"
 	"strings"
@@ -443,17 +442,12 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		clusterSecret = clusterCASecret
 	}
 	logger.Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
-	logger.Info("Debug", "Pure Secret", clusterSecret.Data["ca.crt"])
-	logger.Info("Debug", "String Secret", string(clusterSecret.Data["ca.crt"]))
-	clusterCACert, err := certprocessor.Decode_secret_field(string(clusterSecret.Data["ca.crt"]))
-	if err != nil {
-		logger.Error(err, "Decode cluster secret")
-		return nil, err
-	}
+
+	clusterCACert := string(clusterSecret.Data["ca.crt"])
 
 	if userCASecret == nil {
 		logger.Info("Searching for user CA secret", "Secret", instance.Name)
-		err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
+		err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
 		if err != nil {
 			return nil, err
 		}
@@ -461,31 +455,16 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		userSecret = userCASecret
 	}
 	logger.Info("Client certification version", "Version", userSecret.ResourceVersion)
-	clientCACert, err := certprocessor.Decode_secret_field(string(userSecret.Data["ca.crt"]))
-	if err != nil {
-		return nil, err
-	}
-	clientCert, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.crt"]))
-	if err != nil {
-		return nil, err
-	}
-	clientKey, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.key"]))
-	if err != nil {
-		return nil, err
-	}
-
-	userPassword, err := certprocessor.Decode_secret_field(string(userSecret.Data["user.password"]))
-	if err != nil {
-		return nil, err
-	}
-
+	clientCACert := string(userSecret.Data["ca.crt"])
+	clientCert := string(userSecret.Data["user.crt"])
+	clientKey := string(userSecret.Data["user.key"])
+	userPassword := string(userSecret.Data["user.password"])
 	clientp12 := string(userSecret.Data["user.p12"])
 
 	logger.Info("Creating secret for schema registry")
-
 	jks_secret := &v1.Secret{}
 	jks_secret_name := instance.Name + "-jks"
-	err = r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
+	err := r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
 	if err == nil {
 		if jks_secret.Annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
 			jks_secret.Annotations[userVersionKey] == userSecret.ResourceVersion {
@@ -531,10 +510,10 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		},
 		Type: v1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			"truststore.jks":      []byte(base64.StdEncoding.EncodeToString([]byte(truststore))),
-			"keystore.jks":        []byte(base64.StdEncoding.EncodeToString([]byte(keystore))),
-			"truststore_password": []byte(base64.StdEncoding.EncodeToString([]byte(truststore_password))),
-			"keystore_password":   []byte(base64.StdEncoding.EncodeToString([]byte(keystore_password))),
+			"truststore.jks":      []byte(truststore),
+			"keystore.jks":        []byte(keystore),
+			"truststore_password": []byte(truststore_password),
+			"keystore_password":   []byte(keystore_password),
 		},
 	}
 
