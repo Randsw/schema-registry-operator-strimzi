@@ -329,7 +329,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podVolume = append(podVolume, v1.Volume{Name: "tls",
 		VolumeSource: v1.VolumeSource{
 			Secret: &v1.SecretVolumeSource{
-				SecretName:  instance.Name + "jks",
+				SecretName:  instance.Name + "-jks",
 				DefaultMode: &defaultMode,
 			}},
 	})
