@@ -96,6 +96,8 @@ jobs:
           tags: ghcr.io/randsw/strimzi-schema-registry-operator:test
           labels: ${{ steps.meta.outputs.labels }}
           push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
     Semantic-Release:
       if: ${{ github.event_name == 'push' }}
       needs: Test
