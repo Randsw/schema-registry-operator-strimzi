@@ -86,7 +86,7 @@ cluster_roles:
       - apiGroups:
         - strimziregistryoperator.randsw.code
         resources:
-        - strimzischemaregistrys
+        - strimzischemaregistries
         verbs:
         - create
         - delete
@@ -98,13 +98,13 @@ cluster_roles:
       - apiGroups:
         - strimziregistryoperator.randsw.code
         resources:
-        - strimzischemaregistrys/finalizers
+        - strimzischemaregistries/finalizers
         verbs:
         - update
       - apiGroups:
         - strimziregistryoperator.randsw.code
         resources:
-        - strimzischemaregistrys/status
+        - strimzischemaregistries/status
         verbs:
         - get
         - patch
