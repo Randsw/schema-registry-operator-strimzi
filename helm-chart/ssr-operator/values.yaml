@@ -39,7 +39,7 @@ serviceAccount:
   name: "strimzi-schema-registry-operator"
 
 podAnnotations:
-  kubectl.kubernetes.io/default-container: manager
+  kubectl.kubernetes.io/default-container: ssr-operator
 
 podSecurityContext:
   runAsNonRoot: true
@@ -109,6 +109,15 @@ cluster_roles:
         - get
         - patch
         - update
+      - apiGroups:
+        - kafka.strimzi.io
+        resources:
+        - kafkausers
+        - kafkas
+        verbs:
+        - get
+        - list
+        - watch
       - apiGroups:
         - ""
         resources:
