@@ -443,7 +443,8 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		clusterSecret = clusterCASecret
 	}
 	logger.Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
-	logger.Info("Secret", "Secret", clusterSecret.Data)
+	logger.Info("Debug", "Pure Secret", clusterSecret.Data["ca.crt"])
+	logger.Info("Debug", "String Secret", string(clusterSecret.Data["ca.crt"]))
 	clusterCACert, err := certprocessor.Decode_secret_field(string(clusterSecret.Data["ca.crt"]))
 	if err != nil {
 		logger.Error(err, "Decode cluster secret")
