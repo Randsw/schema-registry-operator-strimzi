@@ -221,7 +221,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Service.Name", instance.Name+"-deploy")
 	keyPrefix := "strimziregistryoperator.randsw.code"
 	var defaultMode int32 = 420
-	ls := labelsForCascadeAutoOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image)
+	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image)
 
 	var podSpec = instance.Spec.Template
 
@@ -387,7 +387,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	return dep
 }
 
-func labelsForCascadeAutoOperator(name_app string, name_cr string, image string) map[string]string {
+func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string, image string) map[string]string {
 	return map[string]string{"app": name_app, "strimzi-schema-registry": name_cr,
 		"app.kubernetes.io/instance":   name_app,
 		"app.kubernetes.io/managed-by": "strimzi-registry-operator",
@@ -565,7 +565,7 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 
 	err := ctrl.SetControllerReference(instance, svc, r.Scheme)
 	if err != nil {
-		logger.Error(err, "Failed to set CascadeAutoOperator instance as the owner and controller for service")
+		logger.Error(err, "Failed to set StrimziSchemaRegistryOperator instance as the owner and controller for service")
 	}
 	return svc
 }
