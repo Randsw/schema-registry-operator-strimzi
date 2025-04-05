@@ -407,7 +407,11 @@ func TestCreateKeystore(t *testing.T) {
 
 func TestCreateKeystorep12(t *testing.T) {
 	cp := NewCertProcessor(&logr.Logger{})
-	keystore, password, err := cp.CreateKeystore(userCACert(), userCert(), userKey(), userp12(), "test1234")
+	p12, err := Decode_secret_field(userp12())
+	if err != nil {
+		t.Error(err)
+	}
+	keystore, password, err := cp.CreateKeystore(userCACert(), userCert(), userKey(), p12, "test1234")
 	if err != nil {
 		t.Error(err)
 	}
