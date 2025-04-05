@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ssr-operator.name" . }}-metrics-service
+  labels:
+    {{- include "ssr-operator.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    {{- include "ssr-operator.selectorLabels" . | nindent 4 }}

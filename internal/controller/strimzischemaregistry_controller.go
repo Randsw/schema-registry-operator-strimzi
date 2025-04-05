@@ -200,8 +200,8 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	podSpec.Labels = ls
 
-	// Use special service account for cascade scenarion controller. SA created by heml-chart
-	podSpec.Spec.ServiceAccountName = "schema-registry-operator"
+	// Use special service account for strimzi-schema-registry-operator. SA created by heml-chart
+	podSpec.Spec.ServiceAccountName = "strimzi-schema-registry-operator"
 
 	// Create Schema registry configuration
 	var podEnv []v1.EnvVar
