@@ -227,9 +227,6 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	podSpec.Labels = ls
 
-	// Use special service account for strimzi-schema-registry-operator. SA created by heml-chart
-	podSpec.Spec.ServiceAccountName = "strimzi-schema-registry-operator"
-
 	// Create Schema registry configuration
 	var podEnv []v1.EnvVar
 	var podVolume []v1.Volume
@@ -340,7 +337,6 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podSpec.Spec.Containers[0].Env = podEnv
 	podSpec.Spec.Volumes = podVolume
 	podSpec.Spec.Containers[0].VolumeMounts = containerVolumeMount
-	podSpec.Spec.ServiceAccountName = instance.Name
 
 	secret, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
 	if err != nil {
