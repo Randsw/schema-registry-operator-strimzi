@@ -157,23 +157,13 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Watches(
 			&v1.Secret{}, // Watch the Busybox CR
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// Check if the Busybox resource has the label 'backup-needed: "true"'
+				// Check if the Secret resource has the label 'strimzi.io/component-type'
 				if _, ok := obj.GetLabels()["strimzi.io/component-type"]; ok {
 					return []reconcile.Request{
 						{
 							NamespacedName: types.NamespacedName{
-								Name:      obj.GetName(),      // Reconcile the associated BackupBusybox resource
-								Namespace: obj.GetNamespace(), // Use the namespace of the changed Busybox
-							},
-						},
-					}
-				}
-				if _, ok := obj.GetLabels()["strimzi.io/component-type"]; ok {
-					return []reconcile.Request{
-						{
-							NamespacedName: types.NamespacedName{
-								Name:      obj.GetName(),      // Reconcile the associated BackupBusybox resource
-								Namespace: obj.GetNamespace(), // Use the namespace of the changed Busybox
+								Name:      obj.GetName(),      // Reconcile the associated secret resource
+								Namespace: obj.GetNamespace(), // Use the namespace of the changed secret
 							},
 						},
 					}
