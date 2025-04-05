@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"encoding/base64"
+
+	go_err "errors"
 	"strings"
 
 	kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
@@ -111,7 +113,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	// Add finalizer for metrics
 	if !controllerutil.ContainsFinalizer(instance, finalizer) {
-		logger.Info("Adding Finalizer for CascadeAutoOperator")
+		logger.Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
 		controllerutil.AddFinalizer(instance, finalizer)
 		if err = r.Update(ctx, instance); err != nil {
 			logger.Error(err, "Failed to update custom resource to add finalizer")
@@ -178,9 +180,9 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
 		Owns(&apps.Deployment{}).WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
-			&v1.Secret{}, // Watch the Busybox CR
+			&v1.Secret{}, // Watch the secret
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// Check if the Secret resource has the label 'strimzi.io/component-type'
+				// Check if the Secret resource has the label 'strimzi.io/cluster'
 				if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
 					return []reconcile.Request{
 						{
@@ -415,10 +417,12 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 		if *listener.Name == kafkaListener {
 			kafkaBootstrapServer = *listener.BootstrapServers
 			logger.Info("Found specified kafka cluster listeners.", "Listener", kafkaListener, "kafkaBootstap", kafkaBootstrapServer)
+			logger.Info("KafkaBootstap", "Address", kafkaBootstrapServer)
+			return kafkaBootstrapServer, kafkaClusterName, nil
 		}
 	}
-	logger.Info("KafkaBootstap", "Address", kafkaBootstrapServer)
-	return kafkaBootstrapServer, kafkaClusterName, nil
+	logger.Info("No listeners found. Check CR config", "Listener", kafkaListener)
+	return "", "", go_err.New("cant find bootstrap address")
 }
 
 func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger,
@@ -430,7 +434,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	userSecret := &v1.Secret{}
 	// Get cluster secret
 	if clusterCASecret == nil {
-		logger.Info("Searching for secret", "Secret", clusterName+"-cluster-ca-cert")
+		logger.Info("Searching for cluster CA secret", "Secret", clusterName+"-cluster-ca-cert")
 		err := r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca-cert", Namespace: instance.Namespace}, clusterSecret)
 		if err != nil {
 			return nil, err
@@ -439,13 +443,14 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		clusterSecret = clusterCASecret
 	}
 	logger.Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
+	logger.Info("Secret", "Secret", clusterSecret)
 	clusterCACert, err := certprocessor.Decode_secret_field(string(clusterSecret.Data["ca.crt"]))
 	if err != nil {
 		return nil, err
 	}
 
 	if userCASecret == nil {
-		logger.Info("Searching for secret", "Secret", instance.Name+"-cluster-ca-cert")
+		logger.Info("Searching for user CA secret", "Secret", instance.Name)
 		err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
 		if err != nil {
 			return nil, err
@@ -474,6 +479,8 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 
 	clientp12 := string(userSecret.Data["user.p12"])
 
+	logger.Info("Creating secret for schema registry")
+
 	jks_secret := &v1.Secret{}
 	jks_secret_name := instance.Name + "-jks"
 	err = r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
@@ -492,7 +499,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		}
 	}
 	if err != nil && !errors.IsNotFound(err) {
-		logger.Error(err, "Failed to get Deployment")
+		logger.Error(err, "Failed to get schema registry secret")
 		return nil, err
 	}
 	logger.Info("Creating new JKS secret", "Secret Name", jks_secret_name)
