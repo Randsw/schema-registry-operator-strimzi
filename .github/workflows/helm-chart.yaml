@@ -8,7 +8,7 @@ on:
       - 'cicd/**'
       - 'test/**'
       - 'main'
-      - "[0-9]+-.*"
+      - '[0-9]+-*'
     paths:
       - 'helm-chart/ssr-operator/**/*.yaml'
   pull_request:
