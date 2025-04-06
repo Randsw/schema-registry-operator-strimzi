@@ -32,13 +32,14 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -110,6 +111,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "Failed to get StrimziSchemaRegistry. May be it is a Secret")
 		return ctrl.Result{}, err
 	}
+
 	// Add finalizer for metrics
 	if !controllerutil.ContainsFinalizer(instance, finalizer) {
 		logger.Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
@@ -122,7 +124,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
 	if isApplicationMarkedToBeDeleted {
 		if controllerutil.ContainsFinalizer(instance, finalizer) {
-			r.finalizeApplication(ctx, instance)
+			r.finalizeApplication()
 			controllerutil.RemoveFinalizer(instance, finalizer)
 			err := r.Update(ctx, instance)
 			if err != nil {
@@ -153,6 +155,16 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	secret := &v1.Secret{}
+	err = r.Get(ctx, req.NamespacedName, secret)
+	if err != nil {
+		logger.Error(err, "Failed to get StrimziSchemaRegistry User secret.")
+	}
+	if secret.ResourceVersion != found.Annotations["strimziregistryoperator.randsw.code/jksVersion"] {
+		logger.Info("Kafka user for ssr secret is changed")
+		//TODO Renew cluster secret
+	}
+
 	foundSvc := &v1.Service{}
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, foundSvc)
 	if err != nil && errors.IsNotFound(err) {
@@ -181,39 +193,47 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Watches(
 			&v1.Secret{}, // Watch the secret
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// Check if the Secret resource has the label 'strimzi.io/cluster'
-				if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
-					return []reconcile.Request{
-						{
-							NamespacedName: types.NamespacedName{
-								Name:      obj.GetName(),      // Reconcile the associated secret resource
-								Namespace: obj.GetNamespace(), // Use the namespace of the changed secret
-							},
-						},
+				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+				listOps := &client.ListOptions{
+					FieldSelector: fields.OneTermEqualSelector(".metadata.Name", obj.GetName()),
+					Namespace:     obj.GetNamespace(),
+				}
+				err := r.List(ctx, attachedStrimziRegistryOperators, listOps)
+				if err != nil {
+					return []reconcile.Request{}
+				}
+				requests := make([]reconcile.Request, len(attachedStrimziRegistryOperators.Items))
+				for i, item := range attachedStrimziRegistryOperators.Items {
+					// Check if the Secret resource has the label 'strimzi.io/cluster'
+					if obj.GetName() == item.GetName() {
+						if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
+							requests[i] = reconcile.Request{
+								NamespacedName: types.NamespacedName{
+									Name:      item.GetName(),
+									Namespace: item.GetNamespace(),
+								},
+							}
+						}
+					}
+					if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
+						if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
+							requests[i] = reconcile.Request{
+								NamespacedName: types.NamespacedName{
+									Name:      item.GetName(),
+									Namespace: item.GetNamespace(),
+								},
+							}
+						}
 					}
 				}
-				// If the label is not present or doesn't match, don't trigger reconciliation
-				return []reconcile.Request{}
+				return requests
 			}),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
-		WithEventFilter(predicate.Funcs{
-			DeleteFunc: func(e event.DeleteEvent) bool {
-				return false
-			},
-			CreateFunc: func(e event.CreateEvent) bool {
-				return true
-			},
-			UpdateFunc: func(e event.UpdateEvent) bool {
-				return true
-			},
-			GenericFunc: func(e event.GenericEvent) bool {
-				return false
-			},
-		}).
 		Complete(r)
 }
 
-func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication(ctx context.Context, application *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) {
+func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
 	monitoring.StrimziSchemaRegisterCurrentInstanceCount.Dec()
 }
 
@@ -221,11 +241,8 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Service.Name", instance.Name+"-deploy")
 	keyPrefix := "strimziregistryoperator.randsw.code"
 	var defaultMode int32 = 420
-	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image)
 
 	var podSpec = instance.Spec.Template
-
-	podSpec.Labels = ls
 
 	// Create Schema registry configuration
 	var podEnv []v1.EnvVar
@@ -365,11 +382,15 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		logger.Error(err, "Failed to create secret")
 	}
 
+	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
+
+	podSpec.Labels = ls
+
 	dep := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        instance.Name + "-deploy",
 			Namespace:   instance.Namespace,
-			Labels:      instance.Labels,
+			Labels:      ls,
 			Annotations: map[string]string{keyPrefix + "/jksVersion": secret.ResourceVersion},
 		},
 		Spec: apps.DeploymentSpec{
@@ -387,13 +408,14 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	return dep
 }
 
-func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string, image string) map[string]string {
+func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string, image string, kakfkaClusterName string) map[string]string {
 	return map[string]string{"app": name_app, "strimzi-schema-registry": name_cr,
 		"app.kubernetes.io/instance":   name_app,
 		"app.kubernetes.io/managed-by": "strimzi-registry-operator",
 		"app.kubernetes.io/name":       "strimzischemaregistry",
 		"app.kubernetes.io/part-of":    name_app,
-		"app.kubernetes.io/version":    strings.Split(image, ":")[1]} //schema-registry image tag
+		"app.kubernetes.io/version":    strings.Split(image, ":")[1],
+		"strimzi.io/cluster":           kakfkaClusterName} //schema-registry image tag
 }
 
 func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger logr.Logger) (string, string, error) {
