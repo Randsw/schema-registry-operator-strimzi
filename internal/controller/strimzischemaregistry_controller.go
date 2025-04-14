@@ -36,7 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -56,6 +55,9 @@ const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -197,37 +199,35 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 				if err != nil {
 					return []reconcile.Request{}
 				}
-				requests := make([]reconcile.Request, len(attachedStrimziRegistryOperators.Items))
-				for i, item := range attachedStrimziRegistryOperators.Items {
+				requests := []reconcile.Request{}
+				for _, item := range attachedStrimziRegistryOperators.Items {
 					// Check if the Secret resource has the label 'strimzi.io/cluster'
 					// Get user secret
 					if obj.GetName() == item.GetName() {
 						if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] {
 							// Check if client secret is changed(increment resource version)
 							logger.Info("User secret has been changed")
-							requests[i] = reconcile.Request{
+							requests = append(requests, reconcile.Request{
 								NamespacedName: types.NamespacedName{
 									Name:      item.GetName(),
 									Namespace: item.GetNamespace(),
 								},
-							}
-
+							})
 						}
 					}
 					// Get cluster ca secret
 					if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
 						logger.Info("Cluster CA secret has been changed")
-						requests[i] = reconcile.Request{
+						requests = append(requests, reconcile.Request{
 							NamespacedName: types.NamespacedName{
 								Name:      item.GetName(),
 								Namespace: item.GetNamespace(),
 							},
-						}
+						})
 					}
 				}
 				return requests
 			}),
-			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
 		Complete(r)
 }
