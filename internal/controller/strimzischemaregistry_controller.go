@@ -135,7 +135,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "Failed to get StrimziSchemaRegistry cluster ca secret.")
 	}
 	if CAsecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/caSecretVersion"] {
-		logger.Info("Kafka user for ssr secret is changed")
+		logger.Info("Kafka cluster CA secret is changed")
 		//TODO Renew cluster secret
 	}
 
