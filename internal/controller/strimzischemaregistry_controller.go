@@ -72,27 +72,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 
 	// Reconcile watch deployment, StrimziSchemaRegistry and secret managed by Strimzi operator
 
-	//TODO Check if reconcile triggered by secret change and renew secret
-
-	if strings.HasSuffix(req.Name, "cluster-ca-cert") {
-		logger.Info("Kafka cluster ca cert is changed")
-		//TODO Renew cluster secret
-	}
-
-	//TODO Take secret and ssr by name and check if secret not changed
-
-	// ssrList := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
-	// err := r.List(ctx, ssrList)
-	// if err != nil {
-	// 	logger.Info("Schema registry not found. No action is needed")
-	// 	return ctrl.Result{}, nil
-	// }
-	// for _, ssr := range ssrList{
-	// 	if strings.HasSuffix(ssr.Name, "cluster-ca-cert")
-	// 		logger.Info("Cluster secret")
-	// 	}
-	// }
-
 	logger.Info("Reconciling StrimziSchemaRegistry", "Request name", req.Name, "request namespace", req.Namespace)
 
 	instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
@@ -132,6 +111,35 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		return ctrl.Result{}, nil
 	}
+	//TODO Check if reconcile triggered by secret change and renew secret
+	secret := &v1.Secret{}
+	err = r.Get(ctx, req.NamespacedName, secret)
+	if err != nil {
+		logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
+	}
+	curr_secret := &v1.Secret{}
+	err = r.Get(ctx, types.NamespacedName{Name: req.Name + "-jks", Namespace: req.Namespace}, curr_secret)
+	if err != nil {
+		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
+	}
+	if secret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] {
+		logger.Info("Kafka user for ssr secret is changed")
+		//TODO Renew cluster secret
+	}
+
+	secret = &v1.Secret{}
+	err = r.Get(ctx, types.NamespacedName{Name: instance.GetLabels()["strimzi.io/cluster"] + "-cluster-ca-cert",
+		Namespace: req.Namespace}, secret)
+	if err != nil {
+		logger.Error(err, "Failed to get StrimziSchemaRegistry cluster ca secret.")
+	}
+	if secret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/caSecretVersion"] {
+		logger.Info("Kafka user for ssr secret is changed")
+		//TODO Renew cluster secret
+	}
+
+	//TODO Update deployment
+
 	// Check if the Deployment already exists, if not create a new one
 	found := &apps.Deployment{}
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, found)
@@ -152,20 +160,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	} else if err != nil {
 		logger.Error(err, "Failed to get Deployment")
 		return ctrl.Result{}, err
-	}
-
-	secret := &v1.Secret{}
-	err = r.Get(ctx, req.NamespacedName, secret)
-	if err != nil {
-		logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
-	}
-	curr_secret := &v1.Secret{}
-	err = r.Get(ctx, types.NamespacedName{Name: req.Name + "-jks", Namespace: req.Namespace}, curr_secret)
-	if err != nil {
-		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
-	}
-	if secret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] {
-		logger.Info("Kafka user for ssr secret is changed")
 	}
 
 	foundSvc := &v1.Service{}
@@ -196,8 +190,10 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Watches(
 			&v1.Secret{}, // Watch the secret
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				logger := log.FromContext(ctx)
 				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
 				err := r.List(ctx, attachedStrimziRegistryOperators)
+				logger.Info("Got SSR", "Number of SSR", len(attachedStrimziRegistryOperators.Items))
 				if err != nil {
 					return []reconcile.Request{}
 				}
@@ -206,40 +202,26 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 					// Check if the Secret resource has the label 'strimzi.io/cluster'
 					// Get user secret
 					if obj.GetName() == item.GetName() {
-						if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
-							curr_secret := &v1.Secret{}
-							err := r.Get(ctx, types.NamespacedName{Name: item.GetName() + "-jks", Namespace: item.Namespace}, curr_secret)
-							if err != nil {
-								return []reconcile.Request{}
-							}
+						if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] {
 							// Check if client secret is changed(increment resource version)
-							if curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] != obj.GetResourceVersion() {
-								requests[i] = reconcile.Request{
-									NamespacedName: types.NamespacedName{
-										Name:      item.GetName(),
-										Namespace: item.GetNamespace(),
-									},
-								}
+							logger.Info("User secret has been changed")
+							requests[i] = reconcile.Request{
+								NamespacedName: types.NamespacedName{
+									Name:      item.GetName(),
+									Namespace: item.GetNamespace(),
+								},
 							}
+
 						}
 					}
-					if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
-						// Get cluster ca secret
-						if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
-							curr_secret := &v1.Secret{}
-							err := r.Get(ctx, types.NamespacedName{Name: item.GetName() + "-jks", Namespace: item.Namespace}, curr_secret)
-							if err != nil {
-								return []reconcile.Request{}
-							}
-							// Check if client secret is changed(increment resource version)
-							if curr_secret.Annotations["strimziregistryoperator.randsw.code/caSecretVersion"] != obj.GetResourceVersion() {
-								requests[i] = reconcile.Request{
-									NamespacedName: types.NamespacedName{
-										Name:      item.GetName(),
-										Namespace: item.GetNamespace(),
-									},
-								}
-							}
+					// Get cluster ca secret
+					if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
+						logger.Info("Cluster CA secret has been changed")
+						requests[i] = reconcile.Request{
+							NamespacedName: types.NamespacedName{
+								Name:      item.GetName(),
+								Namespace: item.GetNamespace(),
+							},
 						}
 					}
 				}
