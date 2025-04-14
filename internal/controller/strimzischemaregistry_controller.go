@@ -188,14 +188,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
-		Owns(&apps.Deployment{}).WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
 			&v1.Secret{}, // Watch the secret
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				return []reconcile.Request{
 					{
 						NamespacedName: types.NamespacedName{
-							Name:      "confluent-schema-registry",
+							Name:      obj.GetName(),
 							Namespace: obj.GetNamespace(),
 						},
 					},
@@ -238,6 +237,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 				// return requests
 			}),
 		).
+		Owns(&apps.Deployment{}).WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Complete(r)
 }
 
