@@ -6,7 +6,7 @@ require (
 	github.com/RedHatInsights/strimzi-client-go v0.40.0
 	github.com/go-logr/logr v1.4.2
 	github.com/onsi/ginkgo/v2 v2.23.4
-	github.com/onsi/gomega v1.36.3
+	github.com/onsi/gomega v1.37.0
 	github.com/prometheus/client_golang v1.22.0
 	k8s.io/api v0.32.3
 	k8s.io/apiextensions-apiserver v0.32.1
