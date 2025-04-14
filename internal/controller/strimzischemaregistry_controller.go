@@ -40,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -237,7 +236,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 				// return requests
 			}),
 		).
-		Owns(&apps.Deployment{}).WithEventFilter(predicate.GenerationChangedPredicate{}).
+		Owns(&apps.Deployment{}).
 		Complete(r)
 }
 
