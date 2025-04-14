@@ -32,7 +32,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -158,11 +157,15 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	secret := &v1.Secret{}
 	err = r.Get(ctx, req.NamespacedName, secret)
 	if err != nil {
-		logger.Error(err, "Failed to get StrimziSchemaRegistry User secret.")
+		logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
 	}
-	if secret.ResourceVersion != found.Annotations["strimziregistryoperator.randsw.code/jksVersion"] {
+	curr_secret := &v1.Secret{}
+	err = r.Get(ctx, types.NamespacedName{Name: req.Name + "-jks", Namespace: req.Namespace}, curr_secret)
+	if err != nil {
+		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
+	}
+	if secret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] {
 		logger.Info("Kafka user for ssr secret is changed")
-		//TODO Renew cluster secret
 	}
 
 	foundSvc := &v1.Service{}
@@ -194,34 +197,48 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 			&v1.Secret{}, // Watch the secret
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
-				listOps := &client.ListOptions{
-					FieldSelector: fields.OneTermEqualSelector(".metadata.Name", obj.GetName()),
-					Namespace:     obj.GetNamespace(),
-				}
-				err := r.List(ctx, attachedStrimziRegistryOperators, listOps)
+				err := r.List(ctx, attachedStrimziRegistryOperators)
 				if err != nil {
 					return []reconcile.Request{}
 				}
 				requests := make([]reconcile.Request, len(attachedStrimziRegistryOperators.Items))
 				for i, item := range attachedStrimziRegistryOperators.Items {
 					// Check if the Secret resource has the label 'strimzi.io/cluster'
+					// Get user secret
 					if obj.GetName() == item.GetName() {
 						if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
-							requests[i] = reconcile.Request{
-								NamespacedName: types.NamespacedName{
-									Name:      item.GetName(),
-									Namespace: item.GetNamespace(),
-								},
+							curr_secret := &v1.Secret{}
+							err := r.Get(ctx, types.NamespacedName{Name: item.GetName() + "-jks", Namespace: item.Namespace}, curr_secret)
+							if err != nil {
+								return []reconcile.Request{}
+							}
+							// Check if client secret is changed(increment resource version)
+							if curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] != obj.GetResourceVersion() {
+								requests[i] = reconcile.Request{
+									NamespacedName: types.NamespacedName{
+										Name:      item.GetName(),
+										Namespace: item.GetNamespace(),
+									},
+								}
 							}
 						}
 					}
 					if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
+						// Get cluster ca secret
 						if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
-							requests[i] = reconcile.Request{
-								NamespacedName: types.NamespacedName{
-									Name:      item.GetName(),
-									Namespace: item.GetNamespace(),
-								},
+							curr_secret := &v1.Secret{}
+							err := r.Get(ctx, types.NamespacedName{Name: item.GetName() + "-jks", Namespace: item.Namespace}, curr_secret)
+							if err != nil {
+								return []reconcile.Request{}
+							}
+							// Check if client secret is changed(increment resource version)
+							if curr_secret.Annotations["strimziregistryoperator.randsw.code/caSecretVersion"] != obj.GetResourceVersion() {
+								requests[i] = reconcile.Request{
+									NamespacedName: types.NamespacedName{
+										Name:      item.GetName(),
+										Namespace: item.GetNamespace(),
+									},
+								}
 							}
 						}
 					}
