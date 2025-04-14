@@ -51,6 +51,8 @@ type StrimziSchemaRegistryReconciler struct {
 
 const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
 
+const keyPrefix = "strimziregistryoperator.randsw.code"
+
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/finalizers,verbs=update
@@ -70,7 +72,8 @@ const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
 func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 	logger := log.FromContext(ctx).WithValues("StrimziSchemaRegistry", req.NamespacedName)
-
+	userSecretChanged := false
+	clusterCASecretChanged := false
 	// Reconcile watch deployment, StrimziSchemaRegistry and secret managed by Strimzi operator
 
 	logger.Info("Reconciling StrimziSchemaRegistry", "Request name", req.Name, "request namespace", req.Namespace)
@@ -112,34 +115,78 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		return ctrl.Result{}, nil
 	}
-	//TODO Check if reconcile triggered by secret change and renew secret
-	userSecret := &v1.Secret{}
-	err = r.Get(ctx, req.NamespacedName, userSecret)
-	if err != nil {
-		logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
-	}
+	// Check if reconcile triggered by secret change and renew secret
 	curr_secret := &v1.Secret{}
+	CAsecret := &v1.Secret{}
+	userSecret := &v1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{Name: req.Name + "-jks", Namespace: req.Namespace}, curr_secret)
 	if err != nil {
 		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
+	} else if errors.IsNotFound(err) {
+		logger.Error(err, "Jks secret not found. Maybe first reconcile")
+	} else {
+		err = r.Get(ctx, req.NamespacedName, userSecret)
+		if err != nil {
+			logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
+		}
+		if userSecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] {
+			logger.Info("Kafka user for ssr secret is changed")
+			// Renew cluster secret
+			userSecretChanged = true
+		}
+		err = r.Get(ctx, types.NamespacedName{Name: instance.GetLabels()["strimzi.io/cluster"] + "-cluster-ca-cert",
+			Namespace: req.Namespace}, CAsecret)
+		if err != nil {
+			logger.Error(err, "Failed to get StrimziSchemaRegistry cluster ca secret.")
+		}
+		if CAsecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/caSecretVersion"] {
+			logger.Info("Kafka cluster CA secret is changed")
+			// Renew cluster secret
+			clusterCASecretChanged = true
+		}
 	}
-	if userSecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] {
-		logger.Info("Kafka user for ssr secret is changed")
-		//TODO Renew cluster secret
+	if userSecretChanged || clusterCASecretChanged {
+		newSecret := &v1.Secret{}
+		if userSecretChanged && clusterCASecretChanged {
+			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
+				CAsecret, userSecret)
+			if err != nil {
+				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
+			}
+		} else if userSecretChanged && !clusterCASecretChanged {
+			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
+				nil, userSecret)
+			if err != nil {
+				logger.Error(err, "Failed to create jks secret after user secret changed")
+			}
+		} else if !userSecretChanged && clusterCASecretChanged {
+			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
+				CAsecret, nil)
+			if err != nil {
+				logger.Error(err, "Failed to create jks secret after user secret changed")
+			}
+		}
+		err = r.Create(ctx, newSecret)
+		if err != nil {
+			logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+		}
+		readSecret := &v1.Secret{}
+		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, readSecret)
+		if err != nil {
+			logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+		}
+		// Update deployment
+		dep := &apps.Deployment{}
+		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, dep)
+		if err != nil {
+			logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
+		}
+		dep.Annotations[keyPrefix+"/jksVersion"] = readSecret.ResourceVersion
+		err := r.Update(ctx, dep)
+		if err != nil {
+			logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
+		}
 	}
-
-	CAsecret := &v1.Secret{}
-	err = r.Get(ctx, types.NamespacedName{Name: instance.GetLabels()["strimzi.io/cluster"] + "-cluster-ca-cert",
-		Namespace: req.Namespace}, CAsecret)
-	if err != nil {
-		logger.Error(err, "Failed to get StrimziSchemaRegistry cluster ca secret.")
-	}
-	if CAsecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/caSecretVersion"] {
-		logger.Info("Kafka cluster CA secret is changed")
-		//TODO Renew cluster secret
-	}
-
-	//TODO Update deployment
 
 	// Check if the Deployment already exists, if not create a new one
 	found := &apps.Deployment{}
@@ -238,7 +285,7 @@ func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
 
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) *apps.Deployment {
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Service.Name", instance.Name+"-deploy")
-	keyPrefix := "strimziregistryoperator.randsw.code"
+
 	var defaultMode int32 = 420
 
 	var podSpec = instance.Spec.Template
