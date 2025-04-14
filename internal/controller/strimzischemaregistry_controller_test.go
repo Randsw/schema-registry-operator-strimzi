@@ -516,6 +516,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      SchemaRegistryName,
 						Namespace: namespace.Name,
+						Labels: map[string]string{
+							"strimzi.io/cluster": "kafka-cluster",
+						},
 					},
 					Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
 						StrimziVersion:     "v1beta2",

@@ -38,10 +38,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -53,9 +51,14 @@ type StrimziSchemaRegistryReconciler struct {
 
 const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
 
+const keyPrefix = "strimziregistryoperator.randsw.code"
+
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -69,29 +72,9 @@ const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
 func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 	logger := log.FromContext(ctx).WithValues("StrimziSchemaRegistry", req.NamespacedName)
-
+	userSecretChanged := false
+	clusterCASecretChanged := false
 	// Reconcile watch deployment, StrimziSchemaRegistry and secret managed by Strimzi operator
-
-	//TODO Check if reconcile triggered by secret change and renew secret
-
-	if strings.HasSuffix(req.Name, "cluster-ca-cert") {
-		logger.Info("Kafka cluster ca cert is changed")
-		//TODO Renew cluster secret
-	}
-
-	//TODO Take secret and ssr by name and check if secret not changed
-
-	// ssrList := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
-	// err := r.List(ctx, ssrList)
-	// if err != nil {
-	// 	logger.Info("Schema registry not found. No action is needed")
-	// 	return ctrl.Result{}, nil
-	// }
-	// for _, ssr := range ssrList{
-	// 	if strings.HasSuffix(ssr.Name, "cluster-ca-cert")
-	// 		logger.Info("Cluster secret")
-	// 	}
-	// }
 
 	logger.Info("Reconciling StrimziSchemaRegistry", "Request name", req.Name, "request namespace", req.Namespace)
 
@@ -110,6 +93,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "Failed to get StrimziSchemaRegistry. May be it is a Secret")
 		return ctrl.Result{}, err
 	}
+
 	// Add finalizer for metrics
 	if !controllerutil.ContainsFinalizer(instance, finalizer) {
 		logger.Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
@@ -122,7 +106,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
 	if isApplicationMarkedToBeDeleted {
 		if controllerutil.ContainsFinalizer(instance, finalizer) {
-			r.finalizeApplication(ctx, instance)
+			r.finalizeApplication()
 			controllerutil.RemoveFinalizer(instance, finalizer)
 			err := r.Update(ctx, instance)
 			if err != nil {
@@ -131,6 +115,79 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		return ctrl.Result{}, nil
 	}
+	// Check if reconcile triggered by secret change and renew secret
+	curr_secret := &v1.Secret{}
+	CAsecret := &v1.Secret{}
+	userSecret := &v1.Secret{}
+	err = r.Get(ctx, types.NamespacedName{Name: req.Name + "-jks", Namespace: req.Namespace}, curr_secret)
+	if err != nil {
+		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
+	} else if errors.IsNotFound(err) {
+		logger.Error(err, "Jks secret not found. Maybe first reconcile")
+	} else {
+		err = r.Get(ctx, req.NamespacedName, userSecret)
+		if err != nil {
+			logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
+		}
+		if userSecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] {
+			logger.Info("Kafka user for ssr secret is changed")
+			// Renew cluster secret
+			userSecretChanged = true
+		}
+		err = r.Get(ctx, types.NamespacedName{Name: instance.GetLabels()["strimzi.io/cluster"] + "-cluster-ca-cert",
+			Namespace: req.Namespace}, CAsecret)
+		if err != nil {
+			logger.Error(err, "Failed to get StrimziSchemaRegistry cluster ca secret.")
+		}
+		if CAsecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/caSecretVersion"] {
+			logger.Info("Kafka cluster CA secret is changed")
+			// Renew cluster secret
+			clusterCASecretChanged = true
+		}
+	}
+	if userSecretChanged || clusterCASecretChanged {
+		newSecret := &v1.Secret{}
+		if userSecretChanged && clusterCASecretChanged {
+			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
+				CAsecret, userSecret)
+			if err != nil {
+				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
+			}
+		} else if userSecretChanged && !clusterCASecretChanged {
+			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
+				nil, userSecret)
+			if err != nil {
+				logger.Error(err, "Failed to create jks secret after user secret changed")
+			}
+		} else if !userSecretChanged && clusterCASecretChanged {
+			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
+				CAsecret, nil)
+			if err != nil {
+				logger.Error(err, "Failed to create jks secret after user secret changed")
+			}
+		}
+		err = r.Create(ctx, newSecret)
+		if err != nil {
+			logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+		}
+		readSecret := &v1.Secret{}
+		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, readSecret)
+		if err != nil {
+			logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+		}
+		// Update deployment
+		dep := &apps.Deployment{}
+		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, dep)
+		if err != nil {
+			logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
+		}
+		dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = readSecret.ResourceVersion
+		err := r.Update(ctx, dep)
+		if err != nil {
+			logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
+		}
+	}
+
 	// Check if the Deployment already exists, if not create a new one
 	found := &apps.Deployment{}
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, found)
@@ -177,55 +234,61 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
-		Owns(&apps.Deployment{}).WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
 			&v1.Secret{}, // Watch the secret
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// Check if the Secret resource has the label 'strimzi.io/cluster'
-				if _, ok := obj.GetLabels()["strimzi.io/cluster"]; ok {
-					return []reconcile.Request{
-						{
+				logger := log.FromContext(ctx)
+				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+				err := r.List(ctx, attachedStrimziRegistryOperators)
+				logger.Info("Got SSR", "Number of SSR", len(attachedStrimziRegistryOperators.Items))
+				if err != nil {
+					return []reconcile.Request{}
+				}
+				requests := []reconcile.Request{}
+				for _, item := range attachedStrimziRegistryOperators.Items {
+					// Check if the Secret resource has the label 'strimzi.io/cluster'
+					// Get user secret
+					if obj.GetName() == item.GetName() {
+						if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] {
+							// Check if client secret is changed
+							logger.Info("User secret has been changed")
+							requests = append(requests, reconcile.Request{
+								NamespacedName: types.NamespacedName{
+									Name:      item.GetName(),
+									Namespace: item.GetNamespace(),
+								},
+							})
+						}
+					}
+					// Get cluster ca secret
+					if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
+						logger.Info("Cluster CA secret has been changed")
+						requests = append(requests, reconcile.Request{
 							NamespacedName: types.NamespacedName{
-								Name:      obj.GetName(),      // Reconcile the associated secret resource
-								Namespace: obj.GetNamespace(), // Use the namespace of the changed secret
+								Name:      item.GetName(),
+								Namespace: item.GetNamespace(),
 							},
-						},
+						})
 					}
 				}
-				// If the label is not present or doesn't match, don't trigger reconciliation
-				return []reconcile.Request{}
+				logger.Info("Len of requests", "requests", len(requests))
+				return requests
 			}),
 		).
-		WithEventFilter(predicate.Funcs{
-			DeleteFunc: func(e event.DeleteEvent) bool {
-				return false
-			},
-			CreateFunc: func(e event.CreateEvent) bool {
-				return true
-			},
-			UpdateFunc: func(e event.UpdateEvent) bool {
-				return true
-			},
-			GenericFunc: func(e event.GenericEvent) bool {
-				return false
-			},
-		}).
+		Owns(&apps.Deployment{}).
 		Complete(r)
 }
 
-func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication(ctx context.Context, application *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) {
+func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
 	monitoring.StrimziSchemaRegisterCurrentInstanceCount.Dec()
 }
 
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) *apps.Deployment {
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Service.Name", instance.Name+"-deploy")
-	keyPrefix := "strimziregistryoperator.randsw.code"
+
 	var defaultMode int32 = 420
-	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image)
 
 	var podSpec = instance.Spec.Template
-
-	podSpec.Labels = ls
 
 	// Create Schema registry configuration
 	var podEnv []v1.EnvVar
@@ -365,12 +428,17 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		logger.Error(err, "Failed to create secret")
 	}
 
+	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
+
+	podSpec.Labels = ls
+
+	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": secret.ResourceVersion}
+
 	dep := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        instance.Name + "-deploy",
-			Namespace:   instance.Namespace,
-			Labels:      instance.Labels,
-			Annotations: map[string]string{keyPrefix + "/jksVersion": secret.ResourceVersion},
+			Name:      instance.Name + "-deploy",
+			Namespace: instance.Namespace,
+			Labels:    ls,
 		},
 		Spec: apps.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
@@ -387,13 +455,14 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	return dep
 }
 
-func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string, image string) map[string]string {
+func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string, image string, kakfkaClusterName string) map[string]string {
 	return map[string]string{"app": name_app, "strimzi-schema-registry": name_cr,
 		"app.kubernetes.io/instance":   name_app,
 		"app.kubernetes.io/managed-by": "strimzi-registry-operator",
 		"app.kubernetes.io/name":       "strimzischemaregistry",
 		"app.kubernetes.io/part-of":    name_app,
-		"app.kubernetes.io/version":    strings.Split(image, ":")[1]} //schema-registry image tag
+		"app.kubernetes.io/version":    strings.Split(image, ":")[1],
+		"strimzi.io/cluster":           kakfkaClusterName} //schema-registry image tag
 }
 
 func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger logr.Logger) (string, string, error) {
