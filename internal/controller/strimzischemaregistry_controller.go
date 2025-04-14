@@ -226,6 +226,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 						})
 					}
 				}
+				logger.Info("Len of requests", "requests", len(requests))
 				return requests
 			}),
 		).
