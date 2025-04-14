@@ -181,7 +181,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
 		}
-		dep.Annotations[keyPrefix+"/jksVersion"] = readSecret.ResourceVersion
+		dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = readSecret.ResourceVersion
 		err := r.Update(ctx, dep)
 		if err != nil {
 			logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
@@ -432,12 +432,13 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	podSpec.Labels = ls
 
+	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": secret.ResourceVersion}
+
 	dep := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        instance.Name + "-deploy",
-			Namespace:   instance.Namespace,
-			Labels:      ls,
-			Annotations: map[string]string{keyPrefix + "/jksVersion": secret.ResourceVersion},
+			Name:      instance.Name + "-deploy",
+			Namespace: instance.Namespace,
+			Labels:    ls,
 		},
 		Spec: apps.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
