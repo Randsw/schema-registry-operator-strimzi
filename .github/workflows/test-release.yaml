@@ -46,6 +46,8 @@ jobs:
     Lint:
       runs-on: ubuntu-latest
       steps:
+        - name: Check actor
+          run: echo ${{ github.actor }}
         - name: set up go ${{env.GO_VERSION}}
           uses: actions/setup-go@v5
           with:
