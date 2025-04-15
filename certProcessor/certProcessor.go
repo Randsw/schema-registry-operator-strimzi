@@ -69,6 +69,10 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 		cp.log.Error(err, "Failed to create temp file", "File", "ca_cert")
 	}
 	defer func() {
+		err = file.Close()
+		if err != nil {
+			cp.log.Error(err, "Failed to close file", "File", file.Name())
+		}
 		err = os.Remove(file.Name())
 		if err != nil {
 			cp.log.Error(err, "Failed to delete file", "File", file.Name())
@@ -174,6 +178,10 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 			cp.log.Error(err, "Failed to create temp file", "File", "user_ca.crt")
 		}
 		defer func() {
+			err = userCAFile.Close()
+			if err != nil {
+				cp.log.Error(err, "Failed to close file", "File", userCAFile.Name())
+			}
 			err = os.Remove(userCAFile.Name())
 			if err != nil {
 				cp.log.Error(err, "Failed to delete file", "File", userCAFile.Name())
@@ -191,6 +199,10 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 			cp.log.Error(err, "Failed to create temp file", "File", "user.crt")
 		}
 		defer func() {
+			err = userCertFile.Close()
+			if err != nil {
+				cp.log.Error(err, "Failed to close file", "File", userCertFile.Name())
+			}
 			err = os.Remove(userCertFile.Name())
 			if err != nil {
 				cp.log.Error(err, "Failed to delete file", "File", userCertFile.Name())
@@ -208,6 +220,10 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 			cp.log.Error(err, "Failed to create temp file", "File", "user.key")
 		}
 		defer func() {
+			err = userKeyFile.Close()
+			if err != nil {
+				cp.log.Error(err, "Failed to close file", "File", userKeyFile.Name())
+			}
 			err = os.Remove(userKeyFile.Name())
 			if err != nil {
 				cp.log.Error(err, "Failed to delete file", "File", userKeyFile.Name())
@@ -252,6 +268,12 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 			cp.log.Error(err, "Error writing to temp file", "File", userKeyFilep12.Name())
 			return nil, "", err
 		}
+		defer func() {
+			err = userKeyFilep12.Close()
+			if err != nil {
+				cp.log.Error(err, "Failed to close file", "File", userKeyFilep12.Name())
+			}
+		}()
 		p12_path = userKeyFilep12.Name()
 	}
 	defer func() {
@@ -306,6 +328,10 @@ func (cp *CertProcessor) generateTLSforHTTP(caCert string, caKey string, passwor
 		cp.log.Error(err, "Failed to create temp file", "File", "tls-ca-cert.crt")
 	}
 	defer func() {
+		err = CAFile.Close()
+		if err != nil {
+			cp.log.Error(err, "Failed to close file", "File", CAFile.Name())
+		}
 		err = os.Remove(CAFile.Name())
 		if err != nil {
 			cp.log.Error(err, "Failed to delete file", "File", CAFile.Name())
@@ -341,7 +367,7 @@ func (cp *CertProcessor) generateTLSforHTTP(caCert string, caKey string, passwor
 		return nil, "", err
 	}
 
-	keyFile, certFile, err := saveFiles(serverKey, serverCert)
+	keyFile, certFile, err := cp.saveFiles(serverKey, serverCert)
 	if err != nil {
 		cp.log.Error(err, "Failed to save files")
 		return nil, "", err
@@ -522,14 +548,19 @@ func StringToPrivateKey(privateKeyString string) (*rsa.PrivateKey, error) {
 	}
 }
 
-func saveFiles(serverKey *rsa.PrivateKey, serverCert *x509.Certificate) (*os.File, *os.File, error) {
+func (cp *CertProcessor) saveFiles(serverKey *rsa.PrivateKey, serverCert *x509.Certificate) (*os.File, *os.File, error) {
 
 	// Save server private key
 	serverKeyFile, err := os.CreateTemp("", "tls-server.key")
 	if err != nil {
 		return nil, nil, err
 	}
-	defer serverKeyFile.Close()
+	defer func() {
+		err = serverKeyFile.Close()
+		if err != nil {
+			cp.log.Error(err, "Failed to close file", "File", serverKeyFile.Name())
+		}
+	}()
 	err = pem.Encode(serverKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)})
 	if err != nil {
 		return nil, nil, err
@@ -540,7 +571,12 @@ func saveFiles(serverKey *rsa.PrivateKey, serverCert *x509.Certificate) (*os.Fil
 	if err != nil {
 		return nil, nil, err
 	}
-	defer serverCertFile.Close()
+	defer func() {
+		err = serverCertFile.Close()
+		if err != nil {
+			cp.log.Error(err, "Failed to close file", "File", serverCertFile.Name())
+		}
+	}()
 	err = pem.Encode(serverCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverCert.Raw})
 	if err != nil {
 		return nil, nil, err
