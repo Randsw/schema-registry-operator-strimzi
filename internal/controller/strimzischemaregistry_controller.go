@@ -353,11 +353,11 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	if instance.Spec.SecureHTTP {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "https://0.0.0.0:8085"})
 		//TODO Trustore if client use tls auth to schema registry
-		//podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"})
+		//podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/tls/truststore.jks"})
 		// podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 		// 	SecretKeyRef: &v1.SecretKeySelector{
 		// 		LocalObjectReference: v1.LocalObjectReference{
-		// 			Name: instance.Name + "-jks",
+		// 			Name: instance.Name + "-tls",
 		// 		},
 		// 		Key: "truststore_password",
 		// 	},

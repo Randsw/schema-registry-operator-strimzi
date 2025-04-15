@@ -12,6 +12,63 @@ func cacertb64() string {
 	return string(cacertb64)
 }
 
+func cakey() string {
+	cakey := `-----BEGIN PRIVATE KEY-----
+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
+11KTjs6OfJ+Fw4sInK2vFeV3D2cl
+-----END PRIVATE KEY-----
+`
+	return cakey
+}
+
 func cacert() string {
 	cacert := `-----BEGIN CERTIFICATE-----
 MIIFLTCCAxWgAwIBAgIUbe6ebrD+ANcQf1kYa8e4ZJJs/QwwDQYJKoZIhvcNAQEN
@@ -417,6 +474,23 @@ func TestCreateKeystorep12(t *testing.T) {
 	}
 	if len(keystore) <= 0 {
 		t.Error("Empty Keystore. Bad")
+		return
+	}
+	if password != "test1234" {
+		t.Errorf("Password no equal. Want - %s, got - %s", "test1234", password)
+		return
+	}
+	t.Log("Keytore is created")
+}
+
+func TestCreateTLSKeystore(t *testing.T) {
+	cp := NewCertProcessor(&logr.Logger{})
+	keystore, password, err := cp.generateTLSforHTTP(userCACert(), cakey(), "test1234", "confluent-schema-registry.kafka")
+	if err != nil {
+		t.Error(err)
+	}
+	if len(keystore) <= 0 {
+		t.Error("Empty Keystore")
 		return
 	}
 	if password != "test1234" {
