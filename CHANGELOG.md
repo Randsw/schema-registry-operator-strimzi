@@ -1,3 +1,31 @@
+## [1.1.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.0.3...1.1.0) (2025-04-15)
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump golang from 1.23 to 1.24 ([6f7fbe8](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6f7fbe8f4f45a341f5fa1b50002bd388d0c17b53))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.32.1 to 0.32.3 ([448ca19](https://github.com/Randsw/schema-registry-operator-strimzi/commit/448ca19131a15bb4fef36b86fe095dbe53ff0ba7))
+* Build commit not trigger release ([bca60a9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/bca60a9931848c44d709865d636c149289454d78))
+* Use go 1.24 in github actions ([962b57e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/962b57e32c3381b3a94f83a7fc51732941dafe68))
+
+
+### 🚀 Features
+
+* Generate keyystore for schema registry TLS ([5150c93](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5150c93c962c9057cdd7383540e1de6a322524dd))
+* TLS secret create for schema-registry ([b61d1a3](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b61d1a306e474ad40c2c68570b4615c8a198a039))
+
+
+### 🛠 Fixes
+
+* Add file close ([4047667](https://github.com/Randsw/schema-registry-operator-strimzi/commit/40476674c37efc35cba283d0516c82b6ee6cde70))
+* Add service name without namespace to TLS cert SAN ([71055cf](https://github.com/Randsw/schema-registry-operator-strimzi/commit/71055cfbebf095fd73b5c410309fbeafafef8434))
+* Check if secret not null before creation. Fix service ([c94a354](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c94a35413ca9adfb9d49c978cffa5b30f73288d4))
+
+
+### Other
+
+* Update package ([c32a3bd](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c32a3bdedf8348d8b358b6be8e0bc35a95ddc374))
+
 ## [1.0.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.0.2...1.0.3) (2025-04-14)
 
 
