@@ -14,6 +14,7 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -451,9 +452,9 @@ func (cp *CertProcessor) generateCSR(cn string) (*rsa.PrivateKey, *x509.Certific
 	csrTemplate := &x509.CertificateRequest{
 		Subject: pkix.Name{
 			Organization: []string{"Schema Registry"},
-			CommonName:   cn,
+			CommonName:   strings.Split(cn, ".")[0],
 		},
-		DNSNames: []string{cn, cn + ".svc", cn + ".svc.cluster", cn + ".svc.cluster.local"},
+		DNSNames: []string{strings.Split(cn, ".")[0], cn, cn + ".svc", cn + ".svc.cluster", cn + ".svc.cluster.local"},
 	}
 
 	// Create CSR
