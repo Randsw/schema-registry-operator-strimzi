@@ -371,11 +371,12 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			if err != nil {
 				logger.Error(err, "Failed to format TLS secret")
 			}
-			err = r.Create(ctx, TLSSecret)
-			if err != nil {
-				logger.Error(err, "Failed to create TLS secret")
+			if TLSSecret != nil {
+				err = r.Create(ctx, TLSSecret)
+				if err != nil {
+					logger.Error(err, "Failed to create TLS secret")
+				}
 			}
-
 			TLSSecretName = TLSSecret.Name
 		} else {
 			TLSSecretName = instance.Spec.TLSSecretName
@@ -433,18 +434,15 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	if err != nil {
 		logger.Error(err, "Failed to format secret")
 	}
-
-	err = r.Create(ctx, secret)
-	if err != nil {
-		logger.Error(err, "Failed to create secret")
+	if secret != nil {
+		err = r.Create(ctx, secret)
+		if err != nil {
+			logger.Error(err, "Failed to create secret")
+		}
 	}
-
 	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
-
 	podSpec.Labels = ls
-
 	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": secret.ResourceVersion}
-
 	dep := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name + "-deploy",
@@ -620,7 +618,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger *logr.Logger) *v1.Service {
 	var source string
 	var port []v1.ServicePort
-	if instance.Spec.SecureHTTP {
+	if !instance.Spec.SecureHTTP {
 		port = append(port, v1.ServicePort{Name: "http", Protocol: "TCP", Port: 80, TargetPort: intstr.IntOrString{IntVal: 8081}})
 	} else {
 		port = append(port, v1.ServicePort{Name: "https", Protocol: "TCP", Port: 443, TargetPort: intstr.IntOrString{IntVal: 8085}})
