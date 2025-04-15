@@ -350,8 +350,11 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		ReadOnly:  true,
 	})
 
+	var TLSSecretName string
+
 	if instance.Spec.SecureHTTP {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "https://0.0.0.0:8085"})
+		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", Value: "https"})
 		//TODO Trustore if client use tls auth to schema registry
 		//podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/tls/truststore.jks"})
 		// podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
@@ -364,43 +367,51 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		// },
 		// })
 		if instance.Spec.TLSSecretName == "" {
-			//TODO Create own server key and cert and sign with kafka-cluster-ca-cert. Keystore and key are same!!!!!
-			//TODO Mount as volume
-			//TODO keystore env add
+			TLSSecret, err := r.createTLSSecret(instance, ctx, logger, kafkaClusterName)
+			if err != nil {
+				logger.Error(err, "Failed to format TLS secret")
+			}
+			err = r.Create(ctx, TLSSecret)
+			if err != nil {
+				logger.Error(err, "Failed to create TLS secret")
+			}
+
+			TLSSecretName = TLSSecret.Name
 		} else {
-			podVolume = append(podVolume, v1.Volume{Name: "http-tls",
-				VolumeSource: v1.VolumeSource{
-					Secret: &v1.SecretVolumeSource{
-						SecretName:  instance.Spec.TLSSecretName,
-						DefaultMode: &defaultMode,
-					}},
-			})
-			containerVolumeMount = append(containerVolumeMount, v1.VolumeMount{
-				Name:      "http-tls",
-				MountPath: "/var/tls",
-				ReadOnly:  true,
-			})
-			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
-				SecretKeyRef: &v1.SecretKeySelector{
-					LocalObjectReference: v1.LocalObjectReference{
-						Name: instance.Name + "-tls",
-					},
-					Key: "tls-password",
-				},
-			},
-			})
-			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", Value: "NONE"})
-			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", Value: "/var/tls/tls-keystore.jks"})
-			podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEY_PASSWORD", ValueFrom: &v1.EnvVarSource{
-				SecretKeyRef: &v1.SecretKeySelector{
-					LocalObjectReference: v1.LocalObjectReference{
-						Name: instance.Name + "-tls",
-					},
-					Key: "tls-password",
-				},
-			},
-			})
+			TLSSecretName = instance.Spec.TLSSecretName
 		}
+		containerVolumeMount = append(containerVolumeMount, v1.VolumeMount{
+			Name:      "http-tls",
+			MountPath: "/var/tls",
+			ReadOnly:  true,
+		})
+		podVolume = append(podVolume, v1.Volume{Name: "http-tls",
+			VolumeSource: v1.VolumeSource{
+				Secret: &v1.SecretVolumeSource{
+					SecretName:  TLSSecretName,
+					DefaultMode: &defaultMode,
+				}},
+		})
+		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", Value: "/var/tls/tls-keystore.jks"})
+		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+			SecretKeyRef: &v1.SecretKeySelector{
+				LocalObjectReference: v1.LocalObjectReference{
+					Name: TLSSecretName,
+				},
+				Key: "keystore_password",
+			},
+		},
+		})
+		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEY_PASSWORD", ValueFrom: &v1.EnvVarSource{
+			SecretKeyRef: &v1.SecretKeySelector{
+				LocalObjectReference: v1.LocalObjectReference{
+					Name: TLSSecretName,
+				},
+				Key: "key.password",
+			},
+		},
+		})
+
 	} else {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
 	}
@@ -543,7 +554,6 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	userPassword := string(userSecret.Data["user.password"])
 	clientp12 := string(userSecret.Data["user.p12"])
 
-	logger.Info("Creating secret for schema registry")
 	jks_secret := &v1.Secret{}
 	jks_secret_name := instance.Name + "-jks"
 	err := r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
@@ -582,7 +592,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 			Name:      jks_secret_name,
 			Namespace: instance.Namespace,
 			Labels: map[string]string{
-				"app":  "strimzi-chema-registry",
+				"app":  "strimzi-schema-registry",
 				"user": instance.Name,
 			},
 			Annotations: map[string]string{
@@ -637,4 +647,71 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 		logger.Error(err, "Failed to set StrimziSchemaRegistryOperator instance as the owner and controller for service")
 	}
 	return svc
+}
+
+func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger,
+	clusterName string) (*v1.Secret, error) {
+	clusterCertSecret := &v1.Secret{}
+	clusterKeySecret := &v1.Secret{}
+	logger.Info("Searching for cluster CA cert secret", "Secret", clusterName+"-cluster-ca-cert")
+	err := r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca-cert", Namespace: instance.Namespace}, clusterCertSecret)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("Searching for cluster CA key secret", "Secret", clusterName+"-cluster-ca")
+	err = r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca", Namespace: instance.Namespace}, clusterKeySecret)
+	if err != nil {
+		return nil, err
+	}
+
+	clusterCert := string(clusterCertSecret.Data["ca.crt"])
+	clusterKey := string(clusterKeySecret.Data["ca.key"])
+
+	logger.Info("Creating secret for schema registry TLS")
+	jksTLSSecret := &v1.Secret{}
+	jksTLSSecretName := instance.Name + "-tls"
+	err = r.Get(ctx, types.NamespacedName{Name: jksTLSSecretName, Namespace: instance.Namespace}, jksTLSSecret)
+	if err == nil {
+
+		err = r.Delete(ctx, jksTLSSecret)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err != nil && !errors.IsNotFound(err) {
+		logger.Error(err, "Failed to get schema registry TLS secret")
+		return nil, err
+	}
+
+	logger.Info("Creating new TLS JKS secret", "Secret Name", jksTLSSecretName)
+
+	cp := certprocessor.NewCertProcessor(logger)
+	TLSKeystore, TLSKeystorePassword, err := cp.GenerateTLSforHTTP(clusterCert, clusterKey, "",
+		instance.Name+"."+instance.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	jksTLSSecret = &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jksTLSSecretName,
+			Namespace: instance.Namespace,
+			Labels: map[string]string{
+				"app":  "strimzi-schema-registry",
+				"user": instance.Name,
+			},
+		},
+		Type: v1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"tls-keystore.jks":  []byte(TLSKeystore),
+			"keystore_password": []byte(TLSKeystorePassword),
+			"key.password":      []byte(TLSKeystorePassword),
+		},
+	}
+	err = ctrl.SetControllerReference(instance, jksTLSSecret, r.Scheme)
+	if err != nil {
+		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
+	}
+	return jksTLSSecret, nil
+
 }

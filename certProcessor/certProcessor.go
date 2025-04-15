@@ -314,7 +314,7 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 	return b, password, nil
 }
 
-func (cp *CertProcessor) generateTLSforHTTP(caCert string, caKey string, password string, cn string) ([]byte, string, error) {
+func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, password string, cn string) ([]byte, string, error) {
 	// TODO create key, create clr. Sign clr with CACert. Create keystore.
 	if password == "" {
 		password = GeneratePassword(24, true, false)

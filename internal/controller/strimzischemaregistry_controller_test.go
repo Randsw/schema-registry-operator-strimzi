@@ -70,36 +70,93 @@ C1Su8qJSFefPuGQm0ht3N1RNpZF21NCKK4umiUrVS9VB
 -----END CERTIFICATE-----
 `
 
+func cakey() string {
+	cakey := `-----BEGIN PRIVATE KEY-----
+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
+11KTjs6OfJ+Fw4sInK2vFeV3D2cl
+-----END PRIVATE KEY-----
+`
+	return cakey
+}
+
 func clusterCACert() string {
 	clusterCACert := `-----BEGIN CERTIFICATE-----
-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
+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
+mmY6wv33AVS6Ok0=
 -----END CERTIFICATE-----
 `
 	return clusterCACert
@@ -473,6 +530,19 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(err).To(Not(HaveOccurred()))
 
 			//Create Cluster Secret
+			By("Creating kafka cluster CA key secret")
+			clusterKeySecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "kafka-cluster-cluster-ca",
+					Namespace: namespace.Name,
+				},
+				Data: map[string][]byte{
+					"ca.key": []byte(cakey()),
+				},
+			}
+			Expect(k8sClient.Create(ctx, clusterKeySecret)).To(Succeed())
+			Expect(err).To(Not(HaveOccurred()))
+
 			By("Creating kafka cluster CA cert secret")
 			clusterSecret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
@@ -522,7 +592,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					},
 					Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
 						StrimziVersion:     "v1beta2",
-						SecureHTTP:         false,
+						SecureHTTP:         true,
 						Listener:           "TLS",
 						CompatibilityLevel: "forward",
 						SecurityProtocol:   "SSL",
@@ -592,6 +662,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Eventually(func() error {
 				found := &corev1.Secret{}
 				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+				return k8sClient.Get(ctx, typeNamespaceName, found)
+			}, time.Minute*2, time.Second).Should(Succeed())
+
+			By("Checking if TLS Secret was successfully created in the reconciliation")
+			Eventually(func() error {
+				found := &corev1.Secret{}
+				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}
 				return k8sClient.Get(ctx, typeNamespaceName, found)
 			}, time.Minute*2, time.Second).Should(Succeed())
 
