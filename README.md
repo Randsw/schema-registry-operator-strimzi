@@ -1,7 +1,5 @@
-# Confluent Schema Registry operator for Strimzi Kafka clusters (SSR operator)
-
-<h1 align="center" style="border-bottom: none;">Kubeinfo</h1>
-<h3 align="center">Get information about resources in kubernetes cluster</h3>
+<h1 align="center" style="border-bottom: none;">SSR Operator</h1>
+<h3 align="center">Confluent Schema Registry for Strimzi Kafka operator(SSR operator)</h3>
 </p>
 <p align="center">
 <a href="" alt="GoVersion">
