@@ -11,11 +11,13 @@ on:
       - '[0-9]+-*'
     paths:
       - 'helm-chart/ssr-operator/**/*.yaml'
+      - 'helm-chart/ssr-operator/**/*.tpl'
   pull_request:
     branches:
       - 'main'
     paths:
       - 'helm-chart/ssr-operator/**/*.yaml'
+      - 'helm-chart/ssr-operator/**/*.tpl'
 permissions:
   contents: write
 jobs:

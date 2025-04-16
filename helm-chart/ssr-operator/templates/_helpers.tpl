@@ -52,7 +52,7 @@ control-plane: controller-manager
 {{- end }}
 
 {{/*
-Create the name of the service account to use with operator
+Create the name of the service account to use
 */}}
 {{- define "ssr-operator.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
