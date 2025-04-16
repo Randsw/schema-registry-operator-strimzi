@@ -15,9 +15,9 @@
 <a href="" alt="Build">
         <img src="https://img.shields.io/github/actions/workflow/status/randsw/schema-registry-operator-strimzi/build.yaml" /></a>
 <a href="" alt="Build">
-        <img src="https://img.shields.io/github/actions/workflow/status/randsw/schema-registry-operator-strimzi/test_release.yaml?label=tests" /></a>
+        <img src="https://img.shields.io/github/actions/workflow/status/randsw/schema-registry-operator-strimzi/test-release.yaml?label=tests" /></a>
 <a href="" alt="Build">
-        <img src="https://img.shields.io/github/actions/workflow/status/randsw/schema-registry-operator-strimzi/helm-chart-test.yaml?label=helm-chart-test" /></a></p>
+        <img src="https://img.shields.io/github/actions/workflow/status/randsw/schema-registry-operator-strimzi/helm-chart.yaml?label=helm-chart-test" /></a></p>
 
 ## 1. Motivation
 
