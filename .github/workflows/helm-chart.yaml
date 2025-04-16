@@ -83,7 +83,7 @@ jobs:
         with:
           files_yaml: |
             helm:
-              - helm-chart/ssr-operator/*.{yaml,tpl}
+              - helm-chart/ssr-operator/**/*.{yaml,tpl}
               - '!helm-chart/ssr-operator/Chart.yaml'
             chart_version:
               - 'helm-chart/ssr-operator/Chart.yaml'
