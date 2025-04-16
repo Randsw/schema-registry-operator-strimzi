@@ -1,3 +1,17 @@
+## [1.1.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.0...1.1.1) (2025-04-16)
+
+
+### 📔 Docs
+
+* add overview and motivation part ([bc93a9e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/bc93a9e0fe5d39e03065d36b632032167b4fa7e5))
+* Finish documentation ([33aff41](https://github.com/Randsw/schema-registry-operator-strimzi/commit/33aff414e8485f1965420adb25184d6493a2bacd))
+* Start motivation part ([5fac66a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5fac66a573ad1145d754955fd786094ec372bd9e))
+
+
+### 🛠 Fixes
+
+* Remove unsued CRD field ([4c9b35f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4c9b35f106cbcbd67967f3183fa9b95679efa30f))
+
 ## [1.1.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.0.3...1.1.0) (2025-04-15)
 
 
