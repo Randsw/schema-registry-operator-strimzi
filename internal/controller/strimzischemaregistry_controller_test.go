@@ -591,7 +591,6 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 						},
 					},
 					Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
-						StrimziVersion:     "v1beta2",
 						SecureHTTP:         true,
 						Listener:           "TLS",
 						CompatibilityLevel: "forward",
