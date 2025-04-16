@@ -29,10 +29,9 @@ type StrimziSchemaRegistrySpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	StrimziVersion     string                 `json:"strimziversion"`
-	Listener           string                 `json:"listener,omitempty"`
-	SecurityProtocol   string                 `json:"securityprotocol,omitempty"`
-	CompatibilityLevel string                 `json:"compatibilitylevel,omitempty"`
+	Listener           string                 `json:"listener"`
+	SecurityProtocol   string                 `json:"securityprotocol"`
+	CompatibilityLevel string                 `json:"compatibilitylevel"`
 	SecureHTTP         bool                   `json:"securehttp"`
 	TLSSecretName      string                 `json:"tlssecretname,omitempty"`
 	Template           corev1.PodTemplateSpec `json:"template" protobuf:"bytes,6,opt,name=template"`

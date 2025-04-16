@@ -34,8 +34,6 @@ spec:
                 type: boolean
               securityprotocol:
                 type: string
-              strimziversion:
-                type: string
               template:
                 properties:
                   metadata:
@@ -3667,8 +3665,10 @@ spec:
               tlssecretname:
                 type: string
             required:
+            - compatibilitylevel
+            - listener
             - securehttp
-            - strimziversion
+            - securityprotocol
             - template
             type: object
           status:
