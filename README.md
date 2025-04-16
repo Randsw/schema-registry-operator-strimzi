@@ -1,5 +1,24 @@
 # Confluent Schema Registry operator for Strimzi Kafka clusters (SSR operator)
 
+<h1 align="center" style="border-bottom: none;">Kubeinfo</h1>
+<h3 align="center">Get information about resources in kubernetes cluster</h3>
+</p>
+<p align="center">
+<a href="" alt="GoVersion">
+        <img src="https://img.shields.io/github/go-mod/go-version/randsw/schema-registry-operator-strimzi" /></a>
+<a href="" alt="Release">
+        <img src="https://img.shields.io/github/v/release/randsw/schema-registry-operator-strimzi" /></a>
+<a href="" alt="LastTag">
+        <img src="https://img.shields.io/github/v/tag/randsw/schema-registry-operator-strimzi" /></a>
+<a href="" alt="LastCommit">
+        <img src="https://img.shields.io/github/last-commit/randsw/schema-registry-operator-strimzi" /></a>
+<a href="" alt="Build">
+        <img src="https://img.shields.io/github/actions/workflow/status/randsw/schema-registry-operator-strimzi/build.yaml" /></a>
+<a href="" alt="Build">
+        <img src="https://img.shields.io/github/actions/workflow/status/randsw/schema-registry-operator-strimzi/test_release.yaml?label=tests" /></a>
+<a href="" alt="Build">
+        <img src="https://img.shields.io/github/actions/workflow/status/randsw/schema-registry-operator-strimzi/helm-chart-test.yaml?label=helm-chart-test" /></a></p>
+
 ## 1. Motivation
 
 ***
