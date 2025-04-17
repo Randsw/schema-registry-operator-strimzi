@@ -71,12 +71,11 @@ const keyPrefix = "strimziregistryoperator.randsw.code"
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
-	logger := log.FromContext(ctx).WithValues("StrimziSchemaRegistry", req.NamespacedName)
+	logger := log.FromContext(ctx)
 	userSecretChanged := false
 	clusterCASecretChanged := false
 	// Reconcile watch deployment, StrimziSchemaRegistry and secret managed by Strimzi operator
-
-	logger.Info("Reconciling StrimziSchemaRegistry", "Request name", req.Name, "request namespace", req.Namespace)
+	logger.Info("Reconciling StrimziSchemaRegistry")
 
 	instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
 
@@ -120,7 +119,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	CAsecret := &v1.Secret{}
 	userSecret := &v1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{Name: req.Name + "-jks", Namespace: req.Namespace}, curr_secret)
-	if err != nil {
+	if err != nil && !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
 	} else if errors.IsNotFound(err) {
 		logger.Error(err, "Jks secret not found. Maybe first reconcile")
@@ -186,6 +185,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
 		}
+		logger.Info("Deployment updated after secret change", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
 	}
 
 	// Check if the Deployment already exists, if not create a new one
@@ -196,7 +196,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		deployment := r.createDeployment(instance, ctx, &logger)
 		// Increment instance count
 		monitoring.StrimziSchemaRegisterCurrentInstanceCount.Inc()
-		logger.Info("Creating a new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
 		err = r.Create(ctx, deployment)
 		if err != nil {
 			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
@@ -214,13 +213,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, foundSvc)
 	if err != nil && errors.IsNotFound(err) {
 		svc := r.createService(instance, &logger)
-		logger.Info("Creating a new Service", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
+
 		err = r.Create(ctx, svc)
 		if err != nil {
 			logger.Error(err, "Failed to create new Service", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
 			return ctrl.Result{}, err
 		}
 		// Service created successfully - return and requeue
+		logger.Info("Service created successfully", "Service.Name", svc.Name, "Service.Namespace", svc.Namespace)
 		return ctrl.Result{Requeue: true}, nil
 	} else if err != nil {
 		logger.Error(err, "Failed to get Service")
@@ -240,7 +240,6 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 				logger := log.FromContext(ctx)
 				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
 				err := r.List(ctx, attachedStrimziRegistryOperators)
-				logger.Info("Got SSR", "Number of SSR", len(attachedStrimziRegistryOperators.Items))
 				if err != nil {
 					return []reconcile.Request{}
 				}
@@ -271,7 +270,6 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 						})
 					}
 				}
-				logger.Info("Len of requests", "requests", len(requests))
 				return requests
 			}),
 		).
@@ -284,7 +282,7 @@ func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
 }
 
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) *apps.Deployment {
-	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Service.Name", instance.Name+"-deploy")
+	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Deployment.Name", instance.Name+"-deploy")
 
 	var defaultMode int32 = 420
 
@@ -432,12 +430,17 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	secret, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
 	if err != nil {
-		logger.Error(err, "Failed to format secret")
+		logger.Error(err, "Failed to format secret", "Secret.Name", instance.Name+"-jks")
 	}
 	if secret != nil {
 		err = r.Create(ctx, secret)
 		if err != nil {
-			logger.Error(err, "Failed to create secret")
+			logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+"-jks")
+		}
+	} else {
+		err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, secret)
+		if err != nil {
+			logger.Error(err, "Failed to get secret", "Secret.Name", instance.Name+"-jks")
 		}
 	}
 	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
@@ -517,6 +520,7 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 
 func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger,
 	clusterName string, clusterCASecret *v1.Secret, userCASecret *v1.Secret) (*v1.Secret, error) {
+	logger.Info("Creating secret for schema registry Kafkastore TLS")
 	keyPrefix := "strimziregistryoperator.randsw.code"
 	CAVersionKey := keyPrefix + "/caSecretVersion"
 	userVersionKey := keyPrefix + "/clientSecretVersion"
@@ -573,7 +577,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		logger.Error(err, "Failed to get schema registry secret")
 		return nil, err
 	}
-	logger.Info("Creating new JKS secret", "Secret Name", jks_secret_name)
+	logger.Info("Creating new keystore and trustore", "Secret Name", jks_secret_name)
 
 	cp := certprocessor.NewCertProcessor(logger)
 	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
@@ -584,7 +588,6 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Creating Secret", "Name", jks_secret_name)
 	jks_secret = &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jks_secret_name,
@@ -618,6 +621,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger *logr.Logger) *v1.Service {
 	var source string
 	var port []v1.ServicePort
+	logger.Info("Creating a new Service", "Service.Namespace", instance.Namespace, "Service.Name", instance.Name)
 	if !instance.Spec.SecureHTTP {
 		port = append(port, v1.ServicePort{Name: "http", Protocol: "TCP", Port: 80, TargetPort: intstr.IntOrString{IntVal: 8081}})
 	} else {
@@ -649,6 +653,7 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 
 func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger,
 	clusterName string) (*v1.Secret, error) {
+	logger.Info("Creating secret for schema registry TLS")
 	clusterCertSecret := &v1.Secret{}
 	clusterKeySecret := &v1.Secret{}
 	logger.Info("Searching for cluster CA cert secret", "Secret", clusterName+"-cluster-ca-cert")
@@ -664,8 +669,6 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 
 	clusterCert := string(clusterCertSecret.Data["ca.crt"])
 	clusterKey := string(clusterKeySecret.Data["ca.key"])
-
-	logger.Info("Creating secret for schema registry TLS")
 	jksTLSSecret := &v1.Secret{}
 	jksTLSSecretName := instance.Name + "-tls"
 	err = r.Get(ctx, types.NamespacedName{Name: jksTLSSecretName, Namespace: instance.Namespace}, jksTLSSecret)
@@ -681,7 +684,7 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 		return nil, err
 	}
 
-	logger.Info("Creating new TLS JKS secret", "Secret Name", jksTLSSecretName)
+	logger.Info("Creating keystore for TLS secret", "Secret Name", jksTLSSecretName)
 
 	cp := certprocessor.NewCertProcessor(logger)
 	TLSKeystore, TLSKeystorePassword, err := cp.GenerateTLSforHTTP(clusterCert, clusterKey, "",
