@@ -237,7 +237,6 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Watches(
 			&v1.Secret{}, // Watch the secret
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				logger := log.FromContext(ctx)
 				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
 				err := r.List(ctx, attachedStrimziRegistryOperators)
 				if err != nil {
@@ -250,7 +249,6 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 					if obj.GetName() == item.GetName() {
 						if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] {
 							// Check if client secret is changed
-							logger.Info("User secret has been changed")
 							requests = append(requests, reconcile.Request{
 								NamespacedName: types.NamespacedName{
 									Name:      item.GetName(),
@@ -261,7 +259,6 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 					}
 					// Get cluster ca secret
 					if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
-						logger.Info("Cluster CA secret has been changed")
 						requests = append(requests, reconcile.Request{
 							NamespacedName: types.NamespacedName{
 								Name:      item.GetName(),
@@ -374,6 +371,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 				if err != nil {
 					logger.Error(err, "Failed to create TLS secret")
 				}
+				logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
 			}
 			TLSSecretName = TLSSecret.Name
 		} else {
@@ -437,6 +435,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		if err != nil {
 			logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+"-jks")
 		}
+		logger.Info("Secret for Schema Registry KafkaStore TLS created successfully", "Secret.Name", secret.Name)
 	} else {
 		err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, secret)
 		if err != nil {
