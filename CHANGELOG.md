@@ -1,3 +1,12 @@
+## [1.1.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.2...1.1.3) (2025-04-17)
+
+
+### 🛠 Fixes
+
+* Add timeout after write secret and before read. Add return block if error is occured ([6d982eb](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6d982ebe6301b58259a1c1d9a5c77a6d08f075ac))
+* Improve log message ([0aee7ea](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0aee7eabb7b706ed6dffa274a80c2e938e8282e8))
+* Remove logs from setupManager. Add logs about secret creation success. ([ab228a1](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ab228a1ae93c220aac7cf1797f697ba8cc5f7749))
+
 ## [1.1.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.1...1.1.2) (2025-04-17)
 
 
