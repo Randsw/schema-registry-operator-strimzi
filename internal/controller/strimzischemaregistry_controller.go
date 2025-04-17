@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	go_err "errors"
 	"strings"
@@ -121,12 +122,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	err = r.Get(ctx, types.NamespacedName{Name: req.Name + "-jks", Namespace: req.Namespace}, curr_secret)
 	if err != nil && !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
+		return ctrl.Result{}, err
 	} else if errors.IsNotFound(err) {
 		logger.Error(err, "Jks secret not found. Maybe first reconcile")
 	} else {
 		err = r.Get(ctx, req.NamespacedName, userSecret)
 		if err != nil {
 			logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
+			return ctrl.Result{}, err
 		}
 		if userSecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] {
 			logger.Info("Kafka user for ssr secret is changed")
@@ -137,6 +140,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			Namespace: req.Namespace}, CAsecret)
 		if err != nil {
 			logger.Error(err, "Failed to get StrimziSchemaRegistry cluster ca secret.")
+			return ctrl.Result{}, err
 		}
 		if CAsecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/caSecretVersion"] {
 			logger.Info("Kafka cluster CA secret is changed")
@@ -151,41 +155,51 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 				CAsecret, userSecret)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
+				return ctrl.Result{}, err
 			}
 		} else if userSecretChanged && !clusterCASecretChanged {
 			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
 				nil, userSecret)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after user secret changed")
+				return ctrl.Result{}, err
 			}
 		} else if !userSecretChanged && clusterCASecretChanged {
 			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
 				CAsecret, nil)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after user secret changed")
+				return ctrl.Result{}, err
 			}
 		}
 		err = r.Create(ctx, newSecret)
 		if err != nil {
 			logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+			return ctrl.Result{}, err
 		}
+		logger.Info("Creating new jks secret after user or cluster CA secret changed was successfull")
+		time.Sleep(50 * time.Millisecond) //Pause for KubeApi write new secret to etcd so we can get it ResourceVersion
 		readSecret := &v1.Secret{}
 		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, readSecret)
 		if err != nil {
-			logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+			logger.Error(err, "Failed to get new jks secret after user or cluster CA secret changed")
+			return ctrl.Result{}, err
 		}
 		// Update deployment
 		dep := &apps.Deployment{}
 		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, dep)
 		if err != nil {
 			logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
+			return ctrl.Result{}, err
 		}
 		dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = readSecret.ResourceVersion
 		err := r.Update(ctx, dep)
 		if err != nil {
 			logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
+			return ctrl.Result{}, err
 		}
 		logger.Info("Deployment updated after secret change", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Check if the Deployment already exists, if not create a new one
