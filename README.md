@@ -218,6 +218,15 @@ spec:
   namespace  with `StrimziSchemaRegistry` CR
   If this field is omitted or an empty string, the SSR operator automatically creates a TLS certificate and private key pair in JKS format, signs them with the Strimzi Kafka cluster CA(stored in the `<kafka-clustername>-cluster-ca` and `<kafka-clustername>-cluster-ca-cert` secrets)
   and mounts the secret to the Schema Registry pod.
+  Secret data format:
+
+  |Key               |Value            |
+  |------------------|-----------------|
+  |tls-keystore.jks  |Keystore         |
+  |keystore_password |Keystore password|
+  |key.password      |Key password     |
+  
+  [Java Generate Keys Tutorial](https://docs.oracle.com/javase/tutorial/security/toolsign/step3.html)
 
   See also: Schema Registry [Configuring the REST API for HTTP or HTTPS](https://docs.confluent.io/platform/current/schema-registry/security/index.html#configuring-the-rest-api-for-http-or-https)
 
