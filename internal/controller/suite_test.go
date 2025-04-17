@@ -62,7 +62,12 @@ func DownloadCRD(ctx context.Context, url string) (*apiextensionsv1.CustomResour
 	if err != nil {
 		return nil, fmt.Errorf("failed to download CRD from %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			fmt.Printf("Failed to close respone body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code when downloading CRD: %d", resp.StatusCode)
