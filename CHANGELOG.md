@@ -1,3 +1,29 @@
+## [1.1.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.1...1.1.2) (2025-04-17)
+
+
+### 📔 Docs
+
+* Add badges ([f0e8e5c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/f0e8e5c485a3aa58a95d97f37a1762394aa026e2))
+* Add description of TLS secret format ([817f09e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/817f09e7ffd39da52747c00ec377cd7f58587d60))
+* Fix badges url ([c624063](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c6240637b63536888f6193e6e82f1c56b9bd5d33))
+* Update header ([7b559cd](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7b559cd086b8cf0c034fa4c76ad62daa21b33f2e))
+
+
+### 🦊 CI/CD
+
+* Fix chart release conditions ([675d49d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/675d49d117a5f9c7afa09b996db11914a94c147d))
+* Trigger action when tpl file is changed ([c7f0924](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c7f0924a7f1db510053e9fec6f652818efae0bcc))
+
+
+### 🧪 Tests
+
+* Fix linter error ([0ce45e8](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0ce45e8c45556e61c56e59164c4b104bece3bca3))
+
+
+### 🛠 Fixes
+
+* Update CRD in helm chart ([05f6fff](https://github.com/Randsw/schema-registry-operator-strimzi/commit/05f6fff076290e627418c5a45391a979e3893d03))
+
 ## [1.1.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.0...1.1.1) (2025-04-16)
 
 
