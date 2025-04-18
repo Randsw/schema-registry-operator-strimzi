@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"os"
+	"strconv"
 	"time"
 
 	kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
@@ -688,6 +689,100 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
 				return k8sClient.Get(ctx, typeNamespaceName, found)
 			}, time.Minute*2, time.Second).Should(Succeed())
+
+			// Updating Cluster secret to check if JKS secret is updated too
+			readSecret := &corev1.Secret{}
+			typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+			Expect(err).To(Not(HaveOccurred()))
+			// Save JKS secret resource version before update
+			JKSResourceVersionOld := readSecret.ResourceVersion
+			JKSResourceVersionOldInt, err := strconv.Atoi(JKSResourceVersionOld)
+			Expect(err).To(Not(HaveOccurred()))
+
+			// Update Cluster secret
+			readSecret = &corev1.Secret{}
+			typeNamespaceName = types.NamespacedName{Name: "kafka-cluster-cluster-ca-cert", Namespace: SchemaRegistryName}
+			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+			Expect(err).To(Not(HaveOccurred()))
+			// Add dummy data to change cluster secret ResourceVersion
+			data := readSecret.Data
+			data["ta.Key"] = []byte(cakey())
+			readSecret.Data = data
+			Expect(k8sClient.Update(ctx, readSecret)).To(Succeed())
+			Expect(err).To(Not(HaveOccurred()))
+
+			time.Sleep(500 * time.Millisecond)
+
+			By("Reconciling after cluster secret Update")
+			controllerReconciler = &StrimziSchemaRegistryReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			time.Sleep(500 * time.Millisecond)
+
+			// Read updated JKS secret
+			readSecret = &corev1.Secret{}
+			typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+			Expect(err).To(Not(HaveOccurred()))
+
+			JKSResourceVersionNew := readSecret.ResourceVersion
+			JKSResourceVersionNewInt, err := strconv.Atoi(JKSResourceVersionNew)
+			Expect(err).To(Not(HaveOccurred()))
+			Expect(JKSResourceVersionNewInt > JKSResourceVersionOldInt).To(BeTrue())
+
+			// Updating User secret to check if JKS secret is updated too
+			readSecret = &corev1.Secret{}
+			typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+			Expect(err).To(Not(HaveOccurred()))
+			// Save JKS secret resource version before update
+			JKSResourceVersionOld = readSecret.ResourceVersion
+			JKSResourceVersionOldInt, err = strconv.Atoi(JKSResourceVersionOld)
+			Expect(err).To(Not(HaveOccurred()))
+
+			// Update User secret
+			readSecret = &corev1.Secret{}
+			typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+			Expect(err).To(Not(HaveOccurred()))
+			// Add dummy data to change User secret ResourceVersion
+			data = readSecret.Data
+			data["ta.Key"] = []byte(cakey())
+			readSecret.Data = data
+			Expect(k8sClient.Update(ctx, readSecret)).To(Succeed())
+			Expect(err).To(Not(HaveOccurred()))
+
+			time.Sleep(500 * time.Millisecond)
+
+			By("Reconciling after user secret Update")
+			controllerReconciler = &StrimziSchemaRegistryReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			time.Sleep(500 * time.Millisecond)
+
+			// Read updated JKS secret
+			readSecret = &corev1.Secret{}
+			typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+			Expect(err).To(Not(HaveOccurred()))
+
+			JKSResourceVersionNew = readSecret.ResourceVersion
+			JKSResourceVersionNewInt, err = strconv.Atoi(JKSResourceVersionNew)
+			Expect(err).To(Not(HaveOccurred()))
+			Expect(JKSResourceVersionNewInt > JKSResourceVersionOldInt).To(BeTrue())
 		})
 	})
 })
