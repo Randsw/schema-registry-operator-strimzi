@@ -51,7 +51,6 @@ type StrimziSchemaRegistryReconciler struct {
 }
 
 const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
-
 const keyPrefix = "strimziregistryoperator.randsw.code"
 
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries,verbs=get;list;watch;create;update;patch;delete
@@ -77,9 +76,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	clusterCASecretChanged := false
 	// Reconcile watch deployment, StrimziSchemaRegistry and secret managed by Strimzi operator
 	logger.Info("Reconciling StrimziSchemaRegistry")
-
 	instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
-
 	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -93,7 +90,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "Failed to get StrimziSchemaRegistry. May be it is a Secret")
 		return ctrl.Result{}, err
 	}
-
 	// Add finalizer for metrics
 	if !controllerutil.ContainsFinalizer(instance, finalizer) {
 		logger.Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
@@ -126,16 +122,18 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	} else if errors.IsNotFound(err) {
 		logger.Error(err, "Jks secret not found. Maybe first reconcile")
 	} else {
+		// Get user secret
 		err = r.Get(ctx, req.NamespacedName, userSecret)
 		if err != nil {
 			logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
 			return ctrl.Result{}, err
 		}
 		if userSecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] {
-			logger.Info("Kafka user for ssr secret is changed")
+			logger.Info("User secret for ssr KafkaStore is changed")
 			// Renew cluster secret
 			userSecretChanged = true
 		}
+		// Get cluster CA secret
 		err = r.Get(ctx, types.NamespacedName{Name: instance.GetLabels()["strimzi.io/cluster"] + "-cluster-ca-cert",
 			Namespace: req.Namespace}, CAsecret)
 		if err != nil {
@@ -179,21 +177,12 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		logger.Info("Creating new jks secret after user or cluster CA secret changed was successfull")
 		time.Sleep(50 * time.Millisecond) //Pause for KubeApi write new secret to etcd so we can get it ResourceVersion
-		readSecret := &v1.Secret{}
-		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, readSecret)
+		dep, err := r.updateDeployment(instance, ctx, &logger)
 		if err != nil {
-			logger.Error(err, "Failed to get new jks secret after user or cluster CA secret changed")
+			logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
 			return ctrl.Result{}, err
 		}
-		// Update deployment
-		dep := &apps.Deployment{}
-		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, dep)
-		if err != nil {
-			logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
-			return ctrl.Result{}, err
-		}
-		dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = readSecret.ResourceVersion
-		err := r.Update(ctx, dep)
+		err = r.Update(ctx, dep)
 		if err != nil {
 			logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
 			return ctrl.Result{}, err
@@ -201,7 +190,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Info("Deployment updated after secret change", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{Requeue: true}, nil
 	}
-
 	// Check if the Deployment already exists, if not create a new one
 	found := &apps.Deployment{}
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, found)
@@ -222,12 +210,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "Failed to get Deployment")
 		return ctrl.Result{}, err
 	}
-
+	// Creating service for deployment
 	foundSvc := &v1.Service{}
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, foundSvc)
 	if err != nil && errors.IsNotFound(err) {
 		svc := r.createService(instance, &logger)
-
 		err = r.Create(ctx, svc)
 		if err != nil {
 			logger.Error(err, "Failed to create new Service", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
@@ -240,7 +227,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "Failed to get Service")
 		return ctrl.Result{}, err
 	}
-
 	return ctrl.Result{}, nil
 }
 
@@ -262,7 +248,6 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 					// Get user secret
 					if obj.GetName() == item.GetName() {
 						if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] {
-							// Check if client secret is changed
 							requests = append(requests, reconcile.Request{
 								NamespacedName: types.NamespacedName{
 									Name:      item.GetName(),
@@ -292,7 +277,8 @@ func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
 	monitoring.StrimziSchemaRegisterCurrentInstanceCount.Dec()
 }
 
-func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) *apps.Deployment {
+func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger *logr.Logger) *apps.Deployment {
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Deployment.Name", instance.Name+"-deploy")
 
 	var defaultMode int32 = 420
@@ -727,5 +713,24 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
 	}
 	return jksTLSSecret, nil
+}
 
+func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger *logr.Logger) (*apps.Deployment, error) {
+	// Reading created secret to get his ResourceVersion
+	readSecret := &v1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, readSecret)
+	if err != nil {
+		logger.Error(err, "Failed to get new jks secret after user or cluster CA secret changed")
+		return nil, err
+	}
+	// Update deployment
+	dep := &apps.Deployment{}
+	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, dep)
+	if err != nil {
+		logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
+		return nil, err
+	}
+	dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = readSecret.ResourceVersion
+	return dep, nil
 }
