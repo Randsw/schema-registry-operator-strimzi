@@ -55,7 +55,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		if err != nil {
 			logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+"-jks")
 		}
-		logger.Info("Secret for Schema Registry KafkaStore TLS created successfully", "Secret.Name", secret.Name)
+		logger.V(1).Info("Secret for Schema Registry KafkaStore TLS created successfully", "Secret.Name", secret.Name)
 	} else {
 		err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, secret)
 		if err != nil {
@@ -144,7 +144,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 				if err != nil {
 					logger.Error(err, "Failed to create TLS secret")
 				}
-				logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
+				logger.V(1).Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
 			}
 			TLSSecretName = TLSSecret.Name
 		} else {
@@ -226,13 +226,13 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	if err != nil {
 		return "", "", err
 	}
-	logger.Info("Got Kafka User", "Number of Kafka User", len(kafkaUsers.Items))
+	logger.V(1).Info("Got Kafka User", "Number of Kafka User", len(kafkaUsers.Items))
 	for _, kafkaUser := range kafkaUsers.Items {
 		if kafkaUser.Name == instance.Name {
 			kafkaClusterName = kafkaUser.Labels["strimzi.io/cluster"]
 		}
 	}
-	logger.Info("Found kafka cluster CR", "Name", kafkaClusterName)
+	logger.V(1).Info("Found kafka cluster CR", "Name", kafkaClusterName)
 	// Find bootstap server address
 	var kafkaBootstrapServer string
 	kafkaCluster := &kafka.Kafka{}
@@ -245,15 +245,15 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 		kafkaListener = "tls"
 	}
 	for _, listener := range kafkaCluster.Status.Listeners {
-		logger.Info("Found kafka listeners.", "Listener", *listener.Name)
+		logger.V(1).Info("Found kafka listeners.", "Listener", *listener.Name)
 		if *listener.Name == kafkaListener {
 			kafkaBootstrapServer = *listener.BootstrapServers
-			logger.Info("Found specified kafka cluster listeners.", "Listener", kafkaListener, "kafkaBootstap", kafkaBootstrapServer)
-			logger.Info("KafkaBootstap", "Address", kafkaBootstrapServer)
+			logger.V(1).Info("Found specified kafka cluster listeners.", "Listener", kafkaListener, "kafkaBootstap", kafkaBootstrapServer)
+			logger.V(1).Info("KafkaBootstap", "Address", kafkaBootstrapServer)
 			return kafkaBootstrapServer, kafkaClusterName, nil
 		}
 	}
-	logger.Info("No listeners found. Check CR config", "Listener", kafkaListener)
+	logger.V(1).Info("No listeners found. Check CR config", "Listener", kafkaListener)
 	return "", "", go_err.New("cant find bootstrap address")
 }
 
@@ -265,7 +265,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	userSecret := &v1.Secret{}
 	// Get cluster secret
 	if clusterCASecret == nil {
-		logger.Info("Searching for cluster CA secret", "Secret", clusterName+"-cluster-ca-cert")
+		logger.V(1).Info("Searching for cluster CA secret", "Secret", clusterName+"-cluster-ca-cert")
 		err := r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca-cert", Namespace: instance.Namespace}, clusterSecret)
 		if err != nil {
 			return nil, err
@@ -273,7 +273,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	} else {
 		clusterSecret = clusterCASecret
 	}
-	logger.Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
+	logger.V(1).Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
 	clusterCACert := string(clusterSecret.Data["ca.crt"])
 	if userCASecret == nil {
 		logger.Info("Searching for user CA secret", "Secret", instance.Name)
@@ -284,7 +284,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	} else {
 		userSecret = userCASecret
 	}
-	logger.Info("Client certification version", "Version", userSecret.ResourceVersion)
+	logger.V(1).Info("Client certification version", "Version", userSecret.ResourceVersion)
 	clientCACert := string(userSecret.Data["ca.crt"])
 	clientCert := string(userSecret.Data["user.crt"])
 	clientKey := string(userSecret.Data["user.key"])
@@ -297,10 +297,10 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	if err == nil {
 		if jks_secret.Annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
 			jks_secret.Annotations[userVersionKey] == userSecret.ResourceVersion {
-			logger.Info("JKS secret is up-to-date")
+			logger.V(1).Info("JKS secret is up-to-date")
 			return nil, nil
 		}
-		logger.Info("About to delete JKS secret")
+		logger.V(1).Info("About to delete JKS secret")
 		err = r.Delete(ctx, jks_secret)
 		if err != nil {
 			return nil, err
@@ -384,13 +384,13 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 	logger.Info("Creating secret for schema registry TLS")
 	clusterCertSecret := &v1.Secret{}
 	clusterKeySecret := &v1.Secret{}
-	logger.Info("Searching for cluster CA cert secret", "Secret", clusterName+"-cluster-ca-cert")
+	logger.V(1).Info("Searching for cluster CA cert secret", "Secret", clusterName+"-cluster-ca-cert")
 	err := r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca-cert", Namespace: instance.Namespace},
 		clusterCertSecret)
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Searching for cluster CA key secret", "Secret", clusterName+"-cluster-ca")
+	logger.V(1).Info("Searching for cluster CA key secret", "Secret", clusterName+"-cluster-ca")
 	err = r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca", Namespace: instance.Namespace},
 		clusterKeySecret)
 	if err != nil {
