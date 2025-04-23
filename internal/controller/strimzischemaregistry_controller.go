@@ -66,7 +66,6 @@ const userVersionKey = keyPrefix + "/clientSecretVersion"
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
 	logger := log.FromContext(ctx)
 	userSecretChanged := false
 	clusterCASecretChanged := false
@@ -88,7 +87,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	// Add finalizer for metrics
 	if !controllerutil.ContainsFinalizer(instance, finalizer) {
-		logger.Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
+		logger.V(1).Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
 		controllerutil.AddFinalizer(instance, finalizer)
 		if err = r.Update(ctx, instance); err != nil {
 			logger.Error(err, "Failed to update custom resource to add finalizer")

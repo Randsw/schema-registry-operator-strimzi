@@ -23,6 +23,7 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	"go.uber.org/zap/zapcore"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,7 +49,6 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-
 	utilruntime.Must(strimziregistryoperatorv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(kafka.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
@@ -72,7 +72,19 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{
-		Development: true,
+		Development:     false,
+		DestWriter:      os.Stdout,
+		StacktraceLevel: zapcore.ErrorLevel,
+		Encoder: zapcore.NewJSONEncoder(zapcore.EncoderConfig{
+			MessageKey:    "message",
+			LevelKey:      "level",
+			TimeKey:       "time",
+			NameKey:       "name",
+			StacktraceKey: "stacktrace",
+			FunctionKey:   "func",
+			EncodeTime:    zapcore.RFC3339TimeEncoder,
+			EncodeLevel:   zapcore.CapitalLevelEncoder,
+		}),
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
