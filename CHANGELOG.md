@@ -1,3 +1,31 @@
+## [1.1.4](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.3...1.1.4) (2025-04-23)
+
+
+### :scissors: Refactor
+
+* Move all CRUD kubernetes resource operation in separate file ([38bc187](https://github.com/Randsw/schema-registry-operator-strimzi/commit/38bc1879d5d806fd58bdc49f8b55a493fe588663))
+* Refactor certProccessor ([2215823](https://github.com/Randsw/schema-registry-operator-strimzi/commit/22158233d62d5c11ad1ddda10535954e6f8ea3db))
+* Refactor some function ([fbd05d8](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fbd05d8125a597b4b0ac3faf76431bc1342585e7))
+* Refactoring the Reconcile function ([48bbec7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/48bbec7b239f80819946deac185b8b8f38b8731c))
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.32.3 to 0.32.4 ([794ac8e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/794ac8ef2bd5e133f05602687a1d6948b47fc97f))
+
+
+### 🧪 Tests
+
+* Add test to check if JKS secret is updated after update on Cluster CA ca cert secret or User secret ([62a2b9a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/62a2b9a5f519e5d6d63edcb0395776622034cacc))
+
+
+### 🛠 Fixes
+
+* Add verbosity level to logs ([ac58e51](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ac58e51317302d1af5792b7def17a920fc532e47))
+* Move some message to debug level. Expand logger config ([9ced352](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9ced3523439d9f4123d2bee13369ae02b7e0751a))
+* Remove level colorization in logger ([b857211](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b857211f40210f01c0d1ff45e0a0b44db70fc481))
+* Set default level to info. Add more fields to log message ([936c412](https://github.com/Randsw/schema-registry-operator-strimzi/commit/936c4123d8d3b907f78982903881b050310ac810))
+
 ## [1.1.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.2...1.1.3) (2025-04-17)
 
 
