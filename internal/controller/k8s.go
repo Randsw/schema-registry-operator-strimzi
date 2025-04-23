@@ -144,7 +144,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 				if err != nil {
 					logger.Error(err, "Failed to create TLS secret")
 				}
-				logger.V(1).Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
+				logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
 			}
 			TLSSecretName = TLSSecret.Name
 		} else {

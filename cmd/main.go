@@ -83,7 +83,7 @@ func main() {
 			StacktraceKey: "stacktrace",
 			FunctionKey:   "func",
 			EncodeTime:    zapcore.RFC3339TimeEncoder,
-			EncodeLevel:   zapcore.CapitalColorLevelEncoder,
+			EncodeLevel:   zapcore.CapitalLevelEncoder,
 		}),
 	}
 	opts.BindFlags(flag.CommandLine)
