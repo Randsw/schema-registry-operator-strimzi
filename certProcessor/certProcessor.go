@@ -239,7 +239,7 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 		}
 	} else {
 		// Cert in P12 formant is presented
-		cp.log.Info("Using p12 cert store")
+		cp.log.V(1).Info("Using p12 cert store")
 		// Create temporary file for user bundle in P12 format
 		userKeyFilep12, err := os.CreateTemp("", "user.p12")
 		if err != nil {
@@ -276,7 +276,7 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 		}
 	}()
 	// Generate client keystore
-	cp.log.Info("Generate keystore")
+	cp.log.V(1).Info("Generate keystore")
 	cmd := exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystore_path,
 		"-deststoretype", "jks", "-srckeystore", p12_path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
 	out, err := cmd.Output()
@@ -393,7 +393,7 @@ func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, passwor
 		}
 	}()
 	// Generate keystore
-	cp.log.Info("Generate tls keystore")
+	cp.log.V(1).Info("Generate tls keystore")
 	cmd = exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystore_path,
 		"-deststoretype", "jks", "-srckeystore", p12_path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
 	out, err = cmd.Output()

@@ -72,14 +72,18 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{
-		Development: false,
-		DestWriter:  os.Stdout,
+		Development:     false,
+		DestWriter:      os.Stdout,
+		StacktraceLevel: zapcore.ErrorLevel,
 		Encoder: zapcore.NewJSONEncoder(zapcore.EncoderConfig{
-			MessageKey: "message",
-			LevelKey:   "level",
-			TimeKey:    "time",
-			NameKey:    "name",
-			EncodeTime: zapcore.RFC3339TimeEncoder,
+			MessageKey:    "message",
+			LevelKey:      "level",
+			TimeKey:       "time",
+			NameKey:       "name",
+			StacktraceKey: "stacktrace",
+			FunctionKey:   "func",
+			EncodeTime:    zapcore.RFC3339TimeEncoder,
+			EncodeLevel:   zapcore.CapitalColorLevelEncoder,
 		}),
 	}
 	opts.BindFlags(flag.CommandLine)
