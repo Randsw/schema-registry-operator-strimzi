@@ -1,3 +1,10 @@
+## [1.2.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.4...1.2.0) (2025-04-24)
+
+
+### 🚀 Features
+
+* Renew REST API TLS secret if cluster CA cert is changed ([a90bff4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a90bff437af2f905818ca7762366680dad3a3bef))
+
 ## [1.1.4](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.3...1.1.4) (2025-04-23)
 
 
