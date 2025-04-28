@@ -224,7 +224,7 @@ spec:
   |------------------|-----------------|
   |tls-keystore.jks  |Keystore         |
   |keystore_password |Keystore password|
-  |key.password      |Key password     |
+  |key_password      |Key password     |
   
   [Java Generate Keys Tutorial](https://docs.oracle.com/javase/tutorial/security/toolsign/step3.html)
 
