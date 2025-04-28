@@ -167,7 +167,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 				LocalObjectReference: v1.LocalObjectReference{
 					Name: TLSSecretName,
 				},
-				Key: "key.password",
+				Key: "key_password",
 			},
 		},
 		})
@@ -432,7 +432,7 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 		Data: map[string][]byte{
 			"tls-keystore.jks":  []byte(TLSKeystore),
 			"keystore_password": []byte(TLSKeystorePassword),
-			"key.password":      []byte(TLSKeystorePassword),
+			"key_password":      []byte(TLSKeystorePassword),
 		},
 	}
 	err = ctrl.SetControllerReference(instance, jksTLSSecret, r.Scheme)
