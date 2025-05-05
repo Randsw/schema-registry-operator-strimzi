@@ -690,7 +690,8 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				return k8sClient.Get(ctx, typeNamespaceName, found)
 			}, time.Minute*2, time.Second).Should(Succeed())
 
-			// Updating Cluster secret to check if JKS secret is updated too
+			// Test Updating Cluster secret to check if JKS secret is updated too
+			// Get JKS secret resourseVersion
 			readSecret := &corev1.Secret{}
 			typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
 			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
@@ -698,6 +699,16 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			// Save JKS secret resource version before update
 			JKSResourceVersionOld := readSecret.ResourceVersion
 			JKSResourceVersionOldInt, err := strconv.Atoi(JKSResourceVersionOld)
+			Expect(err).To(Not(HaveOccurred()))
+
+			// Get JKS secret resourseVersion
+			readSecret = &corev1.Secret{}
+			typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}
+			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+			Expect(err).To(Not(HaveOccurred()))
+			// Save JKS secret resource version before update
+			TLSResourceVersionOld := readSecret.ResourceVersion
+			TLSResourceVersionOldInt, err := strconv.Atoi(TLSResourceVersionOld)
 			Expect(err).To(Not(HaveOccurred()))
 
 			// Update Cluster secret
@@ -736,6 +747,17 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			JKSResourceVersionNewInt, err := strconv.Atoi(JKSResourceVersionNew)
 			Expect(err).To(Not(HaveOccurred()))
 			Expect(JKSResourceVersionNewInt > JKSResourceVersionOldInt).To(BeTrue())
+
+			// Read updated TLS secret
+			readSecret = &corev1.Secret{}
+			typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}
+			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+			Expect(err).To(Not(HaveOccurred()))
+
+			TLSResourceVersionNew := readSecret.ResourceVersion
+			TLSResourceVersionNewInt, err := strconv.Atoi(TLSResourceVersionNew)
+			Expect(err).To(Not(HaveOccurred()))
+			Expect(TLSResourceVersionNewInt > TLSResourceVersionOldInt).To(BeTrue())
 
 			// Updating User secret to check if JKS secret is updated too
 			readSecret = &corev1.Secret{}
