@@ -1,3 +1,36 @@
+## [1.3.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.2.0...1.3.0) (2025-05-06)
+
+
+### :scissors: Refactor
+
+* Rename key password in TLS secret ([4a5c72c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4a5c72c07ab56a127b4edee79a19de69a27cef3b))
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump golangci/golangci-lint-action from 7 to 8 ([a1d33e6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a1d33e67351b1b1b86cddc965073146e177ff1f6))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.32.4 to 0.33.0 ([9e27b55](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9e27b55cd5b0035176db3b2f2ef8e0f1346d24e7))
+
+
+### 🧪 Tests
+
+* Add test - Renew TLS secret after kafka cluster CA is updated ([360141f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/360141ff26c260976e284c3cea8928e89e9a47e7))
+
+
+### 🚀 Features
+
+* Add status field to CRD. Set to Ok if schema registry pod is running. Not ready otherwise ([1e98728](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1e9872823c1f145c2019fa3b4570a7c280530329))
+
+
+### 🛠 Fixes
+
+* Print status in get request ([3e2cd81](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3e2cd8111b60b3bb75f21b3bcf06b2b2cd7bcf3d))
+
+
+### Other
+
+* **deps:** Bump golang version ([68b2727](https://github.com/Randsw/schema-registry-operator-strimzi/commit/68b2727a98a422329cc57e7afeb0cba9724ef40d))
+
 ## [1.2.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.1.4...1.2.0) (2025-04-24)
 
 
