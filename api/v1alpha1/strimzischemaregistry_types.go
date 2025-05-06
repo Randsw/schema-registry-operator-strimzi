@@ -46,7 +46,7 @@ type StrimziSchemaRegistryStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
+// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.status",description="The status of Schema Registry"
 // StrimziSchemaRegistry is the Schema for the strimzischemaregistries API
 type StrimziSchemaRegistry struct {
 	metav1.TypeMeta   `json:",inline"`
