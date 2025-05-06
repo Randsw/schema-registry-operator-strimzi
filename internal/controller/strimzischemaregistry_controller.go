@@ -233,6 +233,16 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "Failed to get Deployment")
 		return ctrl.Result{}, err
 	}
+	if found.Status.ReadyReplicas == found.Status.Replicas {
+		instance.Status.Status = "Ok"
+	} else {
+		instance.Status.Status = "Not Ready"
+	}
+	err = r.Status().Update(ctx, instance)
+	if err != nil {
+		logger.Error(err, "Failed to update CR Status")
+		return ctrl.Result{}, err
+	}
 	// Creating service for deployment
 	foundSvc := &v1.Service{}
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, foundSvc)

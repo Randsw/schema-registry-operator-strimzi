@@ -646,7 +646,6 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}
-
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
@@ -677,7 +676,6 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}
-
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
@@ -689,6 +687,24 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
 				return k8sClient.Get(ctx, typeNamespaceName, found)
 			}, time.Minute*2, time.Second).Should(Succeed())
+
+			By("Checking if CRD status field is set to Ok")
+			Eventually(func() string {
+				By("Reconciling the created resource")
+				controllerReconciler := &StrimziSchemaRegistryReconciler{
+					Client: k8sClient,
+					Scheme: k8sClient.Scheme(),
+				}
+				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: typeNamespacedName,
+				})
+				Expect(err).NotTo(HaveOccurred())
+				instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+				err = k8sClient.Get(ctx, typeNamespaceName, instance)
+				Expect(err).NotTo(HaveOccurred())
+				return instance.Status.Status
+			}, time.Minute*20, time.Second).Should(Equal("Ok"))
 
 			// Test Updating Cluster secret to check if JKS secret is updated too
 			// Get JKS secret resourseVersion
