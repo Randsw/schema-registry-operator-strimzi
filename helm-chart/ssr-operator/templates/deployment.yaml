@@ -39,6 +39,9 @@ spec:
             - --metrics-bind-address=0.0.0.0:8080
             - --leader-elect
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          volumeMounts:
+            - mountPath: /tmp
+              name: temp-volume
           livenessProbe:
             failureThreshold: 3
             httpGet:
@@ -61,6 +64,11 @@ spec:
             timeoutSeconds: 1
           resources:
             {{- toYaml .Values.image.resources | nindent 12 }}
+      volumes:
+      - name: temp-volume
+        emptyDir:
+          sizeLimit: 500Mi
+          medium: Memory
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
