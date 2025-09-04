@@ -112,7 +112,7 @@ jobs:
               fetch-depth: 0
               token: ${{ secrets.SEMANTIC_TOKEN }}
           - name: Setup NodeJS
-            uses: actions/setup-node@v4
+            uses: actions/setup-node@v5
   
           - name: Setup package.json
             run: echo '{"name":"semantic-release", "devDependencies":{"@semantic-release/changelog":"^6.0.1","@semantic-release/exec":"^6.0.3","@semantic-release/git":"^10.0.1","@semantic-release/release-notes-generator":"^10.0.3","conventional-changelog-conventionalcommits":"^5.0.0","semantic-release":"^21.0.2"}}' > package.json
