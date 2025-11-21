@@ -12,7 +12,7 @@ jobs:
       runs-on: ubuntu-latest
       steps:
       - name: checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
@@ -52,7 +52,7 @@ jobs:
         - name: Config Git # https://github.com/rickstaa/action-contains-tag/pull/18
           run: git config --global remote.origin.followRemoteHEAD never
         - name: Checkout
-          uses: actions/checkout@v5
+          uses: actions/checkout@v6
           with:
             fetch-depth: 0
         - name: Check if tag belong to commit in main branch
