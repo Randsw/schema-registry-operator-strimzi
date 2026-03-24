@@ -31,7 +31,7 @@ jobs:
           token: ${{ secrets.SEMANTIC_TOKEN }}
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -72,7 +72,7 @@ jobs:
           token: ${{ secrets.SEMANTIC_TOKEN }}
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
 
       - name: Set up Python
         uses: actions/setup-python@v6
