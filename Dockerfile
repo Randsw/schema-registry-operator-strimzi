@@ -16,7 +16,7 @@ RUN make build
 
 # Use ubuntu image to install keytool binary
 # Openssl image already present in Ubuntu
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 WORKDIR /
 RUN apt update && apt -y install --no-install-recommends default-jre openssl && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /workspace/bin/manager .
