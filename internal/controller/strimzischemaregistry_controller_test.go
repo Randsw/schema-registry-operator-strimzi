@@ -22,12 +22,12 @@ import (
 	"strconv"
 	"time"
 
-	kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
+	//kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/utils/ptr"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -427,61 +427,63 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Namespace: namespace.Name,
 				},
 				Spec: &kafka.KafkaSpec{
-					EntityOperator: &kafka.KafkaSpecEntityOperator{
-						TopicOperator: &kafka.KafkaSpecEntityOperatorTopicOperator{},
-						UserOperator:  &kafka.KafkaSpecEntityOperatorUserOperator{},
+					EntityOperator: &kafka.EntityOperatorSpec{
+						TopicOperator: &kafka.EntityTopicOperatorSpec{},
+						UserOperator:  &kafka.EntityUserOperatorSpec{},
 					},
-					Kafka: kafka.KafkaSpecKafka{
-						Authorization: &kafka.KafkaSpecKafkaAuthorization{
+					Kafka: &kafka.KafkaClusterSpec{
+						Authorization: &kafka.KafkaAuthorization{
 							SuperUsers: []string{"CN=root"},
-							Type:       kafka.KafkaSpecKafkaAuthorizationTypeSimple,
+							Type:       kafka.KafkaAuthorizationType(kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE),
 						},
-						Config: &v1.JSON{
-							Raw: []byte(jsonString),
+						Config: kafka.MapStringObject{
+							"apple":   5,
+							"lettuce": 7,
+							//Raw: []byte(jsonString),
 						},
-						Listeners: []kafka.KafkaSpecKafkaListenersElem{
+						Listeners: []kafka.GenericKafkaListener{
 							{
 								Name: "plain",
 								Port: 9092,
 								Tls:  false,
-								Type: kafka.KafkaSpecKafkaListenersElemTypeInternal,
+								Type: kafka.INTERNAL_KAFKALISTENERTYPE,
 							},
 							{
 								Name: "tls",
 								Port: 9093,
 								Tls:  true,
-								Type: kafka.KafkaSpecKafkaListenersElemTypeInternal,
-								Authentication: &kafka.KafkaSpecKafkaListenersElemAuthentication{
-									Type: kafka.KafkaSpecKafkaListenersElemAuthenticationTypeTls,
+								Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+								Authentication: &kafka.KafkaListenerAuthentication{
+									Type: kafka.TLS_KAFKALISTENERAUTHENTICATIONTYPE,
 								},
 							},
 						},
-						Version: ptr.To("3.9.0"),
+						Version: "4.1.0",
 					},
 				},
 			}
 			status := &kafka.KafkaStatus{
-				ClusterId: ptr.To("Ypb68J1GSu-jqq0N0ama0w"),
-				Listeners: []kafka.KafkaStatusListenersElem{
+				ClusterId: "Ypb68J1GSu-jqq0N0ama0w",
+				Listeners: []kafka.ListenerStatus{
 					{
-						Addresses: []kafka.KafkaStatusListenersElemAddressesElem{
+						Addresses: []kafka.ListenerAddress{
 							{
-								Host: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc"),
+								Host: "kafka-cluster-kafka-bootstrap.kafka.svc",
 								Port: ptr.To(int32(9092)),
 							},
 						},
-						BootstrapServers: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc:9092"),
-						Name:             ptr.To("plain"),
+						BootstrapServers: "kafka-cluster-kafka-bootstrap.kafka.svc:9092",
+						Name:             "plain",
 					},
 					{
-						Addresses: []kafka.KafkaStatusListenersElemAddressesElem{
+						Addresses: []kafka.ListenerAddress{
 							{
-								Host: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc"),
+								Host: "kafka-cluster-kafka-bootstrap.kafka.svc",
 								Port: ptr.To(int32(9093)),
 							},
 						},
-						BootstrapServers: ptr.To("kafka-cluster-kafka-bootstrap.kafka.svc:9093"),
-						Name:             ptr.To("TLS"),
+						BootstrapServers: "kafka-cluster-kafka-bootstrap.kafka.svc:9093",
+						Name:             "TLS",
 						Certificates:     []string{cert},
 					},
 				},
@@ -508,22 +510,22 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					},
 				},
 				Spec: &kafka.KafkaUserSpec{
-					Authentication: &kafka.KafkaUserSpecAuthentication{
-						Type: kafka.KafkaUserSpecAuthenticationTypeTls,
+					Authentication: &kafka.KafkaUserAuthentication{
+						Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE,
 					},
-					Authorization: &kafka.KafkaUserSpecAuthorization{
-						Acls: []kafka.KafkaUserSpecAuthorizationAclsElem{
+					Authorization: &kafka.KafkaUserAuthorization{
+						Acls: []kafka.AclRule{
 							{
-								Host: ptr.To("*"),
-								Resource: kafka.KafkaUserSpecAuthorizationAclsElemResource{
-									Name:        ptr.To("registry-schemas"),
-									PatternType: ptr.To(kafka.KafkaUserSpecAuthorizationAclsElemResourcePatternTypeLiteral),
-									Type:        kafka.KafkaUserSpecAuthorizationAclsElemResourceTypeTopic,
+								Host: "*",
+								Resource: &kafka.AclRuleResource{
+									Name:        "registry-schemas",
+									PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE,
+									Type:        kafka.TOPIC_ACLRULERESOURCETYPE,
 								},
-								Operations: []kafka.KafkaUserSpecAuthorizationAclsElemOperationsElem{kafka.KafkaUserSpecAuthorizationAclsElemOperationsElemAll},
+								Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION},
 							},
 						},
-						Type: kafka.KafkaUserSpecAuthorizationTypeSimple,
+						Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE,
 					},
 				},
 			}
