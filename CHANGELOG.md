@@ -1,3 +1,93 @@
+## [1.4.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.3.0...1.4.0) (2026-05-06)
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump actions/checkout from 4 to 5 ([ed8ecc8](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ed8ecc819b2478f807e0673c76f7a179fa38787c))
+* **deps:** Bump actions/checkout from 5 to 6 ([99d1ad5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/99d1ad50b930b3c62fc9a15c06da3b1209ee059a))
+* **deps:** Bump actions/setup-go from 5 to 6 ([3886f88](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3886f889112509a016aa775cdf672b18fabf5a8b))
+* **deps:** Bump actions/setup-node from 4 to 5 ([7b7fda7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7b7fda719d19955a154828f0bc0feade40c2c1a4))
+* **deps:** Bump actions/setup-node from 5 to 6 ([573b4cf](https://github.com/Randsw/schema-registry-operator-strimzi/commit/573b4cf70c8d2f70947d9b52e53c9d001373da90))
+* **deps:** Bump actions/setup-python from 5 to 6 ([6ec4921](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6ec49211e124df0967c79dea909cd5fcd9890d8b))
+* **deps:** Bump azure/setup-helm from 4 to 5 ([2094d01](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2094d01bfef0e69747a8a41f56288decb031f5ce))
+* **deps:** Bump docker/build-push-action from 6 to 7 ([5771034](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5771034745839da38acbff20720ab3b171ba2568))
+* **deps:** Bump docker/login-action from 3 to 4 ([4c71636](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4c7163676e3b9aef7546d9ccd460ddebc3952d13))
+* **deps:** Bump docker/metadata-action from 5 to 6 ([a5bb3dd](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a5bb3ddb91beddb3d595e56f5ed8083fb9e0f1af))
+* **deps:** Bump docker/setup-buildx-action from 3 to 4 ([6493bbc](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6493bbc83619b75b8e7e8c326d8a63c6e83b340e))
+* **deps:** Bump github.com/go-logr/logr from 1.4.2 to 1.4.3 ([5f1c520](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5f1c520335aa9696d6718de8e97cca4b53deca1b))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.23.4 to 2.24.0 ([0906b13](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0906b1361efc03f6ec7198d4bdf49fc6a35b90b5))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.24.0 to 2.25.0 ([b3119ab](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b3119ab0fa534575c876ebbefaad2bd1c35028f8))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.25.1 to 2.25.2 ([7eac428](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7eac428f0128c7d4462a06b880e467ab75ec905d))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.25.2 to 2.25.3 ([ccedc92](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ccedc92774133f81db5bc4eaf78ed1bf99cf75e4))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.25.3 to 2.26.0 ([79401a5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/79401a557aaa7fec29327c77c020f327fea2cec9))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.26.0 to 2.27.1 ([ae2a0eb](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ae2a0eba4d3db78b2dd41a9828c74455a866cde5))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.27.1 to 2.27.2 ([663145d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/663145d82b0b4879f367ce92bdcde4b4150de392))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.27.2 to 2.27.3 ([a6a0e1c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a6a0e1c8c0f7ac4d5e3ff5b9104c93aa79878773))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.27.3 to 2.27.4 ([06c11c0](https://github.com/Randsw/schema-registry-operator-strimzi/commit/06c11c0aaf131d822944391c9f282a19575d934b))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.27.4 to 2.27.5 ([74de87f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/74de87f0bae745480586f1a692a67d6cc4a0abe4))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.27.5 to 2.28.1 ([dece8e7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/dece8e75fc9f19ff5a22660b420541277df29ae4))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.28.1 to 2.28.2 ([68f31f1](https://github.com/Randsw/schema-registry-operator-strimzi/commit/68f31f15337a97e4e68bc7cfc9e6e5c27015a73e))
+* **deps:** Bump github.com/onsi/gomega from 1.37.0 to 1.38.0 ([52a7318](https://github.com/Randsw/schema-registry-operator-strimzi/commit/52a73182e874e59fc20690ed2e53e66d8d100ba4))
+* **deps:** Bump github.com/onsi/gomega from 1.38.0 to 1.38.1 ([8fe8d1e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8fe8d1eb58526de0919444314804dd8eb9d5133e))
+* **deps:** Bump github.com/onsi/gomega from 1.38.1 to 1.38.2 ([1622670](https://github.com/Randsw/schema-registry-operator-strimzi/commit/16226708bfe89d4b6538620f1e9c3d4f8fa27d89))
+* **deps:** Bump github.com/onsi/gomega from 1.38.2 to 1.38.3 ([cb0fb4f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/cb0fb4f35bdf81dcb547d0d307d4a8aa556d2144))
+* **deps:** Bump github.com/onsi/gomega from 1.38.3 to 1.39.0 ([5fa914a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5fa914aff5e00caa066083090aae3d26a08e79fa))
+* **deps:** Bump github.com/onsi/gomega from 1.39.0 to 1.39.1 ([472c2f9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/472c2f9cbe556ca74240171aac6bd7cc1d423561))
+* **deps:** Bump github.com/onsi/gomega from 1.39.1 to 1.40.0 ([48e2e56](https://github.com/Randsw/schema-registry-operator-strimzi/commit/48e2e563b0c65887bfb99b2ecee7bb590960381a))
+* **deps:** Bump github.com/prometheus/client_golang ([fd2d7ec](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fd2d7ec6b2a4be013eec603ff99e1fb3fb37656e))
+* **deps:** Bump github.com/prometheus/client_golang ([fb9db73](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fb9db736e30607e800c50bfdde53cbd1c26938bd))
+* **deps:** Bump go.uber.org/zap from 1.27.0 to 1.27.1 ([2a01d05](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2a01d05bba4cb984700fd46a8a799b46ad4c1cb1))
+* **deps:** Bump go.uber.org/zap from 1.27.1 to 1.28.0 ([b7868b4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b7868b4a1b9c2249805a609c7cb0036908c309d5))
+* **deps:** Bump golang from 1.24 to 1.25 ([244c439](https://github.com/Randsw/schema-registry-operator-strimzi/commit/244c4392b26cc7b3822f9a0dc24530d51cb672c3))
+* **deps:** Bump golang from 1.25 to 1.26 ([1316533](https://github.com/Randsw/schema-registry-operator-strimzi/commit/13165332c24b6312b7e203d555197c7a13fad543))
+* **deps:** Bump golangci/golangci-lint-action from 8 to 9 ([bef3d20](https://github.com/Randsw/schema-registry-operator-strimzi/commit/bef3d20d44bb2883a22ef749d98a577e27fa8ead))
+* **deps:** Bump helm/chart-testing-action from 2.7.0 to 2.8.0 ([7080cfb](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7080cfbbcdd4b306ca51797df8cc94c00fc41056))
+* **deps:** Bump helm/kind-action from 1.12.0 to 1.13.0 ([3092921](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3092921906217d84be93441b7992dbbb228e5753))
+* **deps:** Bump helm/kind-action from 1.13.0 to 1.14.0 ([c6d834c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c6d834c6965242e9a1c03c583bde73f3696f093e))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.33.0 to 0.33.1 ([ce2a229](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ce2a229f095ad2deb9c5f33af9d8440801fc0b97))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.33.1 to 0.33.2 ([5da6fca](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5da6fca650cc1c8fb2b84829827f85c258206d70))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.33.2 to 0.33.3 ([2d66237](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2d66237ff9745d61595fe1b57aab46817277ddaa))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.33.3 to 0.33.4 ([3b3681b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3b3681b3dfe7109d5832dafa8783a0147a691e04))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.33.4 to 0.34.0 ([71e92d4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/71e92d441a7bb9a23fe715b8910f1bf36efc9678))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.34.0 to 0.34.1 ([8ce32ab](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8ce32ab143a4d75fe2f754f42beaccb6dab774ee))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.34.1 to 0.34.2 ([e96506c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e96506c90053223e49a18870ab839bb26470a572))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.34.2 to 0.34.3 ([aebc615](https://github.com/Randsw/schema-registry-operator-strimzi/commit/aebc6154dc2baeb4794bb03d400081116b347a76))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.34.3 to 0.35.0 ([47df7cf](https://github.com/Randsw/schema-registry-operator-strimzi/commit/47df7cf411df4b3126d947783c97c66bf22268e8))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.35.0 to 0.35.1 ([3e58e65](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3e58e6513f9fec35dccef9e3c2bbf9c936e373d1))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.35.1 to 0.35.2 ([cc8b0de](https://github.com/Randsw/schema-registry-operator-strimzi/commit/cc8b0de11008f0783e5a8e61361006cdae705b01))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.35.2 to 0.35.3 ([496d7a0](https://github.com/Randsw/schema-registry-operator-strimzi/commit/496d7a07ac013547a5d7b76cd0c40f9239b158d4))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.35.3 to 0.35.4 ([6237fdd](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6237fdd85418de8f019b3a5b1c3f99fa7d2248df))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.20.4 to 0.21.0 ([d4f1370](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d4f13702469ae18fe2f76c7d207c8640af440eac))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.21.0 to 0.22.0 ([a52f445](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a52f4457a73d79c71450d7af0ac81d5987d55761))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.22.0 to 0.22.1 ([18f8a3d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/18f8a3d701b2c8ef6c3a1a489dd6c5af71cbf212))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.22.1 to 0.22.2 ([28dc257](https://github.com/Randsw/schema-registry-operator-strimzi/commit/28dc2571d829570cbb7491556ac9c484d37d9721))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.22.2 to 0.22.3 ([8bbbab5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8bbbab556662c2fffb44e81ef3649531b8be35ad))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.22.3 to 0.22.4 ([822c138](https://github.com/Randsw/schema-registry-operator-strimzi/commit/822c138212df2bfe03f966943382fa296f35ef0a))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.22.4 to 0.23.0 ([e713782](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e713782335cdbcb497733eb80803c954b91d8962))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.23.0 to 0.23.1 ([872461d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/872461d935be9a21ff13706d604ac1a794589f3b))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.23.1 to 0.23.2 ([2029924](https://github.com/Randsw/schema-registry-operator-strimzi/commit/20299247c0b2634edebf679a64b92e3ac55061b6))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.23.2 to 0.23.3 ([6135ce5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6135ce5c3e5ce5374e7b63b3d9bcb0ee1f5b2cde))
+* **deps:** Bump softprops/action-gh-release from 2 to 3 ([9e5c396](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9e5c396318c47d47e6a33e1bba3e717f4f377c9a))
+* **deps:** Bump tj-actions/changed-files from 46 to 47 ([3a13289](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3a13289afc7e2891f28de87d06837c01aa8f8118))
+* **helm:** Add emptydir volume to operator deployment ([1aac4e7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1aac4e7c4752be12ed784fc444e9c861a174f29e))
+
+
+### 🚀 Features
+
+* **controller-gen:** Remove deprecated scheme.Builder ([ea81a55](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ea81a5599b8517646e358ed0020089692ec33217))
+
+
+### 🛠 Fixes
+
+* **strimzi-kafka:** Update strimzi kafka api spec to v1 ([01a028d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/01a028dac078925f050a2e424cd757003dbbef68))
+
+
+### Other
+
+* Bump controller-toll version to 0.16.5 ([841b303](https://github.com/Randsw/schema-registry-operator-strimzi/commit/841b303ee5266cc9438833f8219382dd8e8489e6))
+* **deps:** Bump golang to 1.26 ([90a0989](https://github.com/Randsw/schema-registry-operator-strimzi/commit/90a0989be93b685a2cf7f2a52da65d0e9f8901b9))
+* **deps:** Bump golang version to 1.25 ([8a2fa81](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8a2fa81b60beac9f3197f99caea2432591379de2))
+
 ## [1.3.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.2.0...1.3.0) (2025-05-06)
 
 
