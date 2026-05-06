@@ -66,5 +66,5 @@ type StrimziSchemaRegistryList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&StrimziSchemaRegistry{}, &StrimziSchemaRegistryList{})
+	SchemeBuilder.Register(addKnownTypes)
 }
