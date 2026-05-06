@@ -392,8 +392,6 @@ s5W0eD3LBAgC8mjMvbRSSAICCAA=
 	return userp12
 }
 
-var jsonString string = `{"apple":5,"lettuce":7}`
-
 var _ = Describe("StrimziSchemaRegistry Controller", func() {
 	Context("When reconciling a resource", func() {
 		const SchemaRegistryName = "test-resource"

@@ -373,7 +373,7 @@ func TestGeneratePasswordLenght(t *testing.T) {
 	password := GeneratePassword(24, true, false)
 
 	if len(password) != expectedLenght {
-		t.Errorf("Output %q not equal to expected %q", len(password), expectedLenght)
+		t.Errorf("Output %d not equal to expected %d", len(password), expectedLenght)
 		return
 	}
 	t.Log("Password lenght correct")
