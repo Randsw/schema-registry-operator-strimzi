@@ -5,10 +5,11 @@ import (
 	go_err "errors"
 	"strings"
 
-	kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
+	//kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
 	"github.com/go-logr/logr"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
+	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -245,9 +246,9 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 		kafkaListener = "tls"
 	}
 	for _, listener := range kafkaCluster.Status.Listeners {
-		logger.V(1).Info("Found kafka listeners.", "Listener", *listener.Name)
-		if *listener.Name == kafkaListener {
-			kafkaBootstrapServer = *listener.BootstrapServers
+		logger.V(1).Info("Found kafka listeners.", "Listener", listener.Name)
+		if listener.Name == kafkaListener {
+			kafkaBootstrapServer = listener.BootstrapServers
 			logger.V(1).Info("Found specified kafka cluster listeners.", "Listener", kafkaListener, "kafkaBootstap", kafkaBootstrapServer)
 			logger.V(1).Info("KafkaBootstap", "Address", kafkaBootstrapServer)
 			return kafkaBootstrapServer, kafkaClusterName, nil
