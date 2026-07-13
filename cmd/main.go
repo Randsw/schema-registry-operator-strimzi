@@ -38,6 +38,7 @@ import (
 
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/controller"
+	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	// +kubebuilder:scaffold:imports
 )
@@ -90,6 +91,9 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Register Prometheus metrics
+	monitoring.RegisterMetrics()
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
