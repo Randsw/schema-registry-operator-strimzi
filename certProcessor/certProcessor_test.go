@@ -370,7 +370,10 @@ s5W0eD3LBAgC8mjMvbRSSAICCAA=
 
 func TestGeneratePasswordLenght(t *testing.T) {
 	expectedLenght := 24
-	password := GeneratePassword(24, true, false)
+	password, err := GeneratePassword(24, true, false)
+	if err != nil {
+		t.Error(err)
+	}
 
 	if len(password) != expectedLenght {
 		t.Errorf("Output %d not equal to expected %d", len(password), expectedLenght)
@@ -382,7 +385,10 @@ func TestGeneratePasswordLenght(t *testing.T) {
 func TestGeneratePasswordLetter(t *testing.T) {
 	result := true
 	var badSymbol rune
-	password := GeneratePassword(12, false, false)
+	password, err := GeneratePassword(12, false, false)
+	if err != nil {
+		t.Error(err)
+	}
 	for _, r := range password {
 		if !unicode.IsLetter(r) {
 			result = false
@@ -399,7 +405,10 @@ func TestGeneratePasswordLetter(t *testing.T) {
 func TestGeneratePasswordNumber(t *testing.T) {
 	result := true
 	var badSymbol rune
-	password := GeneratePassword(12, true, false)
+	password, err := GeneratePassword(12, true, false)
+	if err != nil {
+		t.Error(err)
+	}
 	for _, r := range password {
 		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
 			result = false
@@ -415,7 +424,10 @@ func TestGeneratePasswordNumber(t *testing.T) {
 
 func TestGeneratePasswordSpecial(t *testing.T) {
 	result := false
-	password := GeneratePassword(12, true, true)
+	password, err := GeneratePassword(12, true, true)
+	if err != nil {
+		t.Error(err)
+	}
 	for _, r := range password {
 		if !unicode.IsLetter(r) || !unicode.IsDigit(r) {
 			result = true

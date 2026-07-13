@@ -19,7 +19,15 @@ import (
 	"github.com/go-logr/logr"
 )
 
-func GeneratePassword(length int, includeNumber bool, includeSpecial bool) string {
+type CertProcessor struct {
+	log *logr.Logger
+}
+
+func NewCertProcessor(logger *logr.Logger) *CertProcessor {
+	return &CertProcessor{logger}
+}
+
+func GeneratePassword(length int, includeNumber bool, includeSpecial bool) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	var charSource string
 	if includeNumber {
@@ -30,20 +38,16 @@ func GeneratePassword(length int, includeNumber bool, includeSpecial bool) strin
 	}
 	charSource += charset
 
+	max := big.NewInt(int64(len(charSource)))
 	password := make([]byte, length)
-	for i := 0; i < length; i++ {
-		b, _ := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(len(charSource))))
+	for i := range length {
+		b, err := cryptorand.Int(cryptorand.Reader, max)
+		if err != nil {
+			return "", err
+		}
 		password[i] = charSource[b.Int64()]
 	}
-	return string(password)
-}
-
-type CertProcessor struct {
-	log *logr.Logger
-}
-
-func NewCertProcessor(logger *logr.Logger) *CertProcessor {
-	return &CertProcessor{logger}
+	return string(password), nil
 }
 
 ///Create a JKS-formatted truststore using the cluster's CA certificate.
@@ -67,7 +71,12 @@ func NewCertProcessor(logger *logr.Logger) *CertProcessor {
 
 func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte, string, error) {
 	if password == "" {
-		password = GeneratePassword(24, true, false)
+		var err error
+		password, err = GeneratePassword(24, true, false)
+		if err != nil {
+			cp.log.Error(err, "Failed to generate cryptographically secure random number")
+			return nil, "", err
+		}
 	}
 	// Create temporary file
 	file, err := os.CreateTemp("", "ca_cert")
@@ -156,7 +165,12 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, userKey string, userp12 string, password string) ([]byte, string, error) {
 
 	if password == "" {
-		password = GeneratePassword(24, true, false)
+		var err error
+		password, err = GeneratePassword(24, true, false)
+		if err != nil {
+			cp.log.Error(err, "Failed to generate cryptographically secure random number")
+			return nil, "", err
+		}
 	}
 	var p12_path string
 	tempDir := os.TempDir()
@@ -307,7 +321,12 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, password string, cn string) ([]byte, string, error) {
 	// Create key, create clr. Sign clr with CACert. Create keystore.
 	if password == "" {
-		password = GeneratePassword(24, true, false)
+		var err error
+		password, err = GeneratePassword(24, true, false)
+		if err != nil {
+			cp.log.Error(err, "Failed to generate cryptographically secure random number")
+			return nil, "", err
+		}
 	}
 	var p12_path string
 	tempDir := os.TempDir()
@@ -362,15 +381,15 @@ func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, passwor
 		return nil, "", err
 	}
 	defer func() {
-		err = os.Remove(keyFile.Name())
+		err = os.Remove(keyFile)
 		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", keyFile.Name())
+			cp.log.Error(err, "Failed to delete file", "File", keyFile)
 		}
 	}()
 	defer func() {
-		err = os.Remove(certFile.Name())
+		err = os.Remove(certFile)
 		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", certFile.Name())
+			cp.log.Error(err, "Failed to delete file", "File", certFile)
 		}
 	}()
 	p12_path = tempDir + "/" + "tls.p12"
@@ -381,7 +400,7 @@ func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, passwor
 		}
 	}()
 	// Generate p12 format bundle
-	cmd := exec.Command("openssl", "pkcs12", "-export", "-in", certFile.Name(), "-inkey", keyFile.Name(), "-chain", "-CAfile",
+	cmd := exec.Command("openssl", "pkcs12", "-export", "-in", certFile, "-inkey", keyFile, "-chain", "-CAfile",
 		CAFile.Name(), "-name", "confluent-schema-registry-tls", "-passout", "pass:"+password, "-out", p12_path)
 	out, err := cmd.Output()
 	if err != nil {
@@ -520,24 +539,36 @@ func StringToPrivateKey(privateKeyString string) (*rsa.PrivateKey, error) {
 	}
 }
 
-func (cp *CertProcessor) saveFiles(serverKey *rsa.PrivateKey, serverCert *x509.Certificate) (*os.File, *os.File, error) {
+func (cp *CertProcessor) saveFiles(serverKey *rsa.PrivateKey, serverCert *x509.Certificate) (string, string, error) {
 	// Save server private key
 	serverKeyFile, err := os.CreateTemp("", "tls-server.key")
 	if err != nil {
-		return nil, nil, err
+		return "", "", err
 	}
+	defer func() {
+		err = serverKeyFile.Close()
+		if err != nil {
+			cp.log.Error(err, "Failed to close file", "File", serverKeyFile.Name())
+		}
+	}()
 	err = pem.Encode(serverKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)})
 	if err != nil {
-		return nil, nil, err
+		return "", "", err
 	}
 	// Save server certificate
 	serverCertFile, err := os.CreateTemp("", "tls-server.crt")
 	if err != nil {
-		return nil, nil, err
+		return "", "", err
 	}
+	defer func() {
+		err = serverCertFile.Close()
+		if err != nil {
+			cp.log.Error(err, "Failed to close file", "File", serverCertFile.Name())
+		}
+	}()
 	err = pem.Encode(serverCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverCert.Raw})
 	if err != nil {
-		return nil, nil, err
+		return "", "", err
 	}
-	return serverKeyFile, serverCertFile, nil
+	return serverKeyFile.Name(), serverCertFile.Name(), nil
 }
