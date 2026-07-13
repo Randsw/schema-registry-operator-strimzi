@@ -1,3 +1,28 @@
+## [1.4.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.0...1.4.1) (2026-07-13)
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump actions/checkout from 6 to 7 ([67bb637](https://github.com/Randsw/schema-registry-operator-strimzi/commit/67bb63785b2ae2eeb087284a977aa182afe519b9))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.28.2 to 2.28.3 ([73e3924](https://github.com/Randsw/schema-registry-operator-strimzi/commit/73e3924dc22627a1af3ea33c14ec212928b7d03c))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.28.3 to 2.29.0 ([2f86687](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2f8668722c93ee2abe73581b86fd23b0317ff1c7))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.29.0 to 2.30.0 ([0544e09](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0544e094b561e227420bda15c5fbc0fa461b74fe))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.30.0 to 2.31.0 ([53880aa](https://github.com/Randsw/schema-registry-operator-strimzi/commit/53880aaebb86270b8693ca94f09d7133c3c876b4))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.31.0 to 2.32.0 ([1300c13](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1300c130b5b93729c2dacabefd133d9c337f0dd2))
+* **deps:** Bump github.com/onsi/gomega from 1.40.0 to 1.41.0 ([564b67c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/564b67caadb66b87c2f6032f4d19ebb3b8bdbfa5))
+* **deps:** Bump github.com/onsi/gomega from 1.41.0 to 1.42.0 ([1c0f3d7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1c0f3d7465ec595e9a03f90c654d3de0562cf0ef))
+* **deps:** Bump github.com/onsi/gomega from 1.42.0 to 1.42.1 ([4cc969d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4cc969dbd73d8843c0887a62e1bfa8864b430b64))
+* **deps:** Bump github.com/scholzj/strimzi-go from 0.9.0 to 0.10.0 ([38b96dd](https://github.com/Randsw/schema-registry-operator-strimzi/commit/38b96dd491a885c405e9ae92ef758920507f1a46))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.36.0 to 0.36.1 ([edbf68a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/edbf68a785b1bf251c94a87b5f109d05149afcf6))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.36.1 to 0.36.2 ([664eda7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/664eda7f5e28c9bace44efa7fbc3177d28e0399a))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.24.0 to 0.24.1 ([edf28cf](https://github.com/Randsw/schema-registry-operator-strimzi/commit/edf28cf199c124dd78147618d888e6f5a12ac185))
+* **deps:** Bump ubuntu from 24.04 to 26.04 ([60fec0f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/60fec0f71f6b008def9731c0214fd35b81013138))
+
+
+### 🛠 Fixes
+
+* Register monitoring ([32e23e9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/32e23e958c4e31cabd952ad4ad544e9a2e654698))
+
 ## [1.4.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.3.0...1.4.0) (2026-05-06)
 
 
