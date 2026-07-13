@@ -1,3 +1,11 @@
+## [1.4.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.1...1.4.2) (2026-07-13)
+
+
+### 🛠 Fixes
+
+* Return defer func for cert and key files ([c6eaab1](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c6eaab1b459e35a895bffddbbcce9b7933c9f74f))
+* Use crypto/rand to generate random bytes ([8f4c797](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8f4c7972d85d733bd3819cb3fe2e921e307c3639))
+
 ## [1.4.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.0...1.4.1) (2026-07-13)
 
 
