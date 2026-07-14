@@ -750,34 +750,34 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Read updated JKS secret using Eventually
-			Eventually(func() bool {
+			Eventually(func() (int, error) {
 				readSecret = &corev1.Secret{}
 				typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
 				err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
 				if err != nil {
-					return false
+					return 0, err
 				}
 				JKSResourceVersionNewInt, err := strconv.Atoi(readSecret.ResourceVersion)
 				if err != nil {
-					return false
+					return 0, err
 				}
-				return JKSResourceVersionNewInt > JKSResourceVersionOldInt
-			}, time.Minute, time.Second).Should(BeTrue())
+				return JKSResourceVersionNewInt, nil
+			}, time.Minute, time.Second).Should(BeNumerically(">", JKSResourceVersionOldInt))
 
 			// Read updated TLS secret using Eventually
-			Eventually(func() bool {
+			Eventually(func() (int, error) {
 				readSecret = &corev1.Secret{}
 				typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}
 				err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
 				if err != nil {
-					return false
+					return 0, err
 				}
 				TLSResourceVersionNewInt, err := strconv.Atoi(readSecret.ResourceVersion)
 				if err != nil {
-					return false
+					return 0, err
 				}
-				return TLSResourceVersionNewInt > TLSResourceVersionOldInt
-			}, time.Minute, time.Second).Should(BeTrue())
+				return TLSResourceVersionNewInt, nil
+			}, time.Minute, time.Second).Should(BeNumerically(">", TLSResourceVersionOldInt))
 
 			// Updating User secret to check if JKS secret is updated too
 			readSecret = &corev1.Secret{}
@@ -812,19 +812,18 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Read updated JKS secret using Eventually
-			Eventually(func() bool {
-				readSecret = &corev1.Secret{}
-				typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
-				err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
-				if err != nil {
-					return false
+			Eventually(func() (int, error) {
+				secret := &corev1.Secret{}
+				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+				if err := k8sClient.Get(ctx, typeNamespaceName, secret); err != nil {
+					return 0, err
 				}
 				JKSResourceVersionNewInt, err := strconv.Atoi(readSecret.ResourceVersion)
 				if err != nil {
-					return false
+					return 0, err
 				}
-				return JKSResourceVersionNewInt > JKSResourceVersionOldInt
-			}, time.Minute, time.Second).Should(BeTrue())
+				return JKSResourceVersionNewInt, nil
+			}, time.Minute, time.Second).Should(BeNumerically(">", JKSResourceVersionOldInt))
 		})
 	})
 })
