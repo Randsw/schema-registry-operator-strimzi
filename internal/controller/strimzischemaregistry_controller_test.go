@@ -751,13 +751,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			// Read updated JKS secret using Eventually
 			Eventually(func() (int, error) {
-				readSecret = &corev1.Secret{}
-				typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
-				err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+				secret := &corev1.Secret{}
+				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+				err = k8sClient.Get(ctx, typeNamespaceName, secret)
 				if err != nil {
 					return 0, err
 				}
-				JKSResourceVersionNewInt, err := strconv.Atoi(readSecret.ResourceVersion)
+				JKSResourceVersionNewInt, err := strconv.Atoi(secret.ResourceVersion)
 				if err != nil {
 					return 0, err
 				}
@@ -766,13 +766,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			// Read updated TLS secret using Eventually
 			Eventually(func() (int, error) {
-				readSecret = &corev1.Secret{}
-				typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}
-				err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
+				secret := &corev1.Secret{}
+				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}
+				err = k8sClient.Get(ctx, typeNamespaceName, secret)
 				if err != nil {
 					return 0, err
 				}
-				TLSResourceVersionNewInt, err := strconv.Atoi(readSecret.ResourceVersion)
+				TLSResourceVersionNewInt, err := strconv.Atoi(secret.ResourceVersion)
 				if err != nil {
 					return 0, err
 				}
