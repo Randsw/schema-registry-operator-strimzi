@@ -30,7 +30,10 @@ func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string,
 		"app.kubernetes.io/version": func() string {
 			parts := strings.Split(image, ":")
 			if len(parts) > 1 {
-				return parts[len(parts)-1]
+				last := parts[len(parts)-1]
+				if !strings.Contains(last, "/") {
+					return last
+				}
 			}
 			return "latest"
 		}(),
