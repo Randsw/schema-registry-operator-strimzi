@@ -62,12 +62,12 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	var jksResourceVersion string
 	if secret != nil {
-		jksResourceVersion = secret.ResourceVersion
 		err = r.Create(ctx, secret)
 		if err != nil {
 			logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+"-jks")
 			return nil
 		}
+		jksResourceVersion = secret.ResourceVersion
 		logger.V(1).Info("Secret for Schema Registry KafkaStore TLS created successfully", "Secret.Name", secret.Name)
 	} else {
 		// Secret is up-to-date, fetch existing to get ResourceVersion
