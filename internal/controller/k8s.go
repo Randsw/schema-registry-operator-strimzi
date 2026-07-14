@@ -475,6 +475,17 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 		logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
 		return nil, err
 	}
+	if jksSecret == nil {
+		jksSecret = &v1.Secret{}
+		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, jksSecret)
+		if err != nil {
+			logger.Error(err, "Failed to get jks secret after user or cluster CA secret changed")
+			return nil, err
+		}
+	}
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
 	dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = jksSecret.ResourceVersion
 	return dep, nil
 }
