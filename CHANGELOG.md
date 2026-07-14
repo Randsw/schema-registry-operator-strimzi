@@ -1,3 +1,11 @@
+## [1.4.4](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.3...1.4.4) (2026-07-14)
+
+
+### 🛠 Fixes
+
+* Add check if jksSecret is nil ([0f8cc19](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0f8cc19ca52f0876c18d80507a54004d8c281cb7))
+* Controller-runtime in-place mutate object in create function. Read secret to get resourceVersion unnessesary ([c570b5d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c570b5d679b8008ce2317d946bebcab009424f4b))
+
 ## [1.4.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.2...1.4.3) (2026-07-14)
 
 
