@@ -17,17 +17,27 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string,
-	image string, kakfkaClusterName string) map[string]string {
+	image string, kafkaClusterName string) map[string]string {
 	return map[string]string{"app": name_app, "strimzi-schema-registry": name_cr,
 		"app.kubernetes.io/instance":   name_app,
 		"app.kubernetes.io/managed-by": "strimzi-registry-operator",
 		"app.kubernetes.io/name":       "strimzischemaregistry",
 		"app.kubernetes.io/part-of":    name_app,
-		"app.kubernetes.io/version":    strings.Split(image, ":")[1],
-		"strimzi.io/cluster":           kakfkaClusterName} //schema-registry image tag
+		"app.kubernetes.io/version": func() string {
+			parts := strings.Split(image, ":")
+			if len(parts) > 1 {
+				last := parts[len(parts)-1]
+				if !strings.Contains(last, "/") {
+					return last
+				}
+			}
+			return "latest"
+		}(),
+		"strimzi.io/cluster": kafkaClusterName} //schema-registry image tag
 }
 
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
@@ -50,18 +60,27 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	secret, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
 	if err != nil {
 		logger.Error(err, "Failed to format secret", "Secret.Name", instance.Name+"-jks")
+		return nil
 	}
+
+	var jksResourceVersion string
 	if secret != nil {
 		err = r.Create(ctx, secret)
 		if err != nil {
 			logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+"-jks")
+			return nil
 		}
+		jksResourceVersion = secret.ResourceVersion
 		logger.V(1).Info("Secret for Schema Registry KafkaStore TLS created successfully", "Secret.Name", secret.Name)
 	} else {
-		err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, secret)
+		// Secret is up-to-date, fetch existing to get ResourceVersion
+		existingSecret := &v1.Secret{}
+		err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, existingSecret)
 		if err != nil {
-			logger.Error(err, "Failed to get secret", "Secret.Name", instance.Name+"-jks")
+			logger.Error(err, "Failed to get existing jks secret", "Secret.Name", instance.Name+"-jks")
+			return nil
 		}
+		jksResourceVersion = existingSecret.ResourceVersion
 	}
 	// Formation of the pod ENV
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", Value: kafkaBootstrapServer})
@@ -194,7 +213,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podSpec.Spec.Volumes = podVolume
 	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
 	podSpec.Labels = ls
-	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": secret.ResourceVersion}
+	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": jksResourceVersion}
 
 	dep := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -223,7 +242,7 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	// and read name from it
 	kafkaUsers := &kafka.KafkaUserList{}
 	var kafkaClusterName string
-	err := r.List(ctx, kafkaUsers)
+	err := r.List(ctx, kafkaUsers, client.InNamespace(instance.Namespace))
 	if err != nil {
 		return "", "", err
 	}
@@ -289,8 +308,12 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	clientCACert := string(userSecret.Data["ca.crt"])
 	clientCert := string(userSecret.Data["user.crt"])
 	clientKey := string(userSecret.Data["user.key"])
-	userPassword := string(userSecret.Data["user.password"])
 	clientp12 := string(userSecret.Data["user.p12"])
+	userPasswordData, ok := userSecret.Data["user.password"]
+	if !ok {
+		return nil, go_err.New("user.password field is missing from KafkaUser secret; this field is required for keystore creation")
+	}
+	userPassword := string(userPasswordData)
 
 	jks_secret := &v1.Secret{}
 	jks_secret_name := instance.Name + "-jks"

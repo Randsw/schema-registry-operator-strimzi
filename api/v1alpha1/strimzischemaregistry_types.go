@@ -21,26 +21,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// StrimziSchemaRegistry manages Confluent Schema Registry deployment
+// alongside Strimzi Kafka clusters, handling TLS certificates and
+// keystore/truststore generation automatically.
 
 // StrimziSchemaRegistrySpec defines the desired state of StrimziSchemaRegistry
 type StrimziSchemaRegistrySpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Listener name for Kafka cluster (defaults to "tls")
 
 	Listener           string                 `json:"listener"`
 	SecurityProtocol   string                 `json:"securityprotocol"`
 	CompatibilityLevel string                 `json:"compatibilitylevel"`
 	SecureHTTP         bool                   `json:"securehttp"`
 	TLSSecretName      string                 `json:"tlssecretname,omitempty"`
-	Template           corev1.PodTemplateSpec `json:"template" protobuf:"bytes,6,opt,name=template"`
+	Template           corev1.PodTemplateSpec `json:"template"`
 }
 
 // StrimziSchemaRegistryStatus defines the observed state of StrimziSchemaRegistry
 type StrimziSchemaRegistryStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Status of the Schema Registry deployment (Ok, Not Ready, etc.)
 	Status string `json:"status"`
 }
 
