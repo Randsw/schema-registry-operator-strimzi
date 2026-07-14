@@ -467,21 +467,14 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 }
 
 func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
-	ctx context.Context, logger *logr.Logger) (*apps.Deployment, error) {
-	// Read created secret to get his ResourceVersion
-	readSecret := &v1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, readSecret)
-	if err != nil {
-		logger.Error(err, "Failed to get new jks secret after user or cluster CA secret changed")
-		return nil, err
-	}
+	ctx context.Context, logger *logr.Logger, jksSecret *v1.Secret) (*apps.Deployment, error) {
 	// Update deployment
 	dep := &apps.Deployment{}
-	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, dep)
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, dep)
 	if err != nil {
 		logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
 		return nil, err
 	}
-	dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = readSecret.ResourceVersion
+	dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = jksSecret.ResourceVersion
 	return dep, nil
 }
