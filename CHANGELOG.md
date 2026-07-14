@@ -1,3 +1,11 @@
+## [1.4.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.2...1.4.3) (2026-07-14)
+
+
+### 🛠 Fixes
+
+* Add password presence check in secret ([f26f4fb](https://github.com/Randsw/schema-registry-operator-strimzi/commit/f26f4fbb8e6de2d82845f167d111b6c314cd3cec))
+* Fix registry version parsing ([37e5940](https://github.com/Randsw/schema-registry-operator-strimzi/commit/37e59408c208e9cdb76c7c87390ff60d0dd3bf45))
+
 ## [1.4.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.1...1.4.2) (2026-07-13)
 
 
