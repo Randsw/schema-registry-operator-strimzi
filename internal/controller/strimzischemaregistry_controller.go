@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"time"
 
 	"strings"
 
@@ -142,7 +141,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 	if userSecretChanged || clusterCASecretChanged {
-		newSecret := &v1.Secret{}
+		var newSecret *v1.Secret
 		if userSecretChanged && clusterCASecretChanged {
 			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
 				CAsecret, userSecret)
@@ -155,11 +154,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 				TLSSecret, err := r.createTLSSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"])
 				if err != nil {
 					logger.Error(err, "Failed to format TLS secret")
+					return ctrl.Result{}, err
 				}
 				if TLSSecret != nil {
 					err = r.Create(ctx, TLSSecret)
 					if err != nil {
 						logger.Error(err, "Failed to create TLS secret")
+						return ctrl.Result{}, err
 					}
 					logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
 				}
@@ -183,24 +184,27 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 				TLSSecret, err := r.createTLSSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"])
 				if err != nil {
 					logger.Error(err, "Failed to format TLS secret")
+					return ctrl.Result{}, err
 				}
 				if TLSSecret != nil {
 					err = r.Create(ctx, TLSSecret)
 					if err != nil {
 						logger.Error(err, "Failed to create TLS secret")
+						return ctrl.Result{}, err
 					}
 					logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
 				}
 			}
 		}
-		err = r.Create(ctx, newSecret)
-		if err != nil {
-			logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
-			return ctrl.Result{}, err
+		if newSecret != nil && newSecret.Name != "" {
+			err = r.Create(ctx, newSecret)
+			if err != nil {
+				logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+				return ctrl.Result{}, err
+			}
 		}
-		logger.Info("Creating new jks secret after user or cluster CA secret changed was successfull")
-		time.Sleep(50 * time.Millisecond) //Pause for KubeApi write new secret to etcd so we can get it ResourceVersion
-		dep, err := r.updateDeployment(instance, ctx, &logger)
+		logger.Info("Creating new jks secret after user or cluster CA secret changed was successful")
+		dep, err := r.updateDeployment(instance, ctx, &logger, newSecret)
 		if err != nil {
 			logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
 			return ctrl.Result{}, err
