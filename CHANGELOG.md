@@ -1,3 +1,15 @@
+## [1.4.5](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.4...1.4.5) (2026-07-14)
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump actions/setup-node from 6 to 7 ([fc49537](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fc49537893023390e47fdc6036d424a09e24705f))
+
+
+### 🛠 Fixes
+
+* Use Enentually insead of sleep ([dde6934](https://github.com/Randsw/schema-registry-operator-strimzi/commit/dde6934b730988c634c00bfe8c3e81e4febfcd4b))
+
 ## [1.4.4](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.3...1.4.4) (2026-07-14)
 
 
