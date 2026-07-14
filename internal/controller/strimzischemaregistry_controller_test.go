@@ -739,8 +739,6 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Update(ctx, readSecret)).To(Succeed())
 			Expect(err).To(Not(HaveOccurred()))
 
-			time.Sleep(500 * time.Millisecond)
-
 			By("Reconciling after cluster secret Update")
 			controllerReconciler = &StrimziSchemaRegistryReconciler{
 				Client: k8sClient,
@@ -751,29 +749,35 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			time.Sleep(500 * time.Millisecond)
+			// Read updated JKS secret using Eventually
+			Eventually(func() (int, error) {
+				secret := &corev1.Secret{}
+				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+				err = k8sClient.Get(ctx, typeNamespaceName, secret)
+				if err != nil {
+					return 0, err
+				}
+				JKSResourceVersionNewInt, err := strconv.Atoi(secret.ResourceVersion)
+				if err != nil {
+					return 0, err
+				}
+				return JKSResourceVersionNewInt, nil
+			}, time.Minute, time.Second).Should(BeNumerically(">", JKSResourceVersionOldInt))
 
-			// Read updated JKS secret
-			readSecret = &corev1.Secret{}
-			typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
-			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
-			Expect(err).To(Not(HaveOccurred()))
-
-			JKSResourceVersionNew := readSecret.ResourceVersion
-			JKSResourceVersionNewInt, err := strconv.Atoi(JKSResourceVersionNew)
-			Expect(err).To(Not(HaveOccurred()))
-			Expect(JKSResourceVersionNewInt > JKSResourceVersionOldInt).To(BeTrue())
-
-			// Read updated TLS secret
-			readSecret = &corev1.Secret{}
-			typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}
-			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
-			Expect(err).To(Not(HaveOccurred()))
-
-			TLSResourceVersionNew := readSecret.ResourceVersion
-			TLSResourceVersionNewInt, err := strconv.Atoi(TLSResourceVersionNew)
-			Expect(err).To(Not(HaveOccurred()))
-			Expect(TLSResourceVersionNewInt > TLSResourceVersionOldInt).To(BeTrue())
+			// Read updated TLS secret using Eventually
+			Eventually(func() (int, error) {
+				secret := &corev1.Secret{}
+				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}
+				err = k8sClient.Get(ctx, typeNamespaceName, secret)
+				if err != nil {
+					return 0, err
+				}
+				TLSResourceVersionNewInt, err := strconv.Atoi(secret.ResourceVersion)
+				if err != nil {
+					return 0, err
+				}
+				return TLSResourceVersionNewInt, nil
+			}, time.Minute, time.Second).Should(BeNumerically(">", TLSResourceVersionOldInt))
 
 			// Updating User secret to check if JKS secret is updated too
 			readSecret = &corev1.Secret{}
@@ -797,8 +801,6 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Update(ctx, readSecret)).To(Succeed())
 			Expect(err).To(Not(HaveOccurred()))
 
-			time.Sleep(500 * time.Millisecond)
-
 			By("Reconciling after user secret Update")
 			controllerReconciler = &StrimziSchemaRegistryReconciler{
 				Client: k8sClient,
@@ -809,18 +811,19 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			time.Sleep(500 * time.Millisecond)
-
-			// Read updated JKS secret
-			readSecret = &corev1.Secret{}
-			typeNamespaceName = types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
-			err = k8sClient.Get(ctx, typeNamespaceName, readSecret)
-			Expect(err).To(Not(HaveOccurred()))
-
-			JKSResourceVersionNew = readSecret.ResourceVersion
-			JKSResourceVersionNewInt, err = strconv.Atoi(JKSResourceVersionNew)
-			Expect(err).To(Not(HaveOccurred()))
-			Expect(JKSResourceVersionNewInt > JKSResourceVersionOldInt).To(BeTrue())
+			// Read updated JKS secret using Eventually
+			Eventually(func() (int, error) {
+				secret := &corev1.Secret{}
+				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+				if err := k8sClient.Get(ctx, typeNamespaceName, secret); err != nil {
+					return 0, err
+				}
+				JKSResourceVersionNewInt, err := strconv.Atoi(readSecret.ResourceVersion)
+				if err != nil {
+					return 0, err
+				}
+				return JKSResourceVersionNewInt, nil
+			}, time.Minute, time.Second).Should(BeNumerically(">", JKSResourceVersionOldInt))
 		})
 	})
 })
