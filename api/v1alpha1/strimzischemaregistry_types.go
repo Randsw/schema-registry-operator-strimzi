@@ -35,7 +35,7 @@ type StrimziSchemaRegistrySpec struct {
 	SecureHTTP         bool   `json:"securehttp"`
 	TLSSecretName      string `json:"tlssecretname,omitempty"`
 	// HeapOpts sets the JVM heap options for Schema Registry (defaults to "-Xms512M -Xmx512M")
-	HeapOpts string                 `json:"heaptopsopts,omitempty"`
+	HeapOpts string                 `json:"heapopts,omitempty"`
 	Template corev1.PodTemplateSpec `json:"template"`
 }
 

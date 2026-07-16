@@ -217,14 +217,17 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	}
 	// H5: Add readiness/liveness probes
 	listenerPort := int32(8081)
+	scheme := v1.URISchemeHTTP
 	if instance.Spec.SecureHTTP {
 		listenerPort = int32(8085)
+		scheme = v1.URISchemeHTTP
 	}
 	podSpec.Spec.Containers[0].ReadinessProbe = &v1.Probe{
 		ProbeHandler: v1.ProbeHandler{
 			HTTPGet: &v1.HTTPGetAction{
-				Path: "/subjects",
-				Port: intstr.IntOrString{IntVal: listenerPort},
+				Path:   "/",
+				Port:   intstr.IntOrString{IntVal: listenerPort},
+				Scheme: scheme,
 			},
 		},
 		InitialDelaySeconds: 30,
@@ -246,8 +249,9 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podSpec.Spec.Containers[0].StartupProbe = &v1.Probe{
 		ProbeHandler: v1.ProbeHandler{
 			HTTPGet: &v1.HTTPGetAction{
-				Path: "/subjects",
-				Port: intstr.IntOrString{IntVal: listenerPort},
+				Path:   "/",
+				Port:   intstr.IntOrString{IntVal: listenerPort},
+				Scheme: scheme,
 			},
 		},
 		InitialDelaySeconds: 30,

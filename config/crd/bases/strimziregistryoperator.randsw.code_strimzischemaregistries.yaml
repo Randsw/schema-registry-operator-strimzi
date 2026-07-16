@@ -33,7 +33,7 @@ spec:
             properties:
               compatibilitylevel:
                 type: string
-              heaptopsopts:
+              heapopts:
                 type: string
               listener:
                 type: string
