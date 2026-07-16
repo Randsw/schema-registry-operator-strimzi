@@ -33,6 +33,8 @@ spec:
             properties:
               compatibilitylevel:
                 type: string
+              heaptopsopts:
+                type: string
               listener:
                 type: string
               securehttp:

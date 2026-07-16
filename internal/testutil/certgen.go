@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"software.sslmate.com/src/go-pkcs12"
-	//"golang.org/x/crypto/pkcs12"
 )
 
 // TestCA represents a generated test CA with cert and key in PEM format.
@@ -175,7 +174,8 @@ func GenerateTestUserCert(ca *TestCA, password string) (*TestUserCert, error) {
 	}))
 
 	// Create PKCS#12 bundle containing user cert + user key + CA cert
-	pkcs12Data, err := pkcs12.Modern.Encode(
+
+	pkcs12Data, err := pkcs12.Legacy.Encode(
 		userKey,
 		userCert,
 		[]*x509.Certificate{ca.CACert},

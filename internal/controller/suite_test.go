@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -134,7 +135,7 @@ var _ = BeforeSuite(func() {
 		// Note that you must have the required binaries setup under the bin directory to perform
 		// the tests directly. When we run make test it will be setup and used automatically.
 		BinaryAssetsDirectory: filepath.Join("..", "..", "bin", "k8s",
-			fmt.Sprintf("1.31.0-%s-%s", runtime.GOOS, runtime.GOARCH)),
+			fmt.Sprintf("%s-%s-%s", envtestVersion(), runtime.GOOS, runtime.GOARCH)),
 	}
 
 	// cfg is defined in this file globally.
@@ -162,3 +163,12 @@ var _ = AfterSuite(func() {
 	err := testEnv.Stop()
 	Expect(err).NotTo(HaveOccurred())
 })
+
+// envtestVersion returns the k8s version for envtest binaries,
+// reading from ENVTEST_K8S_VERSION env var (set by Makefile) or falling back to a default.
+func envtestVersion() string {
+	if v := os.Getenv("ENVTEST_K8S_VERSION"); v != "" {
+		return v
+	}
+	return "1.36.0"
+}

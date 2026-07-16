@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"software.sslmate.com/src/go-pkcs12"
-	//"golang.org/x/crypto/pkcs12"
 )
 
 func TestGenerateTestCA(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 
 	"strings"
 
+	"github.com/go-logr/logr"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
 	apps "k8s.io/api/apps/v1"
@@ -149,21 +150,9 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
 				return ctrl.Result{}, err
 			}
-			//Renew REST API TLS secret after cluster CA secret changed
-			if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName == "" {
-				TLSSecret, err := r.createTLSSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"])
-				if err != nil {
-					logger.Error(err, "Failed to format TLS secret")
-					return ctrl.Result{}, err
-				}
-				if TLSSecret != nil {
-					err = r.Create(ctx, TLSSecret)
-					if err != nil {
-						logger.Error(err, "Failed to create TLS secret")
-						return ctrl.Result{}, err
-					}
-					logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
-				}
+			// Renew REST API TLS secret after cluster CA secret changed
+			if err = r.renewTLSSecret(instance, ctx, &logger); err != nil {
+				return ctrl.Result{}, err
 			}
 		} else if userSecretChanged && !clusterCASecretChanged {
 			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
@@ -176,24 +165,12 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
 				CAsecret, nil)
 			if err != nil {
-				logger.Error(err, "Failed to create jks secret after user secret changed")
+				logger.Error(err, "Failed to create jks secret after cluster CA secret changed")
 				return ctrl.Result{}, err
 			}
-			//Renew REST API TLS secret after cluster CA secret changed
-			if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName == "" {
-				TLSSecret, err := r.createTLSSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"])
-				if err != nil {
-					logger.Error(err, "Failed to format TLS secret")
-					return ctrl.Result{}, err
-				}
-				if TLSSecret != nil {
-					err = r.Create(ctx, TLSSecret)
-					if err != nil {
-						logger.Error(err, "Failed to create TLS secret")
-						return ctrl.Result{}, err
-					}
-					logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
-				}
+			// Renew REST API TLS secret after cluster CA secret changed
+			if err = r.renewTLSSecret(instance, ctx, &logger); err != nil {
+				return ctrl.Result{}, err
 			}
 		}
 		if newSecret != nil && newSecret.Name != "" {
@@ -222,7 +199,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, found)
 	if err != nil && errors.IsNotFound(err) {
 		// Define a new Deployment
-		deployment := r.createDeployment(instance, ctx, &logger)
+		deployment, err := r.createDeployment(instance, ctx, &logger)
+		if err != nil {
+			logger.Error(err, "Failed to create deployment")
+			return ctrl.Result{}, err
+		}
 		// Increment instance count
 		monitoring.StrimziSchemaRegisterCurrentInstanceCount.Inc()
 		err = r.Create(ctx, deployment)
@@ -251,7 +232,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	foundSvc := &v1.Service{}
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, foundSvc)
 	if err != nil && errors.IsNotFound(err) {
-		svc := r.createService(instance, &logger)
+		svc, err := r.createService(instance, &logger)
+		if err != nil {
+			logger.Error(err, "Failed to create service")
+			return ctrl.Result{}, err
+		}
 		err = r.Create(ctx, svc)
 		if err != nil {
 			logger.Error(err, "Failed to create new Service", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
@@ -275,7 +260,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 			&v1.Secret{}, // Watch the secret
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
-				err := r.List(ctx, attachedStrimziRegistryOperators)
+				err := r.List(ctx, attachedStrimziRegistryOperators, client.InNamespace(obj.GetNamespace()))
 				if err != nil {
 					return []reconcile.Request{}
 				}
@@ -308,6 +293,27 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		).
 		Owns(&apps.Deployment{}).
 		Complete(r)
+}
+
+// renewTLSSecret creates and applies a new TLS secret for Schema Registry REST API.
+// It is a no-op when SecureHTTP is disabled or a custom TLSSecretName is provided.
+func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) error {
+	if !instance.Spec.SecureHTTP || instance.Spec.TLSSecretName != "" {
+		return nil
+	}
+	TLSSecret, err := r.createTLSSecret(instance, ctx, logger, instance.GetLabels()["strimzi.io/cluster"])
+	if err != nil {
+		logger.Error(err, "Failed to format TLS secret")
+		return err
+	}
+	if TLSSecret != nil {
+		if err = r.Create(ctx, TLSSecret); err != nil {
+			logger.Error(err, "Failed to create TLS secret")
+			return err
+		}
+		logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
+	}
+	return nil
 }
 
 func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {

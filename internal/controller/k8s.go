@@ -13,6 +13,7 @@ import (
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -41,7 +42,7 @@ func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string,
 }
 
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
-	ctx context.Context, logger *logr.Logger) *apps.Deployment {
+	ctx context.Context, logger *logr.Logger) (*apps.Deployment, error) {
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Deployment.Name", instance.Name+"-deploy")
 	var defaultMode int32 = 420
 	podSpec := instance.Spec.Template
@@ -54,13 +55,13 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	kafkaBootstrapServer, kafkaClusterName, err := r.getKafkaBootstrapServers(instance, ctx, *logger)
 	if err != nil {
 		logger.Error(err, "Fail to get Kafka bootstrap servers")
-		return nil
+		return nil, err
 	}
 	// Create secret for Kafkastore
 	secret, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
 	if err != nil {
 		logger.Error(err, "Failed to format secret", "Secret.Name", instance.Name+"-jks")
-		return nil
+		return nil, err
 	}
 
 	var jksResourceVersion string
@@ -68,7 +69,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		err = r.Create(ctx, secret)
 		if err != nil {
 			logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+"-jks")
-			return nil
+			return nil, err
 		}
 		jksResourceVersion = secret.ResourceVersion
 		logger.V(1).Info("Secret for Schema Registry KafkaStore TLS created successfully", "Secret.Name", secret.Name)
@@ -78,7 +79,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, existingSecret)
 		if err != nil {
 			logger.Error(err, "Failed to get existing jks secret", "Secret.Name", instance.Name+"-jks")
-			return nil
+			return nil, err
 		}
 		jksResourceVersion = existingSecret.ResourceVersion
 	}
@@ -103,7 +104,11 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL", Value: instance.Spec.SecurityProtocol})
 	}
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_MASTER_ELIGIBILITY", Value: "true"})
-	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_HEAP_OPTS", Value: "-Xms512M -Xmx512M"})
+	heapOpts := "-Xms512M -Xmx512M"
+	if instance.Spec.HeapOpts != "" {
+		heapOpts = instance.Spec.HeapOpts
+	}
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_HEAP_OPTS", Value: heapOpts})
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", Value: "registry-schemas"})
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION", Value: "/var/schemaregistry/keystore.jks"})
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"})
@@ -158,11 +163,13 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			TLSSecret, err := r.createTLSSecret(instance, ctx, logger, kafkaClusterName)
 			if err != nil {
 				logger.Error(err, "Failed to format TLS secret")
+				return nil, err
 			}
 			if TLSSecret != nil {
 				err = r.Create(ctx, TLSSecret)
 				if err != nil {
 					logger.Error(err, "Failed to create TLS secret")
+					return nil, err
 				}
 				logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
 			}
@@ -208,6 +215,59 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	} else {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
 	}
+	// H5: Add readiness/liveness probes
+	listenerPort := int32(8081)
+	if instance.Spec.SecureHTTP {
+		listenerPort = int32(8085)
+	}
+	podSpec.Spec.Containers[0].ReadinessProbe = &v1.Probe{
+		ProbeHandler: v1.ProbeHandler{
+			HTTPGet: &v1.HTTPGetAction{
+				Path: "/subjects",
+				Port: intstr.IntOrString{IntVal: listenerPort},
+			},
+		},
+		InitialDelaySeconds: 30,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      5,
+		FailureThreshold:    3,
+	}
+	podSpec.Spec.Containers[0].LivenessProbe = &v1.Probe{
+		ProbeHandler: v1.ProbeHandler{
+			TCPSocket: &v1.TCPSocketAction{
+				Port: intstr.IntOrString{IntVal: listenerPort},
+			},
+		},
+		InitialDelaySeconds: 30,
+		PeriodSeconds:       15,
+		TimeoutSeconds:      5,
+		FailureThreshold:    3,
+	}
+	podSpec.Spec.Containers[0].StartupProbe = &v1.Probe{
+		ProbeHandler: v1.ProbeHandler{
+			HTTPGet: &v1.HTTPGetAction{
+				Path: "/subjects",
+				Port: intstr.IntOrString{IntVal: listenerPort},
+			},
+		},
+		InitialDelaySeconds: 30,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      5,
+		FailureThreshold:    3,
+	}
+	// H6: Add default resource requests/limits
+	if podSpec.Spec.Containers[0].Resources.Limits == nil && podSpec.Spec.Containers[0].Resources.Requests == nil {
+		podSpec.Spec.Containers[0].Resources = v1.ResourceRequirements{
+			Requests: v1.ResourceList{
+				v1.ResourceCPU:    mustParseQuantity("250m"),
+				v1.ResourceMemory: mustParseQuantity("512Mi"),
+			},
+			Limits: v1.ResourceList{
+				v1.ResourceCPU:    mustParseQuantity("1000m"),
+				v1.ResourceMemory: mustParseQuantity("1Gi"),
+			},
+		}
+	}
 	podSpec.Spec.Containers[0].Env = podEnv
 	podSpec.Spec.Containers[0].VolumeMounts = containerVolumeMount
 	podSpec.Spec.Volumes = podVolume
@@ -232,8 +292,9 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	err = ctrl.SetControllerReference(instance, dep, r.Scheme)
 	if err != nil {
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
+		return nil, err
 	}
-	return dep
+	return dep, nil
 }
 
 func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
@@ -368,11 +429,12 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	err = ctrl.SetControllerReference(instance, jks_secret, r.Scheme)
 	if err != nil {
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
+		return nil, err
 	}
 	return jks_secret, nil
 }
 
-func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger *logr.Logger) *v1.Service {
+func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger *logr.Logger) (*v1.Service, error) {
 	var port []v1.ServicePort
 	logger.Info("Creating a new Service", "Service.Namespace", instance.Namespace, "Service.Name", instance.Name)
 	if !instance.Spec.SecureHTTP {
@@ -399,8 +461,9 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 	err := ctrl.SetControllerReference(instance, svc, r.Scheme)
 	if err != nil {
 		logger.Error(err, "Failed to set StrimziSchemaRegistryOperator instance as the owner and controller for service")
+		return nil, err
 	}
-	return svc
+	return svc, nil
 }
 
 func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
@@ -462,6 +525,7 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 	err = ctrl.SetControllerReference(instance, jksTLSSecret, r.Scheme)
 	if err != nil {
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
+		return nil, err
 	}
 	return jksTLSSecret, nil
 }
@@ -488,4 +552,14 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 	}
 	dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = jksSecret.ResourceVersion
 	return dep, nil
+}
+
+// mustParseQuantity parses a resource quantity string, panicking on failure.
+// Used for compile-time known resource values (CPU/memory defaults).
+func mustParseQuantity(s string) resource.Quantity {
+	q, err := resource.ParseQuantity(s)
+	if err != nil {
+		panic("invalid resource quantity " + s + ": " + err.Error())
+	}
+	return q
 }
