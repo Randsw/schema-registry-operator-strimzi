@@ -9,12 +9,14 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/scholzj/strimzi-go v0.10.0
 	go.uber.org/zap v1.28.0
+	golang.org/x/crypto v0.53.0
 	k8s.io/api v0.36.2
 	k8s.io/apiextensions-apiserver v0.36.2
 	k8s.io/apimachinery v0.36.2
 	k8s.io/client-go v0.36.2
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2
 	sigs.k8s.io/controller-runtime v0.24.1
+	software.sslmate.com/src/go-pkcs12 v0.7.3
 )
 
 require (
