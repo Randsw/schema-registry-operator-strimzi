@@ -148,12 +148,11 @@ func TestGenerateClusterCACert(t *testing.T) {
 	}
 
 	// Verify validity period is ~7 years
-	expectedYears := 7
-	actualYears := ca.CACert.NotAfter.Sub(ca.CACert.NotBefore).Hours() / 8766
-	if int(actualYears) != expectedYears {
-		t.Errorf("Expected ~%d years validity, got ~%d years", expectedYears, int(actualYears))
+	expectedNotAfter := ca.CACert.NotBefore.AddDate(7, 0, 0)
+	if !ca.CACert.NotAfter.Equal(expectedNotAfter) {
+		t.Errorf("Expected validity period to be exactly 7 years. Expected NotAfter: %v, got: %v",
+			expectedNotAfter, ca.CACert.NotAfter)
 	}
-
 	// Verify PEM encoding is valid
 	block, _ := pem.Decode([]byte(ca.CACertPEM))
 	if block == nil || block.Type != "CERTIFICATE" {

@@ -92,9 +92,14 @@ func GenerateTestCA() (*TestCA, error) {
 		Bytes: caCertDER,
 	}))
 
+	pkcs8Bytes, err := x509.MarshalPKCS8PrivateKey(caKey) // для UserCert используйте userKey
+	if err != nil {
+		return nil, err
+	}
+
 	caKeyPEM := string(pem.EncodeToMemory(&pem.Block{
 		Type:  "PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(caKey),
+		Bytes: pkcs8Bytes,
 	}))
 
 	return &TestCA{
