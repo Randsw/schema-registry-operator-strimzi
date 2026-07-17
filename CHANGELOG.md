@@ -1,3 +1,15 @@
+## [1.5.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.5...1.5.0) (2026-07-17)
+
+
+### 🚀 Features
+
+* Add probes to generated deployment. Java HeapOpt now configured from CRD ([f8c26e8](https://github.com/Randsw/schema-registry-operator-strimzi/commit/f8c26e85c59d085d66dbb636f1b41a1310e0e405))
+
+
+### 🛠 Fixes
+
+* Add scheme to probe. Fix typo in json field naming ([27f54d6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/27f54d69753addf431152545c88ccd79e4ddd8ed))
+
 ## [1.4.5](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.4...1.4.5) (2026-07-14)
 
 
