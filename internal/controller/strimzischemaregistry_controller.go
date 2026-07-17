@@ -218,6 +218,23 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "Failed to get Deployment")
 		return ctrl.Result{}, err
 	}
+
+	// Deployment exists — reconcile spec changes
+	updatedDep, specChanged, err := r.updateExistingDeployment(instance, ctx, &logger, found)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile deployment spec changes")
+		return ctrl.Result{}, err
+	}
+	if specChanged {
+		err = r.Update(ctx, updatedDep)
+		if err != nil {
+			logger.Error(err, "Failed to update deployment after spec change")
+			return ctrl.Result{}, err
+		}
+		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	if found.Status.ReadyReplicas == found.Status.Replicas {
 		instance.Status.Status = "Ok"
 	} else {
@@ -249,6 +266,47 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "Failed to get Service")
 		return ctrl.Result{}, err
 	}
+
+	// Service exists — reconcile spec changes (e.g., SecureHTTP changed)
+	desiredSvc, err := r.createService(instance, &logger)
+	if err != nil {
+		logger.Error(err, "Failed to create desired service spec")
+		return ctrl.Result{}, err
+	}
+
+	// Compare service ports to detect changes
+	serviceChanged := false
+	if len(foundSvc.Spec.Ports) != len(desiredSvc.Spec.Ports) {
+		serviceChanged = true
+	} else {
+		for i, desiredPort := range desiredSvc.Spec.Ports {
+			existingPort := foundSvc.Spec.Ports[i]
+			if existingPort.Port != desiredPort.Port ||
+				existingPort.TargetPort.IntVal != desiredPort.TargetPort.IntVal ||
+				existingPort.Name != desiredPort.Name {
+				serviceChanged = true
+				break
+			}
+		}
+	}
+
+	if serviceChanged {
+		logger.Info("Service ports changed, updating service",
+			"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		foundSvc.Spec.Ports = desiredSvc.Spec.Ports
+		if foundSvc.Annotations == nil {
+			foundSvc.Annotations = make(map[string]string)
+		}
+		foundSvc.Annotations["type"] = desiredSvc.Spec.Ports[0].Name
+		err = r.Update(ctx, foundSvc)
+		if err != nil {
+			logger.Error(err, "Failed to update service after spec change")
+			return ctrl.Result{}, err
+		}
+		logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
