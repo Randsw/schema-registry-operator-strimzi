@@ -1,3 +1,21 @@
+## [1.6.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.5.0...1.6.0) (2026-07-17)
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump actions/setup-go from 6 to 7 ([6fafe33](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6fafe33af73c286dd26aabc25e336bf18376fe59))
+
+
+### 🚀 Features
+
+* Upgrade deployment and service after CRD spec update ([fdd7529](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fdd75295ac8852fbc3991624cf9867fab9f78e5d))
+* **helm-chart:** Upgrade CRD in chart ([89ff562](https://github.com/Randsw/schema-registry-operator-strimzi/commit/89ff5628ec93273ba29b9f47c55f112a13938873))
+
+
+### 🛠 Fixes
+
+* Check if annotation is nil to avoid panic ([64b15b0](https://github.com/Randsw/schema-registry-operator-strimzi/commit/64b15b06b2ff08745f5ff0e33fdf9b51e6aa3298))
+
 ## [1.5.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.4.5...1.5.0) (2026-07-17)
 
 
