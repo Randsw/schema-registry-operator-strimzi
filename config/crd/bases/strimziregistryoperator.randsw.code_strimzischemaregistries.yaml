@@ -32,6 +32,7 @@ spec:
           spec:
             properties:
               compatibilitylevel:
+                default: forward
                 enum:
                 - none
                 - backward
@@ -45,13 +46,15 @@ spec:
                 pattern: ^(-Xms[a-fA-F0-9]+(m|M|g|G) -Xmx[a-fA-F0-9]+(m|M|g|G))?$
                 type: string
               listener:
+                default: tls
                 maxLength: 255
                 minLength: 1
-                pattern: ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$
+                pattern: ^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,253}[a-zA-Z0-9])?$
                 type: string
               securehttp:
                 type: boolean
               securityprotocol:
+                default: SSL
                 enum:
                 - SSL
                 - SASL_SSL
@@ -3848,10 +3851,7 @@ spec:
                 pattern: ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$
                 type: string
             required:
-            - compatibilitylevel
-            - listener
             - securehttp
-            - securityprotocol
             - template
             type: object
           status:

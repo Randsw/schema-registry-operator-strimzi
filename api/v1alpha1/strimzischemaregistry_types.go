@@ -28,20 +28,23 @@ import (
 // StrimziSchemaRegistrySpec defines the desired state of StrimziSchemaRegistry
 type StrimziSchemaRegistrySpec struct {
 	// Listener name for Kafka cluster (defaults to "tls")
+	// +kubebuilder:default="tls"
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=255
-	// +kubebuilder:validation:Pattern="^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$"
-	Listener string `json:"listener"`
+	// +kubebuilder:validation:Pattern="^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,253}[a-zA-Z0-9])?$"
+	Listener string `json:"listener,omitempty"`
 
 	// SecurityProtocol defines the Kafka security protocol to use.
+	// +kubebuilder:default="SSL"
 	// Valid values: SSL, SASL_SSL, PLAINTEXT, SASL_PLAINTEXT.
 	// +kubebuilder:validation:Enum=SSL;SASL_SSL;PLAINTEXT;SASL_PLAINTEXT
-	SecurityProtocol string `json:"securityprotocol"`
+	SecurityProtocol string `json:"securityprotocol,omitempty"`
 
 	// CompatibilityLevel defines the schema compatibility level for Schema Registry.
 	// Valid values: none, backward, backward_transitive, forward, forward_transitive, full, full_transitive.
+	// +kubebuilder:default="forward"
 	// +kubebuilder:validation:Enum=none;backward;backward_transitive;forward;forward_transitive;full;full_transitive
-	CompatibilityLevel string `json:"compatibilitylevel"`
+	CompatibilityLevel string `json:"compatibilitylevel,omitempty"`
 
 	SecureHTTP bool `json:"securehttp"`
 
