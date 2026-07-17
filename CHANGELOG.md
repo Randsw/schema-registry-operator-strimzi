@@ -1,3 +1,11 @@
+## [1.6.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.6.0...1.6.1) (2026-07-17)
+
+
+### 🛠 Fixes
+
+* Add default values to spec field ([d03fdbc](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d03fdbc9281b1af0f191e53c8aadd2e2885a1d67))
+* Add spec field validation ([c49e806](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c49e8060883220decfda9e472130a12c6e788aa7))
+
 ## [1.6.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.5.0...1.6.0) (2026-07-17)
 
 
