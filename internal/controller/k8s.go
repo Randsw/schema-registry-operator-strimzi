@@ -3,6 +3,9 @@ package controller
 import (
 	"context"
 	go_err "errors"
+	"fmt"
+	"hash/fnv"
+	"io"
 	"strings"
 
 	//kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
@@ -46,6 +49,10 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Deployment.Name", instance.Name+"-deploy")
 	var defaultMode int32 = 420
 	podSpec := instance.Spec.Template
+	// Validate that at least one container exists
+	if len(podSpec.Spec.Containers) == 0 {
+		return nil, fmt.Errorf("template must contain at least one container")
+	}
 	// Create Schema registry configuration
 	var podEnv []v1.EnvVar
 	var podVolume []v1.Volume
@@ -215,7 +222,6 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	} else {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
 	}
-	// H5: Add readiness/liveness probes
 	listenerPort := int32(8081)
 	scheme := v1.URISchemeHTTP
 	if instance.Spec.SecureHTTP {
@@ -259,7 +265,6 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		TimeoutSeconds:      5,
 		FailureThreshold:    3,
 	}
-	// H6: Add default resource requests/limits
 	if podSpec.Spec.Containers[0].Resources.Limits == nil && podSpec.Spec.Containers[0].Resources.Requests == nil {
 		podSpec.Spec.Containers[0].Resources = v1.ResourceRequirements{
 			Requests: v1.ResourceList{
@@ -279,11 +284,22 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podSpec.Labels = ls
 	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": jksResourceVersion}
 
+	// Compute spec hash and store it in annotation to detect spec changeson subsequent reconciliations.
+	specHash, err := computeSpecHash(instance)
+	if err != nil {
+		logger.Error(err, "Failed to calculate CR spec hash")
+		return nil, err
+	}
+	podSpec.Annotations[keyPrefix+"/specHash"] = specHash
+
 	dep := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name + "-deploy",
 			Namespace: instance.Namespace,
 			Labels:    ls,
+			Annotations: map[string]string{
+				keyPrefix + "/specHash": specHash,
+			},
 		},
 		Spec: apps.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
@@ -556,6 +572,92 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 	}
 	dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = jksSecret.ResourceVersion
 	return dep, nil
+}
+
+// computeSpecHash computes a hash of the relevant spec fields to detect changes.
+// The hash covers CompatibilityLevel, SecureHTTP, HeapOpts, Listener, SecurityProtocol,
+// and TLSSecretName — all fields that affect the deployment spec or service ports.
+
+func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
+	h := fnv.New32a()
+
+	if _, err := io.WriteString(h, string(instance.Spec.CompatibilityLevel)); err != nil {
+		return "", fmt.Errorf("failed to write CompatibilityLevel to hash: %w", err)
+	}
+
+	if _, err := fmt.Fprintf(h, "%t", instance.Spec.SecureHTTP); err != nil {
+		return "", fmt.Errorf("failed to write SecureHTTP to hash: %w", err)
+	}
+
+	if _, err := io.WriteString(h, instance.Spec.HeapOpts); err != nil {
+		return "", fmt.Errorf("failed to write HeapOpts to hash: %w", err)
+	}
+
+	if _, err := io.WriteString(h, instance.Spec.Listener); err != nil {
+		return "", fmt.Errorf("failed to write Listener to hash: %w", err)
+	}
+
+	if _, err := io.WriteString(h, instance.Spec.SecurityProtocol); err != nil {
+		return "", fmt.Errorf("failed to write SecurityProtocol to hash: %w", err)
+	}
+
+	if _, err := io.WriteString(h, instance.Spec.TLSSecretName); err != nil {
+		return "", fmt.Errorf("failed to write TLSSecretName to hash: %w", err)
+	}
+
+	return fmt.Sprintf("%d", h.Sum32()), nil
+}
+
+// updateExistingDeployment updates an existing deployment when the spec has changed.
+// It generates the desired deployment, compares the spec hash annotation, and updates
+// the deployment spec + triggers a rollout via annotation change if needed.
+func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger *logr.Logger, found *apps.Deployment,
+) (*apps.Deployment, bool, error) {
+	// Generate desired deployment from current spec
+	desired, err := r.createDeployment(instance, ctx, logger)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Compute desired spec hash
+	desiredHash, err := computeSpecHash(instance)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Get existing hash from annotation
+	existingAnnotations := found.GetAnnotations()
+	if existingAnnotations == nil {
+		existingAnnotations = make(map[string]string)
+	}
+	existingHash := existingAnnotations[keyPrefix+"/specHash"]
+
+	// If hash matches, no spec change detected
+	if existingHash == desiredHash {
+		return found, false, nil
+	}
+
+	logger.Info("Spec hash changed, updating deployment",
+		"oldHash", existingHash, "newHash", desiredHash)
+
+	// Update the deployment spec to match desired state
+	found.Spec = desired.Spec
+
+	// Update annotations to trigger rollout
+	if found.Spec.Template.Annotations == nil {
+		found.Spec.Template.Annotations = make(map[string]string)
+	}
+	found.Spec.Template.Annotations[keyPrefix+"/specHash"] = desiredHash
+
+	// Also update top-level annotations
+	if found.Annotations == nil {
+		found.Annotations = make(map[string]string)
+	}
+	found.Annotations[keyPrefix+"/specHash"] = desiredHash
+
+	return found, true, nil
 }
 
 // mustParseQuantity parses a resource quantity string, panicking on failure.
