@@ -49,10 +49,11 @@ type StrimziSchemaRegistrySpec struct {
 	SecureHTTP bool `json:"securehttp"`
 
 	// TLSSecretName is the name of the Kubernetes secret containing TLS certificates.
-	// Must be a valid Kubernetes resource name (DNS subdomain).
-	// +kubebuilder:validation:MinLength=1
+	// Must be a valid Kubernetes resource name (DNS subdomain) or empty.
+	// +kubebuilder:default=""
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern="^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$"
+	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
+	// +optional
 	TLSSecretName string `json:"tlssecretname,omitempty"`
 
 	// HeapOpts sets the JVM heap options for Schema Registry (defaults to "-Xms512M -Xmx512M")
