@@ -222,7 +222,6 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	} else {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
 	}
-	// H5: Add readiness/liveness probes
 	listenerPort := int32(8081)
 	scheme := v1.URISchemeHTTP
 	if instance.Spec.SecureHTTP {
@@ -266,7 +265,6 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		TimeoutSeconds:      5,
 		FailureThreshold:    3,
 	}
-	// H6: Add default resource requests/limits
 	if podSpec.Spec.Containers[0].Resources.Limits == nil && podSpec.Spec.Containers[0].Resources.Requests == nil {
 		podSpec.Spec.Containers[0].Resources = v1.ResourceRequirements{
 			Requests: v1.ResourceList{
@@ -654,6 +652,9 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	found.Spec.Template.Annotations[keyPrefix+"/specHash"] = desiredHash
 
 	// Also update top-level annotations
+	if found.Annotations == nil {
+		found.Annotations = make(map[string]string)
+	}
 	found.Annotations[keyPrefix+"/specHash"] = desiredHash
 
 	return found, true, nil
