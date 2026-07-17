@@ -28,14 +28,34 @@ import (
 // StrimziSchemaRegistrySpec defines the desired state of StrimziSchemaRegistry
 type StrimziSchemaRegistrySpec struct {
 	// Listener name for Kafka cluster (defaults to "tls")
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern="^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$"
+	Listener string `json:"listener"`
 
-	Listener           string `json:"listener"`
-	SecurityProtocol   string `json:"securityprotocol"`
+	// SecurityProtocol defines the Kafka security protocol to use.
+	// Valid values: SSL, SASL_SSL, PLAINTEXT, SASL_PLAINTEXT.
+	// +kubebuilder:validation:Enum=SSL;SASL_SSL;PLAINTEXT;SASL_PLAINTEXT
+	SecurityProtocol string `json:"securityprotocol"`
+
+	// CompatibilityLevel defines the schema compatibility level for Schema Registry.
+	// Valid values: none, backward, backward_transitive, forward, forward_transitive, full, full_transitive.
+	// +kubebuilder:validation:Enum=none;backward;backward_transitive;forward;forward_transitive;full;full_transitive
 	CompatibilityLevel string `json:"compatibilitylevel"`
-	SecureHTTP         bool   `json:"securehttp"`
-	TLSSecretName      string `json:"tlssecretname,omitempty"`
+
+	SecureHTTP bool `json:"securehttp"`
+
+	// TLSSecretName is the name of the Kubernetes secret containing TLS certificates.
+	// Must be a valid Kubernetes resource name (DNS subdomain).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$"
+	TLSSecretName string `json:"tlssecretname,omitempty"`
+
 	// HeapOpts sets the JVM heap options for Schema Registry (defaults to "-Xms512M -Xmx512M")
-	HeapOpts string                 `json:"heapopts,omitempty"`
+	// +kubebuilder:validation:Pattern="^(-Xms[a-fA-F0-9]+(m|M|g|G) -Xmx[a-fA-F0-9]+(m|M|g|G))?$"
+	HeapOpts string `json:"heapopts,omitempty"`
+
 	Template corev1.PodTemplateSpec `json:"template"`
 }
 
