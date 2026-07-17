@@ -29,12 +29,14 @@ import (
 type StrimziSchemaRegistrySpec struct {
 	// Listener name for Kafka cluster (defaults to "tls")
 
-	Listener           string                 `json:"listener"`
-	SecurityProtocol   string                 `json:"securityprotocol"`
-	CompatibilityLevel string                 `json:"compatibilitylevel"`
-	SecureHTTP         bool                   `json:"securehttp"`
-	TLSSecretName      string                 `json:"tlssecretname,omitempty"`
-	Template           corev1.PodTemplateSpec `json:"template"`
+	Listener           string `json:"listener"`
+	SecurityProtocol   string `json:"securityprotocol"`
+	CompatibilityLevel string `json:"compatibilitylevel"`
+	SecureHTTP         bool   `json:"securehttp"`
+	TLSSecretName      string `json:"tlssecretname,omitempty"`
+	// HeapOpts sets the JVM heap options for Schema Registry (defaults to "-Xms512M -Xmx512M")
+	HeapOpts string                 `json:"heapopts,omitempty"`
+	Template corev1.PodTemplateSpec `json:"template"`
 }
 
 // StrimziSchemaRegistryStatus defines the observed state of StrimziSchemaRegistry
