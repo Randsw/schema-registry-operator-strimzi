@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"os/exec"
@@ -319,6 +320,10 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 }
 
 func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, password string, cn string) ([]byte, string, error) {
+	// Validate CN is not empty
+	if cn == "" {
+		return nil, "", fmt.Errorf("common name (CN) cannot be empty")
+	}
 	// Create key, create clr. Sign clr with CACert. Create keystore.
 	if password == "" {
 		var err error

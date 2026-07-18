@@ -9,76 +9,59 @@ import (
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 )
 
-func TestGeneratePasswordLenght(t *testing.T) {
-	expectedLength := 24
-	password, err := GeneratePassword(24, true, false)
-	if err != nil {
-		t.Error(err)
-	}
-
-	if len(password) != expectedLength {
-		t.Errorf("Output %d not equal to expected %d", len(password), expectedLength)
-		return
-	}
-	t.Log("Password length correct")
-}
-
-func TestGeneratePasswordLetter(t *testing.T) {
-	result := true
-	var badSymbol rune
-	password, err := GeneratePassword(12, false, false)
-	if err != nil {
-		t.Error(err)
-	}
-	for _, r := range password {
-		if !unicode.IsLetter(r) {
-			result = false
-			badSymbol = r
+// TestGeneratePassword consolidates all password generation tests into subtests (M6).
+func TestGeneratePassword(t *testing.T) {
+	t.Run("correct length", func(t *testing.T) {
+		expectedLength := 24
+		password, err := GeneratePassword(24, true, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-	}
-	if !result {
-		t.Errorf("Output has not only letter. Bad- %s", string(badSymbol))
-		return
-	}
-	t.Log("Password consist of letters")
-}
-
-func TestGeneratePasswordNumber(t *testing.T) {
-	result := true
-	var badSymbol rune
-	password, err := GeneratePassword(12, true, false)
-	if err != nil {
-		t.Error(err)
-	}
-	for _, r := range password {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-			result = false
-			badSymbol = r
+		if len(password) != expectedLength {
+			t.Errorf("password length = %d, want %d", len(password), expectedLength)
 		}
-	}
-	if !result {
-		t.Errorf("Output has not only letter and digits. Bad - %s", string(badSymbol))
-		return
-	}
-	t.Log("Password consist of letters and digits")
-}
+	})
 
-func TestGeneratePasswordSpecial(t *testing.T) {
-	result := false
-	password, err := GeneratePassword(12, true, true)
-	if err != nil {
-		t.Error(err)
-	}
-	for _, r := range password {
-		if !unicode.IsLetter(r) || !unicode.IsDigit(r) {
-			result = true
+	t.Run("letters only", func(t *testing.T) {
+		password, err := GeneratePassword(12, false, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-	}
-	if !result {
-		t.Error("No special symbol in password")
-		return
-	}
-	t.Log("Password has special symbol")
+		for _, r := range password {
+			if !unicode.IsLetter(r) {
+				t.Errorf("password contains non-letter character: %q", r)
+			}
+		}
+	})
+
+	t.Run("letters and digits", func(t *testing.T) {
+		password, err := GeneratePassword(12, true, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, r := range password {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+				t.Errorf("password contains unexpected character: %q", r)
+			}
+		}
+	})
+
+	t.Run("includes special characters", func(t *testing.T) {
+		password, err := GeneratePassword(12, true, true)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		hasSpecial := false
+		for _, r := range password {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+				hasSpecial = true
+				break
+			}
+		}
+		if !hasSpecial {
+			t.Error("password does not contain any special character")
+		}
+	})
 }
 
 func TestCreate_truststore(t *testing.T) {
@@ -198,4 +181,65 @@ func TestDecode(t *testing.T) {
 		return
 	}
 	t.Log("Keystore is Ok")
+}
+
+// M7: Edge Case Tests for Certificate Processing
+
+// TestCreateTruststore_InvalidPEM verifies that CreateTruststore returns an error
+// when provided with invalid PEM certificate data.
+func TestCreateTruststore_InvalidPEM(t *testing.T) {
+	cp := NewCertProcessor(&logr.Logger{})
+	_, _, err := cp.CreateTruststore("not a valid PEM certificate data", "test1234")
+	if err == nil {
+		t.Error("expected error when creating truststore with invalid PEM data, got nil")
+	}
+}
+
+// TestCreateKeystore_EmptyPassword verifies that CreateKeystore properly handles
+// an empty password by auto-generating one and still producing a valid keystore.
+func TestCreateKeystore_EmptyPassword(t *testing.T) {
+	// Generate test CA and user cert dynamically
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+
+	cp := NewCertProcessor(&logr.Logger{})
+	keystore, password, err := cp.CreateKeystore(ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error when password is empty (should auto-generate): %v", err)
+	}
+	if len(keystore) <= 0 {
+		t.Error("keystore is empty when password was auto-generated")
+	}
+	if password == "" {
+		t.Error("password should be auto-generated when empty password is provided")
+	}
+}
+
+// TestGenerateTLSforHTTP_EmptyCN verifies that GenerateTLSforHTTP returns an error
+// when provided with an empty common name (CN).
+// An empty CN results in invalid DNSNames (e.g., ".svc", ".svc.cluster") which
+// causes x509.CreateCertificateRequest to fail.
+func TestGenerateTLSforHTTP_EmptyCN(t *testing.T) {
+	// Generate test CA dynamically
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(&logr.Logger{})
+	keystore, _, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "")
+	if err == nil {
+		// If no error returned, verify the keystore is empty (indicating failure)
+		if len(keystore) == 0 {
+			t.Error("GenerateTLSforHTTP with empty CN produced empty keystore without returning an error")
+		} else {
+			t.Error("expected error when generating TLS with empty CN, got nil")
+		}
+	}
 }
