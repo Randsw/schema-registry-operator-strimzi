@@ -1,3 +1,10 @@
+## [1.8.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.7.1...1.8.0) (2026-07-18)
+
+
+### 🚀 Features
+
+* Use metav1.Conditions in Status instead of string ([126827e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/126827e165293876a35ab78d99e78a76437a2f9c))
+
 ## [1.7.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.7.0...1.7.1) (2026-07-18)
 
 
