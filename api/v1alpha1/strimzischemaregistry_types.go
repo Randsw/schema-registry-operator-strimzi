@@ -65,6 +65,12 @@ type StrimziSchemaRegistrySpec struct {
 
 // StrimziSchemaRegistryStatus defines the observed state of StrimziSchemaRegistry
 type StrimziSchemaRegistryStatus struct {
+	//Conditions represent the observation of Schema Registry's current state
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+
 	// Status of the Schema Registry deployment (Ok, Not Ready, etc.)
 	Status string `json:"status"`
 }
