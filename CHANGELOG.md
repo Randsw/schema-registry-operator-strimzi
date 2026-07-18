@@ -1,3 +1,22 @@
+## [1.7.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.6.1...1.7.0) (2026-07-18)
+
+
+### 🧪 Tests
+
+* **certprocessor:** Improve tests ([34bc7fc](https://github.com/Randsw/schema-registry-operator-strimzi/commit/34bc7fc9cb74902932681160d4a99132c5b50316))
+* **controller:** Add more tests ([a6eb87b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a6eb87be993b03b53f4df1736f03d7a271fe3d12))
+* **k8s:** Improve tests ([2b2697c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2b2697ce76cdd60022198242e738b154275858ea))
+
+
+### 🚀 Features
+
+* Update CRD with default fields values ([907a508](https://github.com/Randsw/schema-registry-operator-strimzi/commit/907a508eb7649d0090f91a8d8766c8702b04bfbc))
+
+
+### 🛠 Fixes
+
+* Allow TLSSecretName be empty ([4ea194a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4ea194ae7f32b508654b91cd75b5bc893ba0613a))
+
 ## [1.6.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.6.0...1.6.1) (2026-07-17)
 
 
