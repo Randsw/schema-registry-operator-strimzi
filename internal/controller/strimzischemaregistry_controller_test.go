@@ -163,7 +163,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			// Create Kafka User
 			By("creating Kafka User")
-			User := &kafka.KafkaUser{
+			user := &kafka.KafkaUser{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      SchemaRegistryName,
 					Namespace: namespace.Name,
@@ -191,7 +191,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, User)).To(Succeed())
+			Expect(k8sClient.Create(ctx, user)).To(Succeed())
 
 			//Create Cluster Secret
 			By("Creating kafka cluster CA key secret")
