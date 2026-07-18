@@ -347,7 +347,7 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	}
 	for _, listener := range kafkaCluster.Status.Listeners {
 		logger.V(1).Info("Found kafka listeners.", "Listener", listener.Name)
-		if listener.Name == kafkaListener {
+		if strings.EqualFold(listener.Name, kafkaListener) {
 			kafkaBootstrapServer = listener.BootstrapServers
 			logger.V(1).Info("Found specified kafka cluster listeners.", "Listener", kafkaListener, "kafkaBootstap", kafkaBootstrapServer)
 			logger.V(1).Info("KafkaBootstap", "Address", kafkaBootstrapServer)
