@@ -31,6 +31,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -362,8 +363,12 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				typeNamespaceName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
 				err = k8sClient.Get(ctx, typeNamespaceName, instance)
 				Expect(err).NotTo(HaveOccurred())
-				return instance.Status.Status
-			}, time.Minute*20, time.Second).Should(Equal("Ok"))
+				contidion := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
+				if contidion == nil {
+					return ""
+				}
+				return string(contidion.Status)
+			}, time.Minute*20, time.Second).Should(Equal("True"))
 
 			// Test Updating Cluster secret to check if JKS secret is updated too
 			// Get JKS secret resourseVersion

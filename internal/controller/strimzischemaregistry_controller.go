@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	"strings"
 
@@ -26,6 +27,8 @@ import (
 	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -234,12 +237,26 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{Requeue: true}, nil
 	}
-
+	conditionType := "Ready"
 	if found.Status.ReadyReplicas == found.Status.Replicas {
-		instance.Status.Status = "Ok"
+		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+			Type:    conditionType,
+			Status:  metav1.ConditionTrue,
+			Reason:  "Ready",
+			Message: fmt.Sprintf("Schema Registry is ready with %d replicas", found.Status.ReadyReplicas),
+		})
 	} else {
-		instance.Status.Status = "Not Ready"
+		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+			Type:    conditionType,
+			Status:  metav1.ConditionFalse,
+			Reason:  "Not Ready",
+			Message: fmt.Sprintf("Schema Registry deployment is no ready: %d/%d replicas ready", found.Status.ReadyReplicas, found.Status.Replicas),
+		})
 	}
+	// 	instance.Status.Status = "Ok"
+	// } else {
+	// 	instance.Status.Status = "Not Ready"
+	// }
 	err = r.Status().Update(ctx, instance)
 	if err != nil {
 		logger.Error(err, "Failed to update CR Status")
