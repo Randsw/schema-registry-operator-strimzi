@@ -1,3 +1,19 @@
+## [1.7.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.7.0...1.7.1) (2026-07-18)
+
+
+### 💈 Style
+
+* Rename another var in Go style ([c43bd8a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c43bd8a435dca92e46e6ecdc8b44c10e0be68b7d))
+* Rename var in Go style ([53273ee](https://github.com/Randsw/schema-registry-operator-strimzi/commit/53273ee5a9472819b549380f02cc972cd8365312))
+
+
+### 🛠 Fixes
+
+* Fix metrics var name ([19510c3](https://github.com/Randsw/schema-registry-operator-strimzi/commit/19510c31473e46c20162ae274f936204634a2687))
+* Fix more typos ([37db20e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/37db20e7b86be89f745cbc5afdef06d5007defaa))
+* Fix typos ([168c45b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/168c45b98299ea8b1ce16701fa1333e24761fcf6))
+* Remove old func ([88498e0](https://github.com/Randsw/schema-registry-operator-strimzi/commit/88498e0f74ece69b4c1da8ebeccf89038c84a0d6))
+
 ## [1.7.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.6.1...1.7.0) (2026-07-18)
 
 
