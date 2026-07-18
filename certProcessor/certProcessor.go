@@ -7,7 +7,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -102,7 +101,7 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 		cp.log.Error(err, "Failed to write cert to temp file", "File", "ca_cert")
 		return nil, "", err
 	}
-	// Set trustore output file
+	// Set truststore output file
 	tempDir := os.TempDir()
 	output_path := tempDir + "/" + "client.truststore.jks"
 	defer func() {
@@ -111,7 +110,7 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 			cp.log.Error(err, "Failed to delete file", "File", output_path)
 		}
 	}()
-	// Generate trustore
+	// Generate truststore
 	cmd := exec.Command("keytool", "-importcert", "-keystore", output_path, "-alias", "CARoot", "-file",
 		file.Name(), "-storepass", password, "-storetype", "jks", "-trustcacerts", "-noprompt")
 	out, err := cmd.Output()
@@ -119,12 +118,12 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 		cp.log.Error(err, "Error while exec command", "cmdout", out)
 		return nil, "", err
 	}
-	// Check if trustore exist
+	// Check if truststore exist
 	if _, err := os.Stat(output_path); os.IsNotExist(err) {
 		cp.log.Error(err, "File not exist", "File", output_path)
 		return nil, "", err
 	}
-	// Read trustore from file to save in kubernetes secret
+	// Read truststore from file to save in kubernetes secret
 	b, err := os.ReadFile(output_path) // just pass the file name
 	if err != nil {
 		cp.log.Error(err, "File read fail", "File", output_path)
@@ -499,14 +498,6 @@ func signCSR(caCert *x509.Certificate, caKey *rsa.PrivateKey, csr *x509.Certific
 		return nil, err
 	}
 	return serverCert, nil
-}
-
-func Decode_secret_field(str string) (string, error) {
-	data, err := base64.StdEncoding.DecodeString(str)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
 }
 
 func StringToCertificate(certString string) (*x509.Certificate, error) {

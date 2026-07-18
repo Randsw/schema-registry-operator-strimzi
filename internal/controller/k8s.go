@@ -155,7 +155,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	// Schema Registry REST API TLS secret
 	var TLSSecretName string
 	if instance.Spec.SecureHTTP {
-		//TODO Trustore if client use tls auth to schema registry
+		//TODO Truststore if client use tls auth to schema registry
 		//podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/tls/truststore.jks"})
 		// podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 		// 	SecretKeyRef: &v1.SecretKeySelector{
@@ -349,8 +349,8 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 		logger.V(1).Info("Found kafka listeners.", "Listener", listener.Name)
 		if strings.EqualFold(listener.Name, kafkaListener) {
 			kafkaBootstrapServer = listener.BootstrapServers
-			logger.V(1).Info("Found specified kafka cluster listeners.", "Listener", kafkaListener, "kafkaBootstap", kafkaBootstrapServer)
-			logger.V(1).Info("KafkaBootstap", "Address", kafkaBootstrapServer)
+			logger.V(1).Info("Found specified kafka cluster listeners.", "Listener", kafkaListener, "kafkaBootstrap", kafkaBootstrapServer)
+			logger.V(1).Info("KafkaBootstrap", "Address", kafkaBootstrapServer)
 			return kafkaBootstrapServer, kafkaClusterName, nil
 		}
 	}
@@ -415,7 +415,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		logger.Error(err, "Failed to get schema registry secret")
 		return nil, err
 	}
-	logger.Info("Creating new keystore and trustore", "Secret Name", jks_secret_name)
+	logger.Info("Creating new keystore and truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
 	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
 	if err != nil {

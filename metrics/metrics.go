@@ -15,7 +15,7 @@ type MetricDescription struct {
 
 // metricsDescription is a map of string keys (metrics) to MetricDescription values (Name, Help).
 var metricDescription = map[string]MetricDescription{
-	"StrimziSchemaRegisterCurrentInstanceCount": {
+	"StrimziSchemaRegistryCurrentInstanceCount": {
 		Name: "strimzi_schema_register_instance_current_count",
 		Help: "Current number of running strimzi schema register instance in cluster",
 		Type: "Gauge",
@@ -23,18 +23,18 @@ var metricDescription = map[string]MetricDescription{
 }
 
 var (
-	// MemcachedDeploymentSizeUndesiredCountTotal will count how many times was required
+	// StrimziSchemaRegistryCurrentInstanceCount will count how many times was required
 	// to perform the operation to ensure that the number of replicas on the cluster
 	// is the same as the quantity desired and specified via the custom resource size spec.
-	StrimziSchemaRegisterCurrentInstanceCount = prometheus.NewGauge(
+	StrimziSchemaRegistryCurrentInstanceCount = prometheus.NewGauge(
 		prometheus.GaugeOpts{
-			Name: metricDescription["StrimziSchemaRegisterCurrentInstanceCount"].Name,
-			Help: metricDescription["StrimziSchemaRegisterCurrentInstanceCount"].Help,
+			Name: metricDescription["StrimziSchemaRegistryCurrentInstanceCount"].Name,
+			Help: metricDescription["StrimziSchemaRegistryCurrentInstanceCount"].Help,
 		},
 	)
 )
 
 // RegisterMetrics will register metrics with the global prometheus registry
 func RegisterMetrics() {
-	metrics.Registry.MustRegister(StrimziSchemaRegisterCurrentInstanceCount)
+	metrics.Registry.MustRegister(StrimziSchemaRegistryCurrentInstanceCount)
 }

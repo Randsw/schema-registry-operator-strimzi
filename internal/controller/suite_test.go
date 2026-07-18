@@ -66,7 +66,7 @@ func DownloadCRD(ctx context.Context, url string) (*apiextensionsv1.CustomResour
 	defer func() {
 		err := resp.Body.Close()
 		if err != nil {
-			fmt.Printf("Failed to close respone body: %v", err)
+			fmt.Printf("Failed to close response body: %v", err)
 		}
 	}()
 

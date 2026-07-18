@@ -1,7 +1,6 @@
 package certprocessor
 
 import (
-	"encoding/base64"
 	"testing"
 	"unicode"
 
@@ -162,25 +161,6 @@ func TestCreateTLSKeystore(t *testing.T) {
 		return
 	}
 	t.Log("Keystore is created")
-}
-
-func TestDecode(t *testing.T) {
-	// Generate test CA dynamically and encode/decode to verify Decode_secret_field
-	ca, err := testutil.GenerateTestCA()
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-	base64EncodedCert := base64.StdEncoding.EncodeToString([]byte(ca.CACertPEM))
-	// Encode the CA cert to base64 (mimicking the old cacertb64 function)
-	decode, err := Decode_secret_field(base64EncodedCert)
-	if err != nil {
-		t.Error(err)
-	}
-	if decode != ca.CACertPEM {
-		t.Error("Error while decode")
-		return
-	}
-	t.Log("Keystore is Ok")
 }
 
 // M7: Edge Case Tests for Certificate Processing

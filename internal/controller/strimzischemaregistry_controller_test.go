@@ -84,7 +84,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			// Create Kafka Cluster
 
 			By("Creating strimzi kafka cluster")
-			Cluster := &kafka.Kafka{
+			cluster := &kafka.Kafka{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "kafka-cluster",
 					Namespace: namespace.Name,
@@ -151,7 +151,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, Cluster)).To(Succeed())
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			// Update Status of Kafka CR
 			UpdateCluser := &kafka.Kafka{}
 			err = k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, UpdateCluser)
@@ -163,7 +163,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			// Create Kafka User
 			By("creating Kafka User")
-			User := &kafka.KafkaUser{
+			user := &kafka.KafkaUser{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      SchemaRegistryName,
 					Namespace: namespace.Name,
@@ -191,7 +191,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, User)).To(Succeed())
+			Expect(k8sClient.Create(ctx, user)).To(Succeed())
 
 			//Create Cluster Secret
 			By("Creating kafka cluster CA key secret")

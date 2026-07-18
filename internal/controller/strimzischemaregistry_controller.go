@@ -205,7 +205,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, err
 		}
 		// Increment instance count
-		monitoring.StrimziSchemaRegisterCurrentInstanceCount.Inc()
+		monitoring.StrimziSchemaRegistryCurrentInstanceCount.Inc()
 		err = r.Create(ctx, deployment)
 		if err != nil {
 			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
@@ -375,5 +375,5 @@ func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregist
 }
 
 func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
-	monitoring.StrimziSchemaRegisterCurrentInstanceCount.Dec()
+	monitoring.StrimziSchemaRegistryCurrentInstanceCount.Dec()
 }
