@@ -52,6 +52,25 @@ const keyPrefix = "strimziregistryoperator.randsw.code"
 const CAVersionKey = keyPrefix + "/caSecretVersion"
 const userVersionKey = keyPrefix + "/clientSecretVersion"
 
+// strimziClusterLabel is the label key used by Strimzi to identify the Kafka cluster name.
+const strimziClusterLabel = "strimzi.io/cluster"
+
+// getStrimziClusterName extracts the strimzi.io/cluster label value from the instance.
+// Returns an error if labels are nil or the required label is missing.
+func getStrimziClusterName(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
+	labels := instance.GetLabels()
+	if labels == nil {
+		return "", fmt.Errorf("StrimziSchemaRegistry %s/%s has no labels; required label %q is missing",
+			instance.Namespace, instance.Name, strimziClusterLabel)
+	}
+	clusterName, ok := labels[strimziClusterLabel]
+	if !ok || clusterName == "" {
+		return "", fmt.Errorf("StrimziSchemaRegistry %s/%s is missing required label %q",
+			instance.Namespace, instance.Name, strimziClusterLabel)
+	}
+	return clusterName, nil
+}
+
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/finalizers,verbs=update
@@ -109,6 +128,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		return ctrl.Result{}, nil
 	}
+
+	// Get the strimzi cluster name from the CR labels (B3 fix: nil-safe extraction)
+	strimziClusterName, err := getStrimziClusterName(instance)
+	if err != nil {
+		logger.Error(err, "Failed to get strimzi cluster name from labels")
+		return ctrl.Result{}, err
+	}
+
 	// Check if reconcile triggered by secret change and renew secret
 	curr_secret := &v1.Secret{}
 	CAsecret := &v1.Secret{}
@@ -131,8 +158,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			// Renew cluster secret
 			userSecretChanged = true
 		}
-		// Get cluster CA secret
-		err = r.Get(ctx, types.NamespacedName{Name: instance.GetLabels()["strimzi.io/cluster"] + "-cluster-ca-cert",
+		// Get cluster CA secret (B3 fix: use nil-safe strimziClusterName)
+		err = r.Get(ctx, types.NamespacedName{Name: strimziClusterName + "-cluster-ca-cert",
 			Namespace: req.Namespace}, CAsecret)
 		if err != nil {
 			logger.Error(err, "Failed to get StrimziSchemaRegistry cluster ca secret.")
@@ -147,7 +174,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if userSecretChanged || clusterCASecretChanged {
 		var newSecret *v1.Secret
 		if userSecretChanged && clusterCASecretChanged {
-			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
+			newSecret, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
 				CAsecret, userSecret)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
@@ -158,14 +185,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 				return ctrl.Result{}, err
 			}
 		} else if userSecretChanged && !clusterCASecretChanged {
-			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
+			newSecret, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
 				nil, userSecret)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after user secret changed")
 				return ctrl.Result{}, err
 			}
 		} else if !userSecretChanged && clusterCASecretChanged {
-			newSecret, err = r.createSecret(instance, ctx, &logger, instance.GetLabels()["strimzi.io/cluster"],
+			newSecret, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
 				CAsecret, nil)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after cluster CA secret changed")
@@ -341,10 +368,15 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 				}
 				requests := []reconcile.Request{}
 				for _, item := range attachedStrimziRegistryOperators.Items {
+					// B3 fix: nil-safe label access for the CR items in the watch handler
+					itemClusterName, err := getStrimziClusterName(&item)
+					if err != nil {
+						continue
+					}
 					// Check if the Secret resource has the label 'strimzi.io/cluster'
 					// Get user secret
 					if obj.GetName() == item.GetName() {
-						if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] {
+						if obj.GetLabels()["strimzi.io/cluster"] == itemClusterName {
 							requests = append(requests, reconcile.Request{
 								NamespacedName: types.NamespacedName{
 									Name:      item.GetName(),
@@ -354,7 +386,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 						}
 					}
 					// Get cluster ca secret
-					if obj.GetLabels()["strimzi.io/cluster"] == item.GetLabels()["strimzi.io/cluster"] && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
+					if obj.GetLabels()["strimzi.io/cluster"] == itemClusterName && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
 						requests = append(requests, reconcile.Request{
 							NamespacedName: types.NamespacedName{
 								Name:      item.GetName(),
@@ -376,7 +408,12 @@ func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregist
 	if !instance.Spec.SecureHTTP || instance.Spec.TLSSecretName != "" {
 		return nil
 	}
-	TLSSecret, err := r.createTLSSecret(instance, ctx, logger, instance.GetLabels()["strimzi.io/cluster"])
+	strimziClusterName, err := getStrimziClusterName(instance)
+	if err != nil {
+		logger.Error(err, "Failed to get strimzi cluster name from labels")
+		return err
+	}
+	TLSSecret, err := r.createTLSSecret(instance, ctx, logger, strimziClusterName)
 	if err != nil {
 		logger.Error(err, "Failed to format TLS secret")
 		return err

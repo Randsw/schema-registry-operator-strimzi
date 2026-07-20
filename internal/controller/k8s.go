@@ -44,19 +44,13 @@ func labelsForStrimziSchemaRegistryOperator(name_app string, name_cr string,
 		"strimzi.io/cluster": kafkaClusterName} //schema-registry image tag
 }
 
+// createDeployment creates a new Deployment along with its dependent secrets.
+// It handles both initial deployment creation and secret bootstrapping. For
+// spec-only updates where secrets should NOT be recreated, use updateExistingDeployment
+// instead (which calls buildDeploymentSpec directly, bypassing secret creation).
 func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger *logr.Logger) (*apps.Deployment, error) {
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Deployment.Name", instance.Name+"-deploy")
-	var defaultMode int32 = 420
-	podSpec := instance.Spec.Template
-	// Validate that at least one container exists
-	if len(podSpec.Spec.Containers) == 0 {
-		return nil, fmt.Errorf("template must contain at least one container")
-	}
-	// Create Schema registry configuration
-	var podEnv []v1.EnvVar
-	var podVolume []v1.Volume
-	var containerVolumeMount []v1.VolumeMount
 
 	// Get Kafka Bootstrap Server address
 	kafkaBootstrapServer, kafkaClusterName, err := r.getKafkaBootstrapServers(instance, ctx, *logger)
@@ -64,6 +58,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		logger.Error(err, "Fail to get Kafka bootstrap servers")
 		return nil, err
 	}
+
 	// Create secret for Kafkastore
 	secret, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
 	if err != nil {
@@ -90,6 +85,56 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		}
 		jksResourceVersion = existingSecret.ResourceVersion
 	}
+
+	// Schema Registry REST API TLS secret
+	var TLSSecretName string
+	if instance.Spec.SecureHTTP {
+		if instance.Spec.TLSSecretName == "" {
+			TLSSecret, err := r.createTLSSecret(instance, ctx, logger, kafkaClusterName)
+			if err != nil {
+				logger.Error(err, "Failed to format TLS secret")
+				return nil, err
+			}
+			if TLSSecret != nil {
+				err = r.Create(ctx, TLSSecret)
+				if err != nil {
+					logger.Error(err, "Failed to create TLS secret")
+					return nil, err
+				}
+				logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
+			}
+			TLSSecretName = TLSSecret.Name
+		} else {
+			TLSSecretName = instance.Spec.TLSSecretName
+		}
+	}
+
+	return r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, TLSSecretName, logger)
+}
+
+// buildDeploymentSpec builds the Deployment spec from the CR spec and pre-fetched external inputs.
+// It is a pure function that produces the desired deployment — it does NOT create or mutate any
+// Kubernetes resources (no side effects). All secret creation and external reads must happen before
+// calling this function.
+func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	kafkaBootstrapServer string,
+	kafkaClusterName string,
+	jksResourceVersion string,
+	TLSSecretName string,
+	logger *logr.Logger,
+) (*apps.Deployment, error) {
+	var defaultMode int32 = 420
+	podSpec := instance.Spec.Template
+	// Validate that at least one container exists
+	if len(podSpec.Spec.Containers) == 0 {
+		return nil, fmt.Errorf("template must contain at least one container")
+	}
+	// Create Schema registry configuration
+	var podEnv []v1.EnvVar
+	var podVolume []v1.Volume
+	var containerVolumeMount []v1.VolumeMount
+
 	// Formation of the pod ENV
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", Value: kafkaBootstrapServer})
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_HOST_NAME", ValueFrom: &v1.EnvVarSource{
@@ -153,37 +198,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	})
 
 	// Schema Registry REST API TLS secret
-	var TLSSecretName string
 	if instance.Spec.SecureHTTP {
-		//TODO Truststore if client use tls auth to schema registry
-		//podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/tls/truststore.jks"})
-		// podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
-		// 	SecretKeyRef: &v1.SecretKeySelector{
-		// 		LocalObjectReference: v1.LocalObjectReference{
-		// 			Name: instance.Name + "-tls",
-		// 		},
-		// 		Key: "truststore_password",
-		// 	},
-		// },
-		// })
-		if instance.Spec.TLSSecretName == "" {
-			TLSSecret, err := r.createTLSSecret(instance, ctx, logger, kafkaClusterName)
-			if err != nil {
-				logger.Error(err, "Failed to format TLS secret")
-				return nil, err
-			}
-			if TLSSecret != nil {
-				err = r.Create(ctx, TLSSecret)
-				if err != nil {
-					logger.Error(err, "Failed to create TLS secret")
-					return nil, err
-				}
-				logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
-			}
-			TLSSecretName = TLSSecret.Name
-		} else {
-			TLSSecretName = instance.Spec.TLSSecretName
-		}
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "https://0.0.0.0:8085"})
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", Value: "https"})
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", Value: "/var/rest-api-tls/tls-keystore.jks"})
@@ -226,7 +241,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	scheme := v1.URISchemeHTTP
 	if instance.Spec.SecureHTTP {
 		listenerPort = int32(8085)
-		scheme = v1.URISchemeHTTP
+		scheme = v1.URISchemeHTTPS
 	}
 	podSpec.Spec.Containers[0].ReadinessProbe = &v1.Probe{
 		ProbeHandler: v1.ProbeHandler{
@@ -284,7 +299,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	podSpec.Labels = ls
 	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": jksResourceVersion}
 
-	// Compute spec hash and store it in annotation to detect spec changeson subsequent reconciliations.
+	// Compute spec hash and store it in annotation to detect spec changes on subsequent reconciliations.
 	specHash, err := computeSpecHash(instance)
 	if err != nil {
 		logger.Error(err, "Failed to calculate CR spec hash")
@@ -305,7 +320,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			Selector: &metav1.LabelSelector{
 				MatchLabels: ls,
 			},
-			Template: podSpec, // PodSec
+			Template: podSpec, // PodSpec
 		},
 	}
 	// Set StrimziSchemaRegistry instance as the owner and controller
@@ -609,14 +624,42 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 }
 
 // updateExistingDeployment updates an existing deployment when the spec has changed.
-// It generates the desired deployment, compares the spec hash annotation, and updates
-// the deployment spec + triggers a rollout via annotation change if needed.
+// It generates the desired deployment spec (without side effects), compares the spec hash
+// annotation, and updates the deployment spec + triggers a rollout via annotation change
+// if needed.
 func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger *logr.Logger, found *apps.Deployment,
 ) (*apps.Deployment, bool, error) {
-	// Generate desired deployment from current spec
-	desired, err := r.createDeployment(instance, ctx, logger)
+	// Get Kafka bootstrap server and cluster name (read-only, no side effects)
+	kafkaBootstrapServer, kafkaClusterName, err := r.getKafkaBootstrapServers(instance, ctx, *logger)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to get Kafka bootstrap servers: %w", err)
+	}
+
+	// Read the existing JKS secret ResourceVersion (read-only, no side effects)
+	jksResourceVersion := ""
+	existingJKS := &v1.Secret{}
+	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, existingJKS)
+	if err != nil && !errors.IsNotFound(err) {
+		return nil, false, fmt.Errorf("failed to get existing JKS secret: %w", err)
+	}
+	if err == nil {
+		jksResourceVersion = existingJKS.ResourceVersion
+	}
+
+	// Determine TLSSecretName without creating any secrets
+	TLSSecretName := ""
+	if instance.Spec.SecureHTTP {
+		if instance.Spec.TLSSecretName != "" {
+			TLSSecretName = instance.Spec.TLSSecretName
+		} else {
+			TLSSecretName = instance.Name + "-tls"
+		}
+	}
+
+	// Generate desired deployment spec — NO side effects (no secret creation/deletion)
+	desired, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, TLSSecretName, logger)
 	if err != nil {
 		return nil, false, err
 	}
