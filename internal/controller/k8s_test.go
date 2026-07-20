@@ -136,6 +136,79 @@ func TestComputeSpecHash(t *testing.T) {
 			t.Errorf("expected different hashes for different TLSSecretName: both %q", hash1)
 		}
 	})
+
+	// B5 regression test: Template changes must affect the hash
+	t.Run("different Template produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.5"},
+				},
+			},
+		}
+		inst2 := newTestInstance()
+		inst2.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "sr", Image: "confluentinc/cp-schema-registry:7.7.0"},
+				},
+			},
+		}
+
+		hash1, err1 := computeSpecHash(inst1)
+		hash2, err2 := computeSpecHash(inst2)
+
+		if err1 != nil {
+			t.Fatalf("unexpected error computing hash1: %v", err1)
+		}
+		if err2 != nil {
+			t.Fatalf("unexpected error computing hash2: %v", err2)
+		}
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different container images: both %q", hash1)
+		}
+	})
+
+	t.Run("different Template resources produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.5"},
+				},
+			},
+		}
+		inst2 := newTestInstance()
+		inst2.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "sr",
+						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: mustParseQuantity("500m"),
+							},
+						},
+					},
+				},
+			},
+		}
+
+		hash1, err1 := computeSpecHash(inst1)
+		hash2, err2 := computeSpecHash(inst2)
+
+		if err1 != nil {
+			t.Fatalf("unexpected error computing hash1: %v", err1)
+		}
+		if err2 != nil {
+			t.Fatalf("unexpected error computing hash2: %v", err2)
+		}
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different resource requirements: both %q", hash1)
+		}
+	})
 }
 
 func TestMustParseQuantity(t *testing.T) {

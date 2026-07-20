@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	go_err "errors"
 	"fmt"
 	"hash/fnv"
@@ -60,14 +61,14 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	}
 
 	// Create secret for Kafkastore
-	secret, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
+	secret, created, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
 	if err != nil {
 		logger.Error(err, "Failed to format secret", "Secret.Name", instance.Name+"-jks")
 		return nil, err
 	}
 
 	var jksResourceVersion string
-	if secret != nil {
+	if created {
 		err = r.Create(ctx, secret)
 		if err != nil {
 			logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+"-jks")
@@ -76,14 +77,8 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		jksResourceVersion = secret.ResourceVersion
 		logger.V(1).Info("Secret for Schema Registry KafkaStore TLS created successfully", "Secret.Name", secret.Name)
 	} else {
-		// Secret is up-to-date, fetch existing to get ResourceVersion
-		existingSecret := &v1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-jks", Namespace: instance.Namespace}, existingSecret)
-		if err != nil {
-			logger.Error(err, "Failed to get existing jks secret", "Secret.Name", instance.Name+"-jks")
-			return nil, err
-		}
-		jksResourceVersion = existingSecret.ResourceVersion
+		// B7: createSecret now returns the existing up-to-date secret instead of nil.
+		jksResourceVersion = secret.ResourceVersion
 	}
 
 	// Schema Registry REST API TLS secret
@@ -373,9 +368,12 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	return "", "", go_err.New("cant find bootstrap address")
 }
 
+// createSecret creates or returns an up-to-date JKS secret for the Schema Registry.
+// Returns the secret, a bool indicating whether a new secret was created (as opposed
+// to being already up-to-date), and any error encountered.
 func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger *logr.Logger, clusterName string, clusterCASecret *v1.Secret,
-	userCASecret *v1.Secret) (*v1.Secret, error) {
+	userCASecret *v1.Secret) (*v1.Secret, bool, error) {
 	logger.Info("Creating secret for schema registry Kafkastore TLS")
 	clusterSecret := &v1.Secret{}
 	userSecret := &v1.Secret{}
@@ -384,7 +382,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		logger.V(1).Info("Searching for cluster CA secret", "Secret", clusterName+"-cluster-ca-cert")
 		err := r.Get(ctx, types.NamespacedName{Name: clusterName + "-cluster-ca-cert", Namespace: instance.Namespace}, clusterSecret)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	} else {
 		clusterSecret = clusterCASecret
@@ -395,7 +393,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		logger.Info("Searching for user CA secret", "Secret", instance.Name)
 		err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	} else {
 		userSecret = userCASecret
@@ -407,7 +405,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	clientp12 := string(userSecret.Data["user.p12"])
 	userPasswordData, ok := userSecret.Data["user.password"]
 	if !ok {
-		return nil, go_err.New("user.password field is missing from KafkaUser secret; this field is required for keystore creation")
+		return nil, false, go_err.New("user.password field is missing from KafkaUser secret; this field is required for keystore creation")
 	}
 	userPassword := string(userPasswordData)
 
@@ -418,27 +416,29 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		if jks_secret.Annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
 			jks_secret.Annotations[userVersionKey] == userSecret.ResourceVersion {
 			logger.V(1).Info("JKS secret is up-to-date")
-			return nil, nil
+			// B7: Return the existing secret (not nil) so the caller has it for
+			// updateDeployment without needing to re-fetch.
+			return jks_secret, false, nil
 		}
 		logger.V(1).Info("About to delete JKS secret")
 		err = r.Delete(ctx, jks_secret)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	if err != nil && !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to get schema registry secret")
-		return nil, err
+		return nil, false, err
 	}
 	logger.Info("Creating new keystore and truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
 	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	keystore, keystore_password, err := cp.CreateKeystore(clientCACert, clientCert, clientKey, clientp12, userPassword)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	jks_secret = &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -464,9 +464,9 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	err = ctrl.SetControllerReference(instance, jks_secret, r.Scheme)
 	if err != nil {
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
-		return nil, err
+		return nil, false, err
 	}
-	return jks_secret, nil
+	return jks_secret, true, nil
 }
 
 func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger *logr.Logger) (*v1.Service, error) {
@@ -591,7 +591,7 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 
 // computeSpecHash computes a hash of the relevant spec fields to detect changes.
 // The hash covers CompatibilityLevel, SecureHTTP, HeapOpts, Listener, SecurityProtocol,
-// and TLSSecretName — all fields that affect the deployment spec or service ports.
+// TLSSecretName, and the full PodTemplateSpec — all fields that affect the deployment spec or service ports.
 
 func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
 	h := fnv.New32a()
@@ -618,6 +618,16 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 
 	if _, err := io.WriteString(h, instance.Spec.TLSSecretName); err != nil {
 		return "", fmt.Errorf("failed to write TLSSecretName to hash: %w", err)
+	}
+
+	// B5: Include the full PodTemplateSpec so that container image, resources,
+	// and other template changes trigger a deployment update.
+	templateJSON, err := json.Marshal(instance.Spec.Template)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal Template to JSON for hash: %w", err)
+	}
+	if _, err := h.Write(templateJSON); err != nil {
+		return "", fmt.Errorf("failed to write Template to hash: %w", err)
 	}
 
 	return fmt.Sprintf("%d", h.Sum32()), nil

@@ -1434,6 +1434,162 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 	})
 
+	// M8: PodTemplateSpec Update Test (B5 regression test)
+	Context("When updating deployment after Template change", func() {
+		const SchemaRegistryName = "test-template-update"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: SchemaRegistryName,
+			},
+		}
+
+		typeNamespacedName := types.NamespacedName{
+			Name:      SchemaRegistryName,
+			Namespace: SchemaRegistryName,
+		}
+
+		var (
+			testCA    *testutil.TestCA
+			clusterCA *testutil.TestCA
+			userCert  *testutil.TestUserCert
+		)
+
+		BeforeEach(func() {
+			var err error
+			testCA, err = testutil.GenerateTestCA()
+			Expect(err).NotTo(HaveOccurred())
+
+			clusterCA, err = testutil.GenerateClusterCACert("STIMZI-SR-TEST-TEMPLATE")
+			Expect(err).NotTo(HaveOccurred())
+
+			userCert, err = testutil.GenerateTestUserCert(testCA, "test1234")
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Creating the Namespace")
+			err = k8sClient.Create(ctx, namespace)
+			Expect(err).To(Not(HaveOccurred()))
+
+			By("Creating strimzi kafka cluster")
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: namespace.Name},
+				Spec: &kafka.KafkaSpec{
+					EntityOperator: &kafka.EntityOperatorSpec{TopicOperator: &kafka.EntityTopicOperatorSpec{}, UserOperator: &kafka.EntityUserOperatorSpec{}},
+					Kafka: &kafka.KafkaClusterSpec{
+						Authorization: &kafka.KafkaAuthorization{SuperUsers: []string{"CN=root"}, Type: kafka.KafkaAuthorizationType(kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE)},
+						Config:        kafka.MapStringObject{"apple": 5},
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+							{Name: "tls", Port: 9093, Tls: true, Type: kafka.INTERNAL_KAFKALISTENERTYPE, Authentication: &kafka.KafkaListenerAuthentication{Type: kafka.TLS_KAFKALISTENERAUTHENTICATIONTYPE}},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{ClusterId: "test-id", Listeners: []kafka.ListenerStatus{
+				{BootstrapServers: "kafka-cluster-kafka-bootstrap.template.svc:9092", Name: "plain"},
+				{BootstrapServers: "kafka-cluster-kafka-bootstrap.template.svc:9093", Name: "TLS", Certificates: []string{clusterCA.CACertPEM}},
+			}}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)
+			Expect(err).To(Not(HaveOccurred()))
+			updateCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			By("Creating Kafka User")
+			kafkaUser := &kafka.KafkaUser{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE},
+					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
+			}
+			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
+
+			By("Creating cluster CA secrets")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: namespace.Name}, Data: map[string][]byte{"ca.key": []byte(clusterCA.CAKeyPEM)}})).To(Succeed())
+			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca-cert", Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)}})).To(Succeed())
+
+			By("Creating kafka user secret")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(testCA.CACertPEM), "user.crt": []byte(userCert.UserCertPEM), "user.key": []byte(userCert.UserKeyPEM), "user.p12": userCert.PKCS12Data, "user.password": []byte(userCert.Password)}})).To(Succeed())
+
+			By("Setting the Image ENV VAR")
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			By("Creating StrimziSchemaRegistry with initial image")
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         true,
+					Listener:           "TLS",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "SSL",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			err := k8sClient.Get(ctx, typeNamespacedName, found)
+			if err == nil {
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should update the deployment when the container resources change", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("First reconcile to create the deployment")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking that deployment was created")
+			Eventually(func() error {
+				found := &appsv1.Deployment{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, found)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).To(Succeed())
+			initialHash := deployment.Annotations[keyPrefix+"/specHash"]
+			Expect(initialHash).NotTo(BeEmpty())
+
+			By("Updating the container resources in the CR template")
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			instance.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: mustParseQuantity("500m"),
+				},
+			}
+			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+
+			By("Reconciling again to trigger deployment update")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking that deployment hash annotation changed (B5: Template changes now trigger updates)")
+			Eventually(func() string {
+				updated := &appsv1.Deployment{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, updated)
+				if err != nil {
+					return ""
+				}
+				return updated.Annotations[keyPrefix+"/specHash"]
+			}, time.Minute, time.Second).ShouldNot(Equal(initialHash))
+
+			By("Verifying the resources were updated")
+			updatedDeployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, updatedDeployment)).To(Succeed())
+			Expect(updatedDeployment.Spec.Template.Spec.Containers[0].Resources.Requests.Cpu().String()).To(Equal("500m"))
+		})
+	})
+
 	// M7: Service Update Test
 	Context("When updating service after SecureHTTP change", func() {
 		const SchemaRegistryName = "test-svc-update"
