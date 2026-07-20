@@ -279,10 +279,17 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Cleanup the specific resource instance StrimziSchemaRegistry")
+			// Remove finalizers so the CR can actually be deleted (otherwise Delete
+			// only marks it for deletion and the resource lingers indefinitely).
+			if len(found.Finalizers) > 0 {
+				found.Finalizers = []string{}
+				Expect(k8sClient.Update(ctx, found)).To(Succeed())
+			}
 			Expect(k8sClient.Delete(ctx, found)).To(Succeed())
-			Eventually(func() error {
-				return k8sClient.Delete(context.TODO(), found)
-			}, 2*time.Minute, time.Second).Should(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, typeNamespacedName, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{})
+				return errors.IsNotFound(err)
+			}, 2*time.Minute, time.Second).Should(BeTrue())
 
 			// TODO(user): Attention if you improve this code by adding other context test you MUST
 			// be aware of the current delete namespace limitations.
