@@ -1,3 +1,20 @@
+## [1.9.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.8.0...1.9.0) (2026-07-20)
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump actions/setup-python from 6 to 7 ([10033bf](https://github.com/Randsw/schema-registry-operator-strimzi/commit/10033bf60a25156029e7c49d46b7d66cc3919e43))
+
+
+### 🚀 Features
+
+* **helm:** Use metav1.Conditions in Status instead of string ([535b28f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/535b28f3ab59a4460757520ab9162d893493329f))
+
+
+### 🛠 Fixes
+
+* Fix critical bugs ([63598e6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/63598e6ca48e4157d9a5a8229f1ee4a23a9224ed))
+
 ## [1.8.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.7.1...1.8.0) (2026-07-18)
 
 
