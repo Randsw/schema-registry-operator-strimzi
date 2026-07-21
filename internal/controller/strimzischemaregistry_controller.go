@@ -19,8 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
-
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
@@ -80,17 +80,9 @@ func getStrimziClusterName(instance *strimziregistryoperatorv1alpha1.StrimziSche
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the StrimziSchemaRegistry object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	userSecretChanged := false
-	clusterCASecretChanged := false
+
 	// Reconcile watch deployment, StrimziSchemaRegistry and secret managed by Strimzi operator
 	logger.Info("Reconciling StrimziSchemaRegistry")
 	instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
@@ -105,6 +97,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		// Error reading the object - requeue the request.
 		logger.Error(err, "Failed to get StrimziSchemaRegistry. May be it is a Secret")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		return ctrl.Result{}, err
 	}
 	// Add finalizer for metrics
@@ -113,6 +106,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		controllerutil.AddFinalizer(instance, finalizer)
 		if err = r.Update(ctx, instance); err != nil {
 			logger.Error(err, "Failed to update custom resource to add finalizer")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 			return ctrl.Result{}, err
 		}
 	}
@@ -129,111 +123,33 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Get the strimzi cluster name from the CR labels (B3 fix: nil-safe extraction)
+	// Get the strimzi cluster name from the CR labels
 	strimziClusterName, err := getStrimziClusterName(instance)
 	if err != nil {
 		logger.Error(err, "Failed to get strimzi cluster name from labels")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		return ctrl.Result{}, err
 	}
 
-	// Check if reconcile triggered by secret change and renew secret
-	curr_secret := &v1.Secret{}
-	CAsecret := &v1.Secret{}
-	userSecret := &v1.Secret{}
-	err = r.Get(ctx, types.NamespacedName{Name: req.Name + "-jks", Namespace: req.Namespace}, curr_secret)
-	if err != nil && !errors.IsNotFound(err) {
-		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
-		return ctrl.Result{}, err
-	} else if errors.IsNotFound(err) {
-		logger.Error(err, "Jks secret not found. Maybe first reconcile")
-	} else {
-		// Get user secret
-		err = r.Get(ctx, req.NamespacedName, userSecret)
-		if err != nil {
-			logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
-			return ctrl.Result{}, err
-		}
-		if userSecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/clientSecretVersion"] {
-			logger.Info("User secret for ssr KafkaStore is changed")
-			// Renew cluster secret
-			userSecretChanged = true
-		}
-		// Get cluster CA secret (B3 fix: use nil-safe strimziClusterName)
-		err = r.Get(ctx, types.NamespacedName{Name: strimziClusterName + "-cluster-ca-cert",
-			Namespace: req.Namespace}, CAsecret)
-		if err != nil {
-			logger.Error(err, "Failed to get StrimziSchemaRegistry cluster ca secret.")
-			return ctrl.Result{}, err
-		}
-		if CAsecret.ResourceVersion != curr_secret.Annotations["strimziregistryoperator.randsw.code/caSecretVersion"] {
-			logger.Info("Kafka cluster CA secret is changed")
-			// Renew cluster secret
-			clusterCASecretChanged = true
-		}
+	// Handle secret rotation if user or cluster CA secrets have changed.
+	result, err := r.handleSecretRotation(ctx, instance, logger, strimziClusterName)
+	if err != nil {
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		return result, err
 	}
-	if userSecretChanged || clusterCASecretChanged {
-		var newSecret *v1.Secret
-		var newSecretCreated bool
-		if userSecretChanged && clusterCASecretChanged {
-			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
-				CAsecret, userSecret)
-			if err != nil {
-				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
-				return ctrl.Result{}, err
-			}
-			// Renew REST API TLS secret after cluster CA secret changed
-			if err = r.renewTLSSecret(instance, ctx, &logger); err != nil {
-				return ctrl.Result{}, err
-			}
-		} else if userSecretChanged && !clusterCASecretChanged {
-			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
-				nil, userSecret)
-			if err != nil {
-				logger.Error(err, "Failed to create jks secret after user secret changed")
-				return ctrl.Result{}, err
-			}
-		} else if !userSecretChanged && clusterCASecretChanged {
-			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
-				CAsecret, nil)
-			if err != nil {
-				logger.Error(err, "Failed to create jks secret after cluster CA secret changed")
-				return ctrl.Result{}, err
-			}
-			// Renew REST API TLS secret after cluster CA secret changed
-			if err = r.renewTLSSecret(instance, ctx, &logger); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		// B7: Only create the secret if createSecret indicated it was newly generated.
-		if newSecretCreated {
-			err = r.Create(ctx, newSecret)
-			if err != nil {
-				logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
-				return ctrl.Result{}, err
-			}
-		}
-		logger.Info("Creating new jks secret after user or cluster CA secret changed was successful")
-		dep, err := r.updateDeployment(instance, ctx, &logger, newSecret)
-		if err != nil {
-			logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
-			return ctrl.Result{}, err
-		}
-		err = r.Update(ctx, dep)
-		if err != nil {
-			logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
-			return ctrl.Result{}, err
-		}
-		logger.Info("Deployment updated after secret change", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
-		return ctrl.Result{Requeue: true}, nil
+	if result.RequeueAfter > 0 {
+		return result, nil
 	}
+
 	// Check if the Deployment already exists, if not create a new one
 	found := &apps.Deployment{}
-	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + "-deploy", Namespace: instance.Namespace}, found)
+	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, found)
 	if err != nil && errors.IsNotFound(err) {
 		// Define a new Deployment
-		deployment, err := r.createDeployment(instance, ctx, &logger)
+		deployment, err := r.createDeployment(instance, ctx, logger)
 		if err != nil {
 			logger.Error(err, "Failed to create deployment")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 			return ctrl.Result{}, err
 		}
 		// Increment instance count
@@ -241,30 +157,35 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		err = r.Create(ctx, deployment)
 		if err != nil {
 			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 			return ctrl.Result{}, err
 		}
 		// Deployment created successfully - return and requeue
 		logger.Info("Deployment created successfully", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	} else if err != nil {
 		logger.Error(err, "Failed to get Deployment")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		return ctrl.Result{}, err
 	}
 
 	// Deployment exists — reconcile spec changes
-	updatedDep, specChanged, err := r.updateExistingDeployment(instance, ctx, &logger, found)
+	updatedDep, specChanged, err := r.updateExistingDeployment(instance, ctx, logger, found)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile deployment spec changes")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		return ctrl.Result{}, err
 	}
 	if specChanged {
 		err = r.Update(ctx, updatedDep)
 		if err != nil {
 			logger.Error(err, "Failed to update deployment after spec change")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 			return ctrl.Result{}, err
 		}
-		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+"-deploy", "Deployment.Namespace", instance.Namespace)
-		return ctrl.Result{Requeue: true}, nil
+		monitoring.StrimziSchemaRegistryDeploymentUpdateTotal.Inc()
+		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	conditionType := "Ready"
 	if found.Status.ReadyReplicas == found.Status.Replicas {
@@ -282,41 +203,42 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			Message: fmt.Sprintf("Schema Registry deployment is no ready: %d/%d replicas ready", found.Status.ReadyReplicas, found.Status.Replicas),
 		})
 	}
-	// 	instance.Status.Status = "Ok"
-	// } else {
-	// 	instance.Status.Status = "Not Ready"
-	// }
 	err = r.Status().Update(ctx, instance)
 	if err != nil {
 		logger.Error(err, "Failed to update CR Status")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		return ctrl.Result{}, err
 	}
 	// Creating service for deployment
 	foundSvc := &v1.Service{}
 	err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, foundSvc)
 	if err != nil && errors.IsNotFound(err) {
-		svc, err := r.createService(instance, &logger)
+		svc, err := r.createService(instance, logger)
 		if err != nil {
 			logger.Error(err, "Failed to create service")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 			return ctrl.Result{}, err
 		}
 		err = r.Create(ctx, svc)
 		if err != nil {
 			logger.Error(err, "Failed to create new Service", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 			return ctrl.Result{}, err
 		}
 		// Service created successfully - return and requeue
 		logger.Info("Service created successfully", "Service.Name", svc.Name, "Service.Namespace", svc.Namespace)
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	} else if err != nil {
 		logger.Error(err, "Failed to get Service")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		return ctrl.Result{}, err
 	}
 
 	// Service exists — reconcile spec changes (e.g., SecureHTTP changed)
-	desiredSvc, err := r.createService(instance, &logger)
+	desiredSvc, err := r.createService(instance, logger)
 	if err != nil {
 		logger.Error(err, "Failed to create desired service spec")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		return ctrl.Result{}, err
 	}
 
@@ -347,10 +269,119 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		err = r.Update(ctx, foundSvc)
 		if err != nil {
 			logger.Error(err, "Failed to update service after spec change")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 			return ctrl.Result{}, err
 		}
 		logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// handleSecretRotation detects changes to the user secret or cluster CA secret,
+// and triggers secret recreation plus deployment update when needed.
+// It encapsulates the secret-change detection and re-creation logic that was
+// previously inline in Reconcile.
+func (r *StrimziSchemaRegistryReconciler) handleSecretRotation(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+	strimziClusterName string,
+) (ctrl.Result, error) {
+	userSecretChanged := false
+	clusterCASecretChanged := false
+
+	curr_secret := &v1.Secret{}
+	CAsecret := &v1.Secret{}
+	userSecret := &v1.Secret{}
+
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, curr_secret)
+	if err != nil && !errors.IsNotFound(err) {
+		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
+		return ctrl.Result{}, err
+	} else if errors.IsNotFound(err) {
+		logger.Error(err, "Jks secret not found. Maybe first reconcile")
+		return ctrl.Result{}, nil
+	}
+
+	// Get user secret
+	err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
+	if err != nil {
+		logger.Error(err, "Failed to get StrimziSchemaRegistry user secret.")
+		return ctrl.Result{}, err
+	}
+	if userSecret.ResourceVersion != curr_secret.Annotations[userVersionKey] {
+		logger.Info("User secret for ssr KafkaStore is changed")
+		userSecretChanged = true
+	}
+	// Get cluster CA secret
+	err = r.Get(ctx, types.NamespacedName{Name: strimziClusterName + clusterCASuffix,
+		Namespace: instance.Namespace}, CAsecret)
+	if err != nil {
+		logger.Error(err, "Failed to get StrimziSchemaRegistry cluster ca secret.")
+		return ctrl.Result{}, err
+	}
+	if CAsecret.ResourceVersion != curr_secret.Annotations[CAVersionKey] {
+		logger.Info("Kafka cluster CA secret is changed")
+		clusterCASecretChanged = true
+	}
+
+	if userSecretChanged || clusterCASecretChanged {
+		var newSecret *v1.Secret
+		var newSecretCreated bool
+		if userSecretChanged && clusterCASecretChanged {
+			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
+				CAsecret, userSecret)
+			if err != nil {
+				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
+				return ctrl.Result{}, err
+			}
+			// Renew REST API TLS secret after cluster CA secret changed
+			if err = r.renewTLSSecret(instance, ctx, logger); err != nil {
+				return ctrl.Result{}, err
+			}
+		} else if userSecretChanged && !clusterCASecretChanged {
+			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
+				nil, userSecret)
+			if err != nil {
+				logger.Error(err, "Failed to create jks secret after user secret changed")
+				return ctrl.Result{}, err
+			}
+		} else if !userSecretChanged && clusterCASecretChanged {
+			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
+				CAsecret, nil)
+			if err != nil {
+				logger.Error(err, "Failed to create jks secret after cluster CA secret changed")
+				return ctrl.Result{}, err
+			}
+			// Renew REST API TLS secret after cluster CA secret changed
+			if err = r.renewTLSSecret(instance, ctx, logger); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		// Only create the secret if createSecret indicated it was newly generated.
+		if newSecretCreated {
+			err = r.Create(ctx, newSecret)
+			if err != nil {
+				logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+				return ctrl.Result{}, err
+			}
+		}
+		monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
+		logger.Info("Creating new jks secret after user or cluster CA secret changed was successful")
+		dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
+		if err != nil {
+			logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+			return ctrl.Result{}, err
+		}
+		err = r.Update(ctx, dep)
+		if err != nil {
+			logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
+			return ctrl.Result{}, err
+		}
+		logger.Info("Deployment updated after secret change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -388,7 +419,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 						}
 					}
 					// Get cluster ca secret
-					if obj.GetLabels()["strimzi.io/cluster"] == itemClusterName && strings.HasSuffix(obj.GetName(), "-cluster-ca-cert") {
+					if obj.GetLabels()["strimzi.io/cluster"] == itemClusterName && strings.HasSuffix(obj.GetName(), clusterCASuffix) {
 						requests = append(requests, reconcile.Request{
 							NamespacedName: types.NamespacedName{
 								Name:      item.GetName(),
@@ -406,8 +437,8 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 // renewTLSSecret creates and applies a new TLS secret for Schema Registry REST API.
 // It is a no-op when SecureHTTP is disabled or a custom TLSSecretName is provided.
-// B6: Uses controllerutil.CreateOrUpdate to handle AlreadyExists gracefully.
-func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) error {
+// Uses controllerutil.CreateOrUpdate to handle AlreadyExists gracefully.
+func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger logr.Logger) error {
 	if !instance.Spec.SecureHTTP || instance.Spec.TLSSecretName != "" {
 		return nil
 	}

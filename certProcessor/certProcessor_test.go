@@ -70,7 +70,7 @@ func TestCreate_truststore(t *testing.T) {
 		t.Fatalf("Failed to generate cluster CA: %v", err)
 	}
 
-	cp := NewCertProcessor(&logr.Logger{})
+	cp := NewCertProcessor(logr.Logger{})
 	truststore, password, err := cp.CreateTruststore(clusterCA.CACertPEM, "test1234")
 	if err != nil {
 		t.Error(err)
@@ -97,7 +97,7 @@ func TestCreateKeystore(t *testing.T) {
 		t.Fatalf("Failed to generate user cert: %v", err)
 	}
 
-	cp := NewCertProcessor(&logr.Logger{})
+	cp := NewCertProcessor(logr.Logger{})
 	keystore, password, err := cp.CreateKeystore(ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
 	if err != nil {
 		t.Error(err)
@@ -124,7 +124,7 @@ func TestCreateKeystorep12(t *testing.T) {
 		t.Fatalf("Failed to generate user cert: %v", err)
 	}
 
-	cp := NewCertProcessor(&logr.Logger{})
+	cp := NewCertProcessor(logr.Logger{})
 	keystore, password, err := cp.CreateKeystore(ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, string(uc.PKCS12Data), "test1234")
 	if err != nil {
 		t.Error(err)
@@ -147,7 +147,7 @@ func TestCreateTLSKeystore(t *testing.T) {
 		t.Fatalf("Failed to generate CA: %v", err)
 	}
 
-	cp := NewCertProcessor(&logr.Logger{})
+	cp := NewCertProcessor(logr.Logger{})
 	keystore, password, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
 	if err != nil {
 		t.Error(err)
@@ -168,7 +168,7 @@ func TestCreateTLSKeystore(t *testing.T) {
 // TestCreateTruststore_InvalidPEM verifies that CreateTruststore returns an error
 // when provided with invalid PEM certificate data.
 func TestCreateTruststore_InvalidPEM(t *testing.T) {
-	cp := NewCertProcessor(&logr.Logger{})
+	cp := NewCertProcessor(logr.Logger{})
 	_, _, err := cp.CreateTruststore("not a valid PEM certificate data", "test1234")
 	if err == nil {
 		t.Error("expected error when creating truststore with invalid PEM data, got nil")
@@ -188,7 +188,7 @@ func TestCreateKeystore_EmptyPassword(t *testing.T) {
 		t.Fatalf("failed to generate user cert: %v", err)
 	}
 
-	cp := NewCertProcessor(&logr.Logger{})
+	cp := NewCertProcessor(logr.Logger{})
 	keystore, password, err := cp.CreateKeystore(ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error when password is empty (should auto-generate): %v", err)
@@ -212,7 +212,7 @@ func TestGenerateTLSforHTTP_EmptyCN(t *testing.T) {
 		t.Fatalf("failed to generate CA: %v", err)
 	}
 
-	cp := NewCertProcessor(&logr.Logger{})
+	cp := NewCertProcessor(logr.Logger{})
 	keystore, _, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "")
 	if err == nil {
 		// If no error returned, verify the keystore is empty (indicating failure)
