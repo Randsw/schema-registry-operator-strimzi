@@ -350,7 +350,7 @@ func TestGetStrimziClusterName(t *testing.T) {
 
 	t.Run("valid label returns cluster name", func(t *testing.T) {
 		inst := newTestInstance()
-		inst.ObjectMeta.Labels = map[string]string{
+		inst.Labels = map[string]string{
 			"strimzi.io/cluster": "my-kafka-cluster",
 		}
 
@@ -365,7 +365,7 @@ func TestGetStrimziClusterName(t *testing.T) {
 
 	t.Run("valid label among other labels returns cluster name", func(t *testing.T) {
 		inst := newTestInstance()
-		inst.ObjectMeta.Labels = map[string]string{
+		inst.Labels = map[string]string{
 			"app.kubernetes.io/name": "my-app",
 			"strimzi.io/cluster":     "prod-kafka",
 			"other-label":            "other",
@@ -399,7 +399,7 @@ func TestRenewTLSSecret_NoOp(t *testing.T) {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = false
 		inst.Spec.TLSSecretName = ""
-		inst.ObjectMeta.Labels = map[string]string{
+		inst.Labels = map[string]string{
 			"strimzi.io/cluster": "test-cluster",
 		}
 
@@ -413,7 +413,7 @@ func TestRenewTLSSecret_NoOp(t *testing.T) {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = true
 		inst.Spec.TLSSecretName = "my-custom-tls"
-		inst.ObjectMeta.Labels = map[string]string{
+		inst.Labels = map[string]string{
 			"strimzi.io/cluster": "test-cluster",
 		}
 
@@ -427,7 +427,7 @@ func TestRenewTLSSecret_NoOp(t *testing.T) {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = true
 		inst.Spec.TLSSecretName = ""
-		inst.ObjectMeta.Labels = nil
+		inst.Labels = nil
 
 		err := reconciler.renewTLSSecret(inst, context.Background(), logr.Logger{})
 		if err == nil {
