@@ -392,34 +392,48 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
 		Watches(
-			&v1.Secret{}, // Watch the secret
+			&v1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
-				err := r.List(ctx, attachedStrimziRegistryOperators, client.InNamespace(obj.GetNamespace()))
-				if err != nil {
-					return []reconcile.Request{}
+				// Fast path: all secrets we care about (user secrets, cluster CA cert
+				// secrets) carry the strimzi.io/cluster label. If the secret lacks this
+				// label, it cannot be relevant — return immediately without listing CRs.
+				// This avoids O(N²) fan-out where every Secret change triggered a List
+				// of every StrimziSchemaRegistry CR in the namespace.
+				secretLabels := obj.GetLabels()
+				if secretLabels == nil {
+					return nil
 				}
-				requests := []reconcile.Request{}
+				secretClusterName := secretLabels[strimziClusterLabel]
+				if secretClusterName == "" {
+					return nil
+				}
+
+				// List only CRs that belong to the same Kafka cluster, using label
+				// selector to minimize the List scope (typically 1 CR per cluster).
+				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+				err := r.List(ctx, attachedStrimziRegistryOperators,
+					client.InNamespace(obj.GetNamespace()),
+					client.MatchingLabels{strimziClusterLabel: secretClusterName},
+				)
+				if err != nil {
+					return nil
+				}
+
+				requests := make([]reconcile.Request, 0, len(attachedStrimziRegistryOperators.Items))
 				for _, item := range attachedStrimziRegistryOperators.Items {
-					// B3 fix: nil-safe label access for the CR items in the watch handler
-					itemClusterName, err := getStrimziClusterName(&item)
-					if err != nil {
+					// User secret: the secret name matches the CR name (both are the
+					// KafkaUser name).
+					if obj.GetName() == item.GetName() {
+						requests = append(requests, reconcile.Request{
+							NamespacedName: types.NamespacedName{
+								Name:      item.GetName(),
+								Namespace: item.GetNamespace(),
+							},
+						})
 						continue
 					}
-					// Check if the Secret resource has the label 'strimzi.io/cluster'
-					// Get user secret
-					if obj.GetName() == item.GetName() {
-						if obj.GetLabels()["strimzi.io/cluster"] == itemClusterName {
-							requests = append(requests, reconcile.Request{
-								NamespacedName: types.NamespacedName{
-									Name:      item.GetName(),
-									Namespace: item.GetNamespace(),
-								},
-							})
-						}
-					}
-					// Get cluster ca secret
-					if obj.GetLabels()["strimzi.io/cluster"] == itemClusterName && strings.HasSuffix(obj.GetName(), clusterCASuffix) {
+					// Cluster CA cert secret: name ends with -cluster-ca-cert.
+					if strings.HasSuffix(obj.GetName(), clusterCASuffix) {
 						requests = append(requests, reconcile.Request{
 							NamespacedName: types.NamespacedName{
 								Name:      item.GetName(),

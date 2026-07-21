@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,6 +51,38 @@ func GeneratePassword(length int, includeNumber bool, includeSpecial bool) (stri
 	return string(password), nil
 }
 
+// writeTempFile creates a temporary file with the given pattern and content,
+// closes it immediately, and returns the file path. The caller is responsible
+// for removing the file when it is no longer needed.
+func writeTempFile(pattern, content string) (string, error) {
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file %q: %w", pattern, err)
+	}
+	name := f.Name()
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		os.Remove(name)
+		return "", fmt.Errorf("failed to write temp file %q: %w", name, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(name)
+		return "", fmt.Errorf("failed to close temp file %q: %w", name, err)
+	}
+	return name, nil
+}
+
+// removeIfExists removes a file if it exists, logging a warning on failure.
+// It is safe to call on paths that may not exist.
+func (cp *CertProcessor) removeIfExists(path string) {
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		cp.log.V(1).Info("Failed to remove temp file", "path", path, "error", err.Error())
+	}
+}
+
 // Create a JKS-formatted truststore using the cluster's CA certificate.
 // Parameters
 //     ----------
@@ -59,16 +92,20 @@ func GeneratePassword(length int, includeNumber bool, includeSpecial bool) (stri
 //         specifially the secret key named ``ca.crt``. See
 //         `get_cluster_ca_cert`.
 
-//     Returns
-//     -------
-//     truststore_content : `bytes`
-//         The content of a JKS truststore containing the cluster CA certificate.
-//     password : `str`
-//         The password generated for the truststore.
+//	Returns
+//	-------
+//	truststore_content : `bytes`
+//	    The content of a JKS truststore containing the cluster CA certificate.
+//	password : `str`
+//	    The password generated for the truststore.
+//
 // Notes
 // -----
-// Internally this function calls out to the ``keytool`` command-line tool.
-
+// Internally this function calls out to the “keytool“ command-line tool.
+//
+// Security: temporary files are removed immediately after they are consumed,
+// rather than deferred to function exit. This minimizes the window during which
+// sensitive certificate material exists on disk.
 func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte, string, error) {
 	if password == "" {
 		var err error
@@ -78,57 +115,48 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 			return nil, "", err
 		}
 	}
-	// Create temporary file
-	file, err := os.CreateTemp("", "ca_cert")
-	if err != nil {
-		cp.log.Error(err, "Failed to create temp file", "File", "ca_cert")
-		return nil, "", err
-	}
-	defer func() {
-		err = file.Close()
-		if err != nil {
-			cp.log.Error(err, "Failed to close file", "File", file.Name())
-		}
-		err = os.Remove(file.Name())
-		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", file.Name())
-		}
-	}()
 
-	// Save certificate to temporary file
-	_, err = file.WriteString(cert)
+	// Write CA certificate to a temp file; removed immediately after keytool consumes it.
+	caCertPath, err := writeTempFile("ca_cert", cert)
 	if err != nil {
-		cp.log.Error(err, "Failed to write cert to temp file", "File", "ca_cert")
+		cp.log.Error(err, "Failed to write temp file", "File", "ca_cert")
 		return nil, "", err
 	}
-	// Set truststore output file
-	tempDir := os.TempDir()
-	output_path := tempDir + "/" + "client.truststore.jks"
-	defer func() {
-		err = os.Remove(output_path)
-		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", output_path)
-		}
-	}()
+	defer cp.removeIfExists(caCertPath)
+
+	// Truststore output path — use a dedicated subdirectory when available to
+	// reduce exposure in shared /tmp. Falls back to os.TempDir().
+	outputPath := filepath.Join(os.TempDir(), "client.truststore.jks")
+	defer cp.removeIfExists(outputPath)
+
 	// Generate truststore
-	cmd := exec.Command("keytool", "-importcert", "-keystore", output_path, "-alias", "CARoot", "-file",
-		file.Name(), "-storepass", password, "-storetype", "jks", "-trustcacerts", "-noprompt")
+	cmd := exec.Command("keytool", "-importcert", "-keystore", outputPath, "-alias", "CARoot", "-file",
+		caCertPath, "-storepass", password, "-storetype", "jks", "-trustcacerts", "-noprompt")
 	out, err := cmd.Output()
 	if err != nil {
-		cp.log.Error(err, "Error while exec command", "cmdout", out)
+		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
 		return nil, "", err
 	}
-	// Check if truststore exist
-	if _, err := os.Stat(output_path); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", output_path)
+
+	// Remove the CA cert temp file now that keytool has consumed it.
+	cp.removeIfExists(caCertPath)
+
+	// Check if truststore exists
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+		cp.log.Error(err, "File not exist", "File", outputPath)
 		return nil, "", err
 	}
+
 	// Read truststore from file to save in kubernetes secret
-	b, err := os.ReadFile(output_path) // just pass the file name
+	b, err := os.ReadFile(outputPath)
 	if err != nil {
-		cp.log.Error(err, "File read fail", "File", output_path)
+		cp.log.Error(err, "File read fail", "File", outputPath)
 		return nil, "", err
 	}
+
+	// Remove the truststore output now that we've read it into memory.
+	cp.removeIfExists(outputPath)
+
 	return b, password, nil
 }
 
@@ -159,162 +187,124 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 
 // Notes
 // -----
-// Internally this function calls out to the ``openssl`` and ``keytool``
+// Internally this function calls out to the “openssl“ and “keytool“
 // command-line tool.
-
+//
+// Security: temporary files containing private key material are removed
+// immediately after consumption. The p12_path and keystore_path are also
+// removed as soon as their content is read into memory.
 func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, userKey string, userp12 string, password string) ([]byte, string, error) {
+	var err error
 
 	if password == "" {
-		var err error
 		password, err = GeneratePassword(24, true, false)
 		if err != nil {
 			cp.log.Error(err, "Failed to generate cryptographically secure random number")
 			return nil, "", err
 		}
 	}
-	var p12_path string
+	var p12Path string
 	tempDir := os.TempDir()
-	// User data in P12 format not presented
+
+	// Track all temp files for cleanup on error.
+	var tempFiles []string
+	cleanup := func() {
+		for _, f := range tempFiles {
+			cp.removeIfExists(f)
+		}
+	}
+
+	// User data in P12 format not presented — generate from PEM components.
 	if userp12 == "" {
-		// Create temporary file for user CA cert
-		userCAFile, err := os.CreateTemp("", "user_ca.crt")
+		// Write user CA cert, user cert, and user key to temp files.
+		userCAPath, err := writeTempFile("user_ca.crt", userCACert)
 		if err != nil {
-			cp.log.Error(err, "Failed to create temp file", "File", "user_ca.crt")
+			cp.log.Error(err, "Failed to write temp file", "File", "user_ca.crt")
 			return nil, "", err
 		}
-		defer func() {
-			err = userCAFile.Close()
-			if err != nil {
-				cp.log.Error(err, "Failed to close file", "File", userCAFile.Name())
-			}
-			err = os.Remove(userCAFile.Name())
-			if err != nil {
-				cp.log.Error(err, "Failed to delete file", "File", userCAFile.Name())
-			}
-		}()
-		// Save ca certificate to temporary file
-		_, err = userCAFile.WriteString(userCACert)
+		tempFiles = append(tempFiles, userCAPath)
+
+		userCertPath, err := writeTempFile("user.crt", userCert)
 		if err != nil {
-			cp.log.Error(err, "Error writing to temp file", "File", "user_ca.crt")
+			cp.log.Error(err, "Failed to write temp file", "File", "user.crt")
+			cleanup()
 			return nil, "", err
 		}
-		// Create temporary file for user cert
-		userCertFile, err := os.CreateTemp("", "user.crt")
+		tempFiles = append(tempFiles, userCertPath)
+
+		userKeyPath, err := writeTempFile("user.key", userKey)
 		if err != nil {
-			cp.log.Error(err, "Failed to create temp file", "File", "user.crt")
+			cp.log.Error(err, "Failed to write temp file", "File", "user.key")
+			cleanup()
 			return nil, "", err
 		}
-		defer func() {
-			err = userCertFile.Close()
-			if err != nil {
-				cp.log.Error(err, "Failed to close file", "File", userCertFile.Name())
-			}
-			err = os.Remove(userCertFile.Name())
-			if err != nil {
-				cp.log.Error(err, "Failed to delete file", "File", userCertFile.Name())
-			}
-		}()
-		// Save user certificate to temporary file
-		_, err = userCertFile.WriteString(userCert)
+		tempFiles = append(tempFiles, userKeyPath)
+
+		p12Path = filepath.Join(tempDir, "user.p12")
+		// Generate p12 format bundle
+		cmd := exec.Command("openssl", "pkcs12", "-export", "-in", userCertPath, "-inkey", userKeyPath, "-chain", "-CAfile",
+			userCAPath, "-name", "confluent-schema-registry", "-passout", "pass:"+password, "-out", p12Path)
+		out, err := cmd.Output()
 		if err != nil {
-			cp.log.Error(err, "Error writing to temp file", "File", "user.crt")
-			return nil, "", err
-		}
-		// Create temporary file for user key
-		userKeyFile, err := os.CreateTemp("", "user.key")
-		if err != nil {
-			cp.log.Error(err, "Failed to create temp file", "File", "user.key")
-			return nil, "", err
-		}
-		defer func() {
-			err = userKeyFile.Close()
-			if err != nil {
-				cp.log.Error(err, "Failed to close file", "File", userKeyFile.Name())
-			}
-			err = os.Remove(userKeyFile.Name())
-			if err != nil {
-				cp.log.Error(err, "Failed to delete file", "File", userKeyFile.Name())
-			}
-		}()
-		// Save user key to temporary file
-		_, err = userKeyFile.WriteString(userKey)
-		if err != nil {
-			cp.log.Error(err, "Error writing to temp file", "File", "user.key")
+			cp.log.Error(err, "Error while exec command", "cmdout", string(out))
+			cleanup()
 			return nil, "", err
 		}
 
-		p12_path = tempDir + "/" + "user.p12"
-		// Generate p12 format bundle
-		cmd := exec.Command("openssl", "pkcs12", "-export", "-in", userCertFile.Name(), "-inkey", userKeyFile.Name(), "-chain", "-CAfile",
-			userCAFile.Name(), "-name", "confluent-schema-registry", "-passout", "pass:"+password, "-out", p12_path)
-		out, err := cmd.Output()
-		if err != nil {
-			cp.log.Error(err, "Error while exec command", "cmdout", out)
-			return nil, "", err
-		}
-		// Check if p12 format bundle exist
-		if _, err := os.Stat(p12_path); os.IsNotExist(err) {
-			cp.log.Error(err, "File not exist", "File", p12_path)
-			return nil, "", err
-		}
+		// Remove the PEM temp files now that openssl has consumed them.
+		cleanup()
+		tempFiles = nil
 	} else {
-		// Cert in P12 formant is presented
+		// Cert in P12 format is presented — write directly to temp file.
 		cp.log.V(1).Info("Using p12 cert store")
-		// Create temporary file for user bundle in P12 format
-		userKeyFilep12, err := os.CreateTemp("", "user.p12")
+		p12Path, err = writeTempFile("user.p12", userp12)
 		if err != nil {
-			cp.log.Error(err, "Failed to create temp file", "File", "user.p12")
+			cp.log.Error(err, "Failed to write temp file", "File", "user.p12")
 			return nil, "", err
 		}
-		// Save p12 certificate to temporary file
-		p12Data := userp12
-		_, err = userKeyFilep12.Write([]byte(p12Data))
-		if err != nil {
-			cp.log.Error(err, "Error writing to temp file", "File", userKeyFilep12.Name())
-			return nil, "", err
-		}
-		defer func() {
-			err = userKeyFilep12.Close()
-			if err != nil {
-				cp.log.Error(err, "Failed to close file", "File", userKeyFilep12.Name())
-			}
-		}()
-		p12_path = userKeyFilep12.Name()
+		tempFiles = append(tempFiles, p12Path)
 	}
-	defer func() {
-		err := os.Remove(p12_path)
-		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", p12_path)
-		}
-	}()
+	defer cp.removeIfExists(p12Path)
+
+	// Check if p12 format bundle exists
+	if _, err := os.Stat(p12Path); os.IsNotExist(err) {
+		cp.log.Error(err, "File not exist", "File", p12Path)
+		return nil, "", err
+	}
+
 	// Create path to client keystore
-	keystore_path := tempDir + "/" + "client.keystore.jks"
-	defer func() {
-		err := os.Remove(keystore_path)
-		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", keystore_path)
-		}
-	}()
+	keystorePath := filepath.Join(tempDir, "client.keystore.jks")
+	defer cp.removeIfExists(keystorePath)
+
 	// Generate client keystore
 	cp.log.V(1).Info("Generate keystore")
-	cmd := exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystore_path,
-		"-deststoretype", "jks", "-srckeystore", p12_path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
+	cmd := exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystorePath,
+		"-deststoretype", "jks", "-srckeystore", p12Path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
 	out, err := cmd.Output()
 	if err != nil {
-		cp.log.Error(err, "Error while exec command", "cmdout", out)
+		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
 		return nil, "", err
 	}
-	// Check if keystore exist
-	if _, err := os.Stat(keystore_path); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", keystore_path)
+
+	// Remove p12_path now that keytool has consumed it.
+	cp.removeIfExists(p12Path)
+
+	// Check if keystore exists
+	if _, err := os.Stat(keystorePath); os.IsNotExist(err) {
+		cp.log.Error(err, "File not exist", "File", keystorePath)
 		return nil, "", err
 	}
+
 	// Read keystore from file to save in kubernetes secret
-	b, err := os.ReadFile(keystore_path) // just pass the file name
+	b, err := os.ReadFile(keystorePath)
 	if err != nil {
-		cp.log.Error(err, "File read fail", "File", keystore_path)
+		cp.log.Error(err, "File read fail", "File", keystorePath)
 		return nil, "", err
 	}
+
+	// Remove keystore output now that we've read it into memory.
+	cp.removeIfExists(keystorePath)
+
 	return b, password, nil
 }
 
@@ -332,117 +322,115 @@ func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, passwor
 			return nil, "", err
 		}
 	}
-	var p12_path string
+
 	tempDir := os.TempDir()
-	// Create temporary file for cluster CA cert
-	CAFile, err := os.CreateTemp("", "tls-ca-cert.crt")
+
+	// Track all temp files for cleanup on error paths.
+	var tempFiles []string
+	cleanup := func() {
+		for _, f := range tempFiles {
+			cp.removeIfExists(f)
+		}
+	}
+
+	// Write cluster CA cert to temp file.
+	caCertPath, err := writeTempFile("tls-ca-cert.crt", caCert)
 	if err != nil {
-		cp.log.Error(err, "Failed to create temp file", "File", "tls-ca-cert.crt")
+		cp.log.Error(err, "Failed to write temp file", "File", "tls-ca-cert.crt")
 		return nil, "", err
 	}
-	defer func() {
-		err = CAFile.Close()
-		if err != nil {
-			cp.log.Error(err, "Failed to close file", "File", CAFile.Name())
-		}
-		err = os.Remove(CAFile.Name())
-		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", CAFile.Name())
-		}
-	}()
-	// Save ca certificate to temporary file
-	_, err = CAFile.WriteString(caCert)
-	if err != nil {
-		cp.log.Error(err, "Error writing to temp file", "File", "tls-ca-cert.crt")
-		return nil, "", err
-	}
+	tempFiles = append(tempFiles, caCertPath)
+
 	// Generate server private key and CSR
 	serverKey, csr, err := cp.generateCSR(cn)
 	if err != nil {
 		cp.log.Error(err, "Failed to generate CSR")
+		cleanup()
 		return nil, "", err
 	}
 	ca, err := StringToCertificate(caCert)
 	if err != nil {
 		cp.log.Error(err, "Failed to convert from string to x509 certificate")
+		cleanup()
 		return nil, "", err
 	}
 	key, err := StringToPrivateKey(caKey)
 	if err != nil {
 		cp.log.Error(err, "Failed to convert from string to x509 private key")
+		cleanup()
 		return nil, "", err
 	}
 	// Sign the CSR with the CA to create a server certificate
 	serverCert, err := signCSR(ca, key, csr)
 	if err != nil {
 		cp.log.Error(err, "Failed to sign CSR")
+		cleanup()
 		return nil, "", err
 	}
 	// Save TLS cert and key to files
-	keyFile, certFile, err := cp.saveFiles(serverKey, serverCert)
+	keyPath, certPath, err := cp.saveFiles(serverKey, serverCert)
 	if err != nil {
 		cp.log.Error(err, "Failed to save files")
+		cleanup()
 		return nil, "", err
 	}
-	defer func() {
-		err = os.Remove(keyFile)
-		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", keyFile)
-		}
-	}()
-	defer func() {
-		err = os.Remove(certFile)
-		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", certFile)
-		}
-	}()
-	p12_path = tempDir + "/" + "tls.p12"
-	defer func() {
-		err = os.Remove(p12_path)
-		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", p12_path)
-		}
-	}()
+	tempFiles = append(tempFiles, keyPath, certPath)
+
+	p12Path := filepath.Join(tempDir, "tls.p12")
 	// Generate p12 format bundle
-	cmd := exec.Command("openssl", "pkcs12", "-export", "-in", certFile, "-inkey", keyFile, "-chain", "-CAfile",
-		CAFile.Name(), "-name", "confluent-schema-registry-tls", "-passout", "pass:"+password, "-out", p12_path)
+	cmd := exec.Command("openssl", "pkcs12", "-export", "-in", certPath, "-inkey", keyPath, "-chain", "-CAfile",
+		caCertPath, "-name", "confluent-schema-registry-tls", "-passout", "pass:"+password, "-out", p12Path)
 	out, err := cmd.Output()
 	if err != nil {
-		cp.log.Error(err, "Error while exec command", "cmdout", out)
+		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
+		cleanup()
 		return nil, "", err
 	}
-	// Check if p12 format bundle exist
-	if _, err := os.Stat(p12_path); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", p12_path)
+
+	// Remove the PEM key/cert/ca temp files now that openssl has consumed them.
+	cleanup()
+	tempFiles = nil
+
+	defer cp.removeIfExists(p12Path)
+
+	// Check if p12 format bundle exists
+	if _, err := os.Stat(p12Path); os.IsNotExist(err) {
+		cp.log.Error(err, "File not exist", "File", p12Path)
 		return nil, "", err
 	}
-	keystore_path := tempDir + "/" + "tls.keystore.jks"
-	defer func() {
-		err := os.Remove(keystore_path)
-		if err != nil {
-			cp.log.Error(err, "Failed to delete file", "File", keystore_path)
-		}
-	}()
+
+	keystorePath := filepath.Join(tempDir, "tls.keystore.jks")
+	defer cp.removeIfExists(keystorePath)
+
 	// Generate keystore
 	cp.log.V(1).Info("Generate tls keystore")
-	cmd = exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystore_path,
-		"-deststoretype", "jks", "-srckeystore", p12_path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
+	cmd = exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystorePath,
+		"-deststoretype", "jks", "-srckeystore", p12Path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
 	out, err = cmd.Output()
 	if err != nil {
-		cp.log.Error(err, "Error while exec command", "cmdout", out)
+		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
 		return nil, "", err
 	}
-	// Check if keystore exist
-	if _, err := os.Stat(keystore_path); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", keystore_path)
+
+	// Remove p12_path now that keytool has consumed it.
+	cp.removeIfExists(p12Path)
+
+	// Check if keystore exists
+	if _, err := os.Stat(keystorePath); os.IsNotExist(err) {
+		cp.log.Error(err, "File not exist", "File", keystorePath)
 		return nil, "", err
 	}
+
 	// Read keystore from file to save in kubernetes secret
-	b, err := os.ReadFile(keystore_path) // just pass the file name
+	b, err := os.ReadFile(keystorePath)
 	if err != nil {
-		cp.log.Error(err, "File read fail", "File", keystore_path)
+		cp.log.Error(err, "File read fail", "File", keystorePath)
 		return nil, "", err
 	}
+
+	// Remove keystore output now that we've read it into memory.
+	cp.removeIfExists(keystorePath)
+
 	return b, password, nil
 }
 
@@ -536,35 +524,40 @@ func StringToPrivateKey(privateKeyString string) (*rsa.PrivateKey, error) {
 }
 
 func (cp *CertProcessor) saveFiles(serverKey *rsa.PrivateKey, serverCert *x509.Certificate) (string, string, error) {
-	// Save server private key
+	// Save server private key — close immediately after writing.
 	serverKeyFile, err := os.CreateTemp("", "tls-server.key")
 	if err != nil {
 		return "", "", err
 	}
-	defer func() {
-		err = serverKeyFile.Close()
-		if err != nil {
-			cp.log.Error(err, "Failed to close file", "File", serverKeyFile.Name())
-		}
-	}()
-	err = pem.Encode(serverKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)})
-	if err != nil {
+	keyPath := serverKeyFile.Name()
+	if err := pem.Encode(serverKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}); err != nil {
+		serverKeyFile.Close()
+		os.Remove(keyPath)
 		return "", "", err
 	}
-	// Save server certificate
+	if err := serverKeyFile.Close(); err != nil {
+		os.Remove(keyPath)
+		return "", "", fmt.Errorf("failed to close key file %q: %w", keyPath, err)
+	}
+
+	// Save server certificate — close immediately after writing.
 	serverCertFile, err := os.CreateTemp("", "tls-server.crt")
 	if err != nil {
+		os.Remove(keyPath)
 		return "", "", err
 	}
-	defer func() {
-		err = serverCertFile.Close()
-		if err != nil {
-			cp.log.Error(err, "Failed to close file", "File", serverCertFile.Name())
-		}
-	}()
-	err = pem.Encode(serverCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverCert.Raw})
-	if err != nil {
+	certPath := serverCertFile.Name()
+	if err := pem.Encode(serverCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverCert.Raw}); err != nil {
+		serverCertFile.Close()
+		os.Remove(certPath)
+		os.Remove(keyPath)
 		return "", "", err
 	}
-	return serverKeyFile.Name(), serverCertFile.Name(), nil
+	if err := serverCertFile.Close(); err != nil {
+		os.Remove(certPath)
+		os.Remove(keyPath)
+		return "", "", fmt.Errorf("failed to close cert file %q: %w", certPath, err)
+	}
+
+	return keyPath, certPath, nil
 }

@@ -339,15 +339,46 @@ func buildPodVolumes(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 }
 
 // buildProbes constructs readiness, liveness, and startup probes for the Schema Registry container.
+//
+// When SecureHTTP is enabled (scheme == HTTPS), readiness and startup probes use TCPSocket
+// instead of HTTPGet. This avoids TLS certificate verification failures: Kubernetes kubelet
+// does not support insecure-skip-verify for HTTPGet probes, so HTTPS probes against self-signed
+// certificates (generated from the Strimzi cluster CA) would fail perpetually.
+// The liveness probe already uses TCPSocket unconditionally for the same reason.
 func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe, *v1.Probe) {
-	readinessProbe := &v1.Probe{
-		ProbeHandler: v1.ProbeHandler{
+	var readinessHandler, startupHandler v1.ProbeHandler
+
+	if scheme == v1.URISchemeHTTPS {
+		// Self-signed cert: TCPSocket avoids TLS verification failures.
+		readinessHandler = v1.ProbeHandler{
+			TCPSocket: &v1.TCPSocketAction{
+				Port: intstr.IntOrString{IntVal: listenerPort},
+			},
+		}
+		startupHandler = v1.ProbeHandler{
+			TCPSocket: &v1.TCPSocketAction{
+				Port: intstr.IntOrString{IntVal: listenerPort},
+			},
+		}
+	} else {
+		readinessHandler = v1.ProbeHandler{
 			HTTPGet: &v1.HTTPGetAction{
 				Path:   "/",
 				Port:   intstr.IntOrString{IntVal: listenerPort},
-				Scheme: scheme,
+				Scheme: v1.URISchemeHTTP,
 			},
-		},
+		}
+		startupHandler = v1.ProbeHandler{
+			HTTPGet: &v1.HTTPGetAction{
+				Path:   "/",
+				Port:   intstr.IntOrString{IntVal: listenerPort},
+				Scheme: v1.URISchemeHTTP,
+			},
+		}
+	}
+
+	readinessProbe := &v1.Probe{
+		ProbeHandler:        readinessHandler,
 		InitialDelaySeconds: 30,
 		PeriodSeconds:       10,
 		TimeoutSeconds:      5,
@@ -367,13 +398,7 @@ func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe,
 	}
 
 	startupProbe := &v1.Probe{
-		ProbeHandler: v1.ProbeHandler{
-			HTTPGet: &v1.HTTPGetAction{
-				Path:   "/",
-				Port:   intstr.IntOrString{IntVal: listenerPort},
-				Scheme: scheme,
-			},
-		},
+		ProbeHandler:        startupHandler,
 		InitialDelaySeconds: 30,
 		PeriodSeconds:       10,
 		TimeoutSeconds:      5,
