@@ -46,7 +46,10 @@ func TestGeneratePassword(t *testing.T) {
 	})
 
 	t.Run("includes special characters", func(t *testing.T) {
-		password, err := GeneratePassword(12, true, true)
+		// Use a longer password (50 chars) to virtually guarantee
+		// special characters appear. With a short password (e.g., 12 chars)
+		// the random generator may select only letters and digits.
+		password, err := GeneratePassword(50, true, true)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

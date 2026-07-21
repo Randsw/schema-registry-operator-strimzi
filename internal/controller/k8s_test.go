@@ -17,11 +17,15 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"testing"
 
+	"github.com/go-logr/logr"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // newTestInstance creates a minimal StrimziSchemaRegistry for testing.
@@ -209,6 +213,51 @@ func TestComputeSpecHash(t *testing.T) {
 			t.Errorf("expected different hashes for different resource requirements: both %q", hash1)
 		}
 	})
+
+	// T4: Template env var changes must affect the hash
+	t.Run("different Template env vars produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "sr",
+						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Env: []corev1.EnvVar{
+							{Name: "CUSTOM_ENV", Value: "value1"},
+						},
+					},
+				},
+			},
+		}
+		inst2 := newTestInstance()
+		inst2.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "sr",
+						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Env: []corev1.EnvVar{
+							{Name: "CUSTOM_ENV", Value: "value2"},
+						},
+					},
+				},
+			},
+		}
+
+		hash1, err1 := computeSpecHash(inst1)
+		hash2, err2 := computeSpecHash(inst2)
+
+		if err1 != nil {
+			t.Fatalf("unexpected error computing hash1: %v", err1)
+		}
+		if err2 != nil {
+			t.Fatalf("unexpected error computing hash2: %v", err2)
+		}
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different container env vars: both %q", hash1)
+		}
+	})
 }
 
 func TestMustParseQuantity(t *testing.T) {
@@ -251,4 +300,138 @@ func TestMustParseQuantity(t *testing.T) {
 			mustParseQuantity(tc)
 		})
 	}
+}
+
+// TestGetStrimziClusterName covers T3: verify that getStrimziClusterName
+// handles nil labels, missing label, empty label, and valid label correctly.
+func TestGetStrimziClusterName(t *testing.T) {
+	t.Run("nil labels returns error", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Labels = nil
+
+		name, err := getStrimziClusterName(inst)
+		if err == nil {
+			t.Error("expected error for nil labels, got nil")
+		}
+		if name != "" {
+			t.Errorf("expected empty name for nil labels, got %q", name)
+		}
+	})
+
+	t.Run("missing strimzi.io/cluster label returns error", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Labels = map[string]string{
+			"other-label": "some-value",
+		}
+
+		name, err := getStrimziClusterName(inst)
+		if err == nil {
+			t.Error("expected error for missing strimzi.io/cluster label, got nil")
+		}
+		if name != "" {
+			t.Errorf("expected empty name for missing label, got %q", name)
+		}
+	})
+
+	t.Run("empty strimzi.io/cluster label value returns error", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Labels = map[string]string{
+			"strimzi.io/cluster": "",
+		}
+
+		name, err := getStrimziClusterName(inst)
+		if err == nil {
+			t.Error("expected error for empty strimzi.io/cluster label, got nil")
+		}
+		if name != "" {
+			t.Errorf("expected empty name for empty label value, got %q", name)
+		}
+	})
+
+	t.Run("valid label returns cluster name", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Labels = map[string]string{
+			"strimzi.io/cluster": "my-kafka-cluster",
+		}
+
+		name, err := getStrimziClusterName(inst)
+		if err != nil {
+			t.Fatalf("unexpected error for valid label: %v", err)
+		}
+		if name != "my-kafka-cluster" {
+			t.Errorf("expected cluster name 'my-kafka-cluster', got %q", name)
+		}
+	})
+
+	t.Run("valid label among other labels returns cluster name", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Labels = map[string]string{
+			"app.kubernetes.io/name": "my-app",
+			"strimzi.io/cluster":     "prod-kafka",
+			"other-label":            "other",
+		}
+
+		name, err := getStrimziClusterName(inst)
+		if err != nil {
+			t.Fatalf("unexpected error for valid label: %v", err)
+		}
+		if name != "prod-kafka" {
+			t.Errorf("expected cluster name 'prod-kafka', got %q", name)
+		}
+	})
+}
+
+// TestRenewTLSSecret_NoOp covers T1: verify that renewTLSSecret is a no-op
+// when SecureHTTP is false or a custom TLSSecretName is provided. Also tests
+// that a missing strimzi.io/cluster label causes an error.
+func TestRenewTLSSecret_NoOp(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &StrimziSchemaRegistryReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	t.Run("SecureHTTP=false is no-op", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.TLSSecretName = ""
+		inst.Labels = map[string]string{
+			"strimzi.io/cluster": "test-cluster",
+		}
+
+		err := reconciler.renewTLSSecret(inst, context.Background(), logr.Logger{})
+		if err != nil {
+			t.Errorf("expected no error when SecureHTTP=false, got: %v", err)
+		}
+	})
+
+	t.Run("TLSSecretName set is no-op", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = "my-custom-tls"
+		inst.Labels = map[string]string{
+			"strimzi.io/cluster": "test-cluster",
+		}
+
+		err := reconciler.renewTLSSecret(inst, context.Background(), logr.Logger{})
+		if err != nil {
+			t.Errorf("expected no error when TLSSecretName is set, got: %v", err)
+		}
+	})
+
+	t.Run("missing strimzi.io/cluster label returns error", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = ""
+		inst.Labels = nil
+
+		err := reconciler.renewTLSSecret(inst, context.Background(), logr.Logger{})
+		if err == nil {
+			t.Error("expected error when strimzi.io/cluster label is missing, got nil")
+		}
+	})
 }
