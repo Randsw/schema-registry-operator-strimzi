@@ -307,7 +307,7 @@ func TestMustParseQuantity(t *testing.T) {
 func TestGetStrimziClusterName(t *testing.T) {
 	t.Run("nil labels returns error", func(t *testing.T) {
 		inst := newTestInstance()
-		inst.ObjectMeta.Labels = nil
+		inst.Labels = nil
 
 		name, err := getStrimziClusterName(inst)
 		if err == nil {
@@ -320,7 +320,7 @@ func TestGetStrimziClusterName(t *testing.T) {
 
 	t.Run("missing strimzi.io/cluster label returns error", func(t *testing.T) {
 		inst := newTestInstance()
-		inst.ObjectMeta.Labels = map[string]string{
+		inst.Labels = map[string]string{
 			"other-label": "some-value",
 		}
 
@@ -335,7 +335,7 @@ func TestGetStrimziClusterName(t *testing.T) {
 
 	t.Run("empty strimzi.io/cluster label value returns error", func(t *testing.T) {
 		inst := newTestInstance()
-		inst.ObjectMeta.Labels = map[string]string{
+		inst.Labels = map[string]string{
 			"strimzi.io/cluster": "",
 		}
 
