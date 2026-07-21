@@ -20,10 +20,10 @@ import (
 )
 
 type CertProcessor struct {
-	log *logr.Logger
+	log logr.Logger
 }
 
-func NewCertProcessor(logger *logr.Logger) *CertProcessor {
+func NewCertProcessor(logger logr.Logger) *CertProcessor {
 	return &CertProcessor{logger}
 }
 
@@ -50,7 +50,7 @@ func GeneratePassword(length int, includeNumber bool, includeSpecial bool) (stri
 	return string(password), nil
 }
 
-///Create a JKS-formatted truststore using the cluster's CA certificate.
+// Create a JKS-formatted truststore using the cluster's CA certificate.
 // Parameters
 //     ----------
 //     cert : `string`
