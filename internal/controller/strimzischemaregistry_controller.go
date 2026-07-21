@@ -173,8 +173,9 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	if userSecretChanged || clusterCASecretChanged {
 		var newSecret *v1.Secret
+		var newSecretCreated bool
 		if userSecretChanged && clusterCASecretChanged {
-			newSecret, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
+			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
 				CAsecret, userSecret)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
@@ -185,14 +186,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 				return ctrl.Result{}, err
 			}
 		} else if userSecretChanged && !clusterCASecretChanged {
-			newSecret, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
+			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
 				nil, userSecret)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after user secret changed")
 				return ctrl.Result{}, err
 			}
 		} else if !userSecretChanged && clusterCASecretChanged {
-			newSecret, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
+			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, &logger, strimziClusterName,
 				CAsecret, nil)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after cluster CA secret changed")
@@ -203,7 +204,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 				return ctrl.Result{}, err
 			}
 		}
-		if newSecret != nil && newSecret.Name != "" {
+		// B7: Only create the secret if createSecret indicated it was newly generated.
+		if newSecretCreated {
 			err = r.Create(ctx, newSecret)
 			if err != nil {
 				logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
@@ -404,6 +406,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 // renewTLSSecret creates and applies a new TLS secret for Schema Registry REST API.
 // It is a no-op when SecureHTTP is disabled or a custom TLSSecretName is provided.
+// B6: Uses controllerutil.CreateOrUpdate to handle AlreadyExists gracefully.
 func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger *logr.Logger) error {
 	if !instance.Spec.SecureHTTP || instance.Spec.TLSSecretName != "" {
 		return nil
@@ -418,13 +421,21 @@ func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregist
 		logger.Error(err, "Failed to format TLS secret")
 		return err
 	}
-	if TLSSecret != nil {
-		if err = r.Create(ctx, TLSSecret); err != nil {
-			logger.Error(err, "Failed to create TLS secret")
-			return err
-		}
-		logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
+	if TLSSecret == nil {
+		return nil
 	}
+	// Use CreateOrUpdate to handle both initial creation and concurrent reconciliation
+	// where another reconcile loop may have already created the secret.
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, TLSSecret, func() error {
+		// The mutate function is called for updates; the secret data is already set
+		// by createTLSSecret, so no mutation is needed here.
+		return nil
+	})
+	if err != nil {
+		logger.Error(err, "Failed to create or update TLS secret")
+		return err
+	}
+	logger.Info("Secret for Schema Registry TLS created/updated successfully", "Secret.Name", TLSSecret.Name)
 	return nil
 }
 
