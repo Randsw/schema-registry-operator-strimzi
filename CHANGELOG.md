@@ -1,3 +1,11 @@
+## [1.9.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.9.2...1.9.3) (2026-07-21)
+
+
+### 🛠 Fixes
+
+* Fix lint issue ([ac983ac](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ac983acb46ff91353e09d01440c63470e1c0cf4b))
+* Improve security ([0d361e6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0d361e611da21c17c4d9171adf5633c196225359))
+
 ## [1.9.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.9.1...1.9.2) (2026-07-21)
 
 
