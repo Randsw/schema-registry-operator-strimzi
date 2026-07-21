@@ -61,12 +61,12 @@ func writeTempFile(pattern, content string) (string, error) {
 	}
 	name := f.Name()
 	if _, err := f.WriteString(content); err != nil {
-		f.Close()
-		os.Remove(name)
+		_ = f.Close()
+		_ = os.Remove(name)
 		return "", fmt.Errorf("failed to write temp file %q: %w", name, err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(name)
+		_ = os.Remove(name)
 		return "", fmt.Errorf("failed to close temp file %q: %w", name, err)
 	}
 	return name, nil
@@ -531,31 +531,31 @@ func (cp *CertProcessor) saveFiles(serverKey *rsa.PrivateKey, serverCert *x509.C
 	}
 	keyPath := serverKeyFile.Name()
 	if err := pem.Encode(serverKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}); err != nil {
-		serverKeyFile.Close()
-		os.Remove(keyPath)
+		_ = serverKeyFile.Close()
+		_ = os.Remove(keyPath)
 		return "", "", err
 	}
 	if err := serverKeyFile.Close(); err != nil {
-		os.Remove(keyPath)
+		_ = os.Remove(keyPath)
 		return "", "", fmt.Errorf("failed to close key file %q: %w", keyPath, err)
 	}
 
 	// Save server certificate — close immediately after writing.
 	serverCertFile, err := os.CreateTemp("", "tls-server.crt")
 	if err != nil {
-		os.Remove(keyPath)
+		_ = os.Remove(keyPath)
 		return "", "", err
 	}
 	certPath := serverCertFile.Name()
 	if err := pem.Encode(serverCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverCert.Raw}); err != nil {
-		serverCertFile.Close()
-		os.Remove(certPath)
-		os.Remove(keyPath)
+		_ = serverCertFile.Close()
+		_ = os.Remove(certPath)
+		_ = os.Remove(keyPath)
 		return "", "", err
 	}
 	if err := serverCertFile.Close(); err != nil {
-		os.Remove(certPath)
-		os.Remove(keyPath)
+		_ = os.Remove(certPath)
+		_ = os.Remove(keyPath)
 		return "", "", fmt.Errorf("failed to close cert file %q: %w", certPath, err)
 	}
 
