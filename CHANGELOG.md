@@ -1,3 +1,10 @@
+## [1.9.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.9.1...1.9.2) (2026-07-21)
+
+
+### 🛠 Fixes
+
+* Improve code ([9dd23a5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9dd23a5a1b4c0eedeb91aa8925ce873a3c498f80))
+
 ## [1.9.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.9.0...1.9.1) (2026-07-21)
 
 
