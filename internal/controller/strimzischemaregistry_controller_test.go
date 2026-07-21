@@ -1749,4 +1749,351 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(updatedSvc.Spec.Ports[0].TargetPort.IntVal).To(Equal(int32(8081)))
 		})
 	})
+
+	// T1: renewTLSSecret integration test — verifies TLS secret is created/updated
+	// when the cluster CA certificate changes and SecureHTTP is enabled.
+	Context("When renewing TLS secret after cluster CA cert change", func() {
+		const SchemaRegistryName = "test-tls-renew"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: SchemaRegistryName,
+			},
+		}
+
+		typeNamespacedName := types.NamespacedName{
+			Name:      SchemaRegistryName,
+			Namespace: SchemaRegistryName,
+		}
+
+		var (
+			testCA    *testutil.TestCA
+			clusterCA *testutil.TestCA
+			userCert  *testutil.TestUserCert
+		)
+
+		BeforeEach(func() {
+			var err error
+			testCA, err = testutil.GenerateTestCA()
+			Expect(err).NotTo(HaveOccurred())
+
+			clusterCA, err = testutil.GenerateClusterCACert("STIMZI-SR-TEST-TLS-RENEW")
+			Expect(err).NotTo(HaveOccurred())
+
+			userCert, err = testutil.GenerateTestUserCert(testCA, "test1234")
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Creating the Namespace")
+			err = k8sClient.Create(ctx, namespace)
+			Expect(err).To(Not(HaveOccurred()))
+
+			By("Creating strimzi kafka cluster")
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: namespace.Name},
+				Spec: &kafka.KafkaSpec{
+					EntityOperator: &kafka.EntityOperatorSpec{TopicOperator: &kafka.EntityTopicOperatorSpec{}, UserOperator: &kafka.EntityUserOperatorSpec{}},
+					Kafka: &kafka.KafkaClusterSpec{
+						Authorization: &kafka.KafkaAuthorization{SuperUsers: []string{"CN=root"}, Type: kafka.KafkaAuthorizationType(kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE)},
+						Config:        kafka.MapStringObject{"apple": 5},
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+							{Name: "tls", Port: 9093, Tls: true, Type: kafka.INTERNAL_KAFKALISTENERTYPE, Authentication: &kafka.KafkaListenerAuthentication{Type: kafka.TLS_KAFKALISTENERAUTHENTICATIONTYPE}},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{ClusterId: "test-tls-renew-id", Listeners: []kafka.ListenerStatus{
+				{BootstrapServers: "kafka-cluster-kafka-bootstrap.tls-renew.svc:9092", Name: "plain"},
+				{BootstrapServers: "kafka-cluster-kafka-bootstrap.tls-renew.svc:9093", Name: "TLS", Certificates: []string{clusterCA.CACertPEM}},
+			}}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)
+			Expect(err).To(Not(HaveOccurred()))
+			updateCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			By("Creating Kafka User")
+			kafkaUser := &kafka.KafkaUser{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec:       &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE}},
+			}
+			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
+
+			By("Creating cluster CA secrets")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: namespace.Name}, Data: map[string][]byte{"ca.key": []byte(clusterCA.CAKeyPEM)}})).To(Succeed())
+			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca-cert", Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)}})).To(Succeed())
+
+			By("Creating kafka user secret")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(testCA.CACertPEM), "user.crt": []byte(userCert.UserCertPEM), "user.key": []byte(userCert.UserKeyPEM), "user.p12": userCert.PKCS12Data, "user.password": []byte(userCert.Password)}})).To(Succeed())
+
+			By("Setting the Image ENV VAR")
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			By("Creating StrimziSchemaRegistry with SecureHTTP=true")
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP: true,
+					Listener:   "TLS",
+					Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			err := k8sClient.Get(ctx, typeNamespacedName, found)
+			if err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should create TLS secret on first reconcile and update it when cluster CA cert changes", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("First reconcile to create deployment and TLS secret")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking that TLS secret was created")
+			Eventually(func() error {
+				found := &corev1.Secret{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}, found)
+			}, time.Minute*2, time.Second).Should(Succeed())
+
+			tlsSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}, tlsSecret)).To(Succeed())
+			oldTLSResourceVersion := tlsSecret.ResourceVersion
+
+			// Generate a new cluster CA to simulate rotation
+			newClusterCA, err := testutil.GenerateClusterCACert("STIMZI-SR-TEST-TLS-RENEW-V2")
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Updating cluster CA cert and key secrets to trigger TLS secret renewal")
+			caCertSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster-cluster-ca-cert", Namespace: SchemaRegistryName}, caCertSecret)).To(Succeed())
+			caCertSecret.Data["ca.crt"] = []byte(newClusterCA.CACertPEM)
+			Expect(k8sClient.Update(ctx, caCertSecret)).To(Succeed())
+
+			// The CA key must also be updated to match the new cert, otherwise
+			// x509 signing will fail with "provided PrivateKey doesn't match parent's PublicKey".
+			caKeySecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster-cluster-ca", Namespace: SchemaRegistryName}, caKeySecret)).To(Succeed())
+			caKeySecret.Data["ca.key"] = []byte(newClusterCA.CAKeyPEM)
+			Expect(k8sClient.Update(ctx, caKeySecret)).To(Succeed())
+
+			By("Reconciling to trigger secret rotation and TLS renewal")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking that TLS secret was updated")
+			Eventually(func() string {
+				updatedTLS := &corev1.Secret{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}, updatedTLS)
+				if err != nil {
+					return ""
+				}
+				return updatedTLS.ResourceVersion
+			}, time.Minute*2, time.Second).ShouldNot(Equal(oldTLSResourceVersion))
+
+			By("Verifying updated TLS secret contains valid data")
+			updatedTLS := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}, updatedTLS)).To(Succeed())
+			Expect(updatedTLS.Data).To(HaveKey("tls-keystore.jks"))
+			Expect(updatedTLS.Data).To(HaveKey("keystore_password"))
+			Expect(updatedTLS.Data).To(HaveKey("key_password"))
+		})
+	})
+
+	// T2: updateExistingDeployment side-effect test — verifies that when only spec
+	// fields change, updateExistingDeployment does NOT create or delete secrets.
+	Context("When updating deployment after spec change (no secret side effects)", func() {
+		const SchemaRegistryName = "test-no-secret-sideeffects"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: SchemaRegistryName,
+			},
+		}
+
+		typeNamespacedName := types.NamespacedName{
+			Name:      SchemaRegistryName,
+			Namespace: SchemaRegistryName,
+		}
+
+		var (
+			testCA    *testutil.TestCA
+			clusterCA *testutil.TestCA
+			userCert  *testutil.TestUserCert
+		)
+
+		BeforeEach(func() {
+			var err error
+			testCA, err = testutil.GenerateTestCA()
+			Expect(err).NotTo(HaveOccurred())
+
+			clusterCA, err = testutil.GenerateClusterCACert("STIMZI-SR-TEST-NO-SIDE")
+			Expect(err).NotTo(HaveOccurred())
+
+			userCert, err = testutil.GenerateTestUserCert(testCA, "test1234")
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Creating the Namespace")
+			err = k8sClient.Create(ctx, namespace)
+			Expect(err).To(Not(HaveOccurred()))
+
+			By("Creating strimzi kafka cluster")
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: namespace.Name},
+				Spec: &kafka.KafkaSpec{
+					EntityOperator: &kafka.EntityOperatorSpec{TopicOperator: &kafka.EntityTopicOperatorSpec{}, UserOperator: &kafka.EntityUserOperatorSpec{}},
+					Kafka: &kafka.KafkaClusterSpec{
+						Authorization: &kafka.KafkaAuthorization{SuperUsers: []string{"CN=root"}, Type: kafka.KafkaAuthorizationType(kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE)},
+						Config:        kafka.MapStringObject{"apple": 5},
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+							{Name: "tls", Port: 9093, Tls: true, Type: kafka.INTERNAL_KAFKALISTENERTYPE, Authentication: &kafka.KafkaListenerAuthentication{Type: kafka.TLS_KAFKALISTENERAUTHENTICATIONTYPE}},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{ClusterId: "test-no-side-id", Listeners: []kafka.ListenerStatus{
+				{BootstrapServers: "kafka-cluster-kafka-bootstrap.no-side.svc:9092", Name: "plain"},
+				{BootstrapServers: "kafka-cluster-kafka-bootstrap.no-side.svc:9093", Name: "TLS", Certificates: []string{clusterCA.CACertPEM}},
+			}}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)
+			Expect(err).To(Not(HaveOccurred()))
+			updateCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			By("Creating Kafka User")
+			kafkaUser := &kafka.KafkaUser{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE},
+					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
+			}
+			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
+
+			By("Creating cluster CA secrets")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: namespace.Name}, Data: map[string][]byte{"ca.key": []byte(clusterCA.CAKeyPEM)}})).To(Succeed())
+			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca-cert", Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)}})).To(Succeed())
+
+			By("Creating kafka user secret")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(testCA.CACertPEM), "user.crt": []byte(userCert.UserCertPEM), "user.key": []byte(userCert.UserKeyPEM), "user.p12": userCert.PKCS12Data, "user.password": []byte(userCert.Password)}})).To(Succeed())
+
+			By("Setting the Image ENV VAR")
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			By("Creating StrimziSchemaRegistry with SecureHTTP=true")
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         true,
+					Listener:           "TLS",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "SSL",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			err := k8sClient.Get(ctx, typeNamespacedName, found)
+			if err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should update deployment without creating or deleting secrets", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("First reconcile to create deployment and secrets")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for JKS secret to be created")
+			Eventually(func() error {
+				found := &corev1.Secret{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}, found)
+			}, time.Minute*2, time.Second).Should(Succeed())
+
+			By("Waiting for TLS secret to be created")
+			Eventually(func() error {
+				found := &corev1.Secret{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}, found)
+			}, time.Minute*2, time.Second).Should(Succeed())
+
+			By("Waiting for deployment to be created")
+			Eventually(func() error {
+				found := &appsv1.Deployment{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, found)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			// Capture secret ResourceVersions before spec change
+			jksBefore := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}, jksBefore)).To(Succeed())
+
+			tlsBefore := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}, tlsBefore)).To(Succeed())
+
+			By("Changing CompatibilityLevel to trigger deployment update")
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			instance.Spec.CompatibilityLevel = "backward"
+			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+
+			By("Reconciling after spec change")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying JKS secret was NOT recreated (ResourceVersion unchanged)")
+			jksAfter := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}, jksAfter)).To(Succeed())
+			Expect(jksAfter.ResourceVersion).To(Equal(jksBefore.ResourceVersion),
+				"JKS secret should not be modified when only spec field changes")
+
+			By("Verifying TLS secret was NOT recreated (ResourceVersion unchanged)")
+			tlsAfter := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}, tlsAfter)).To(Succeed())
+			Expect(tlsAfter.ResourceVersion).To(Equal(tlsBefore.ResourceVersion),
+				"TLS secret should not be modified when only spec field changes")
+
+			By("Verifying deployment was updated")
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).To(Succeed())
+			envVars := deployment.Spec.Template.Spec.Containers[0].Env
+			compatLevel := ""
+			for _, env := range envVars {
+				if env.Name == "SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL" {
+					compatLevel = env.Value
+					break
+				}
+			}
+			Expect(compatLevel).To(Equal("backward"), "Deployment should reflect updated CompatibilityLevel")
+		})
+	})
 })
