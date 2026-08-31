@@ -220,8 +220,7 @@ func TestGenerateTestUserCert_PKCS12Data(t *testing.T) {
 	// Verify user certificate was successfully extracted
 	if userCert == nil {
 		t.Fatal("PKCS#12 decoded user certificate is nil")
-	}
-	if userCert.Subject.CommonName != "confluent-schema-registry" {
+	} else if userCert.Subject.CommonName != "confluent-schema-registry" {
 		t.Errorf("Unexpected CommonName in decoded cert: %s", userCert.Subject.CommonName)
 	}
 
