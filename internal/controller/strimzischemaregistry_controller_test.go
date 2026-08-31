@@ -185,7 +185,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 									PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE,
 									Type:        kafka.TOPIC_ACLRULERESOURCETYPE,
 								},
-								Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION},
+								Operations: []kafka.StrimziAclOperation{kafka.ALL_STRIMZIACLOPERATION},
 							},
 						},
 						Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE,
@@ -587,7 +587,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				Spec: &kafka.KafkaUserSpec{
 					Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE},
 					Authorization: &kafka.KafkaUserAuthorization{
-						Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION}}},
+						Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.StrimziAclOperation{kafka.ALL_STRIMZIACLOPERATION}}},
 						Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE,
 					},
 				},
@@ -749,7 +749,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			kafkaUser := &kafka.KafkaUser{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE},
-					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
+					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.StrimziAclOperation{kafka.ALL_STRIMZIACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
 			}
 			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
 
@@ -1188,7 +1188,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			kafkaUser := &kafka.KafkaUser{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE},
-					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
+					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.StrimziAclOperation{kafka.ALL_STRIMZIACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
 			}
 			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
 
@@ -1343,7 +1343,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			kafkaUser := &kafka.KafkaUser{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE},
-					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
+					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.StrimziAclOperation{kafka.ALL_STRIMZIACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
 			}
 			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
 
@@ -1503,7 +1503,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			kafkaUser := &kafka.KafkaUser{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE},
-					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
+					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.StrimziAclOperation{kafka.ALL_STRIMZIACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
 			}
 			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
 
@@ -1659,7 +1659,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			kafkaUser := &kafka.KafkaUser{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE},
-					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
+					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.StrimziAclOperation{kafka.ALL_STRIMZIACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
 			}
 			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
 
@@ -1986,7 +1986,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			kafkaUser := &kafka.KafkaUser{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE},
-					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.AclOperation{kafka.ALL_ACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
+					Authorization: &kafka.KafkaUserAuthorization{Acls: []kafka.AclRule{{Host: "*", Resource: &kafka.AclRuleResource{Name: "registry-schemas", PatternType: kafka.LITERAL_ACLRESOURCEPATTERNTYPE, Type: kafka.TOPIC_ACLRULERESOURCETYPE}, Operations: []kafka.StrimziAclOperation{kafka.ALL_STRIMZIACLOPERATION}}}, Type: kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE}},
 			}
 			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
 
