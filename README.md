@@ -66,7 +66,7 @@ helm install ssr ssr-operator/ssr-operator --namespace <desired_namespace> --cre
 Deploy a `KafkaTopic` that the Schema Registry will use as its primary storage.
 
 ```yaml
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: registry-schemas
@@ -89,7 +89,7 @@ spec:
 Deploy a `KafkaUser` for the Schema Registry that gives the Schema Registry sufficient permissions:
 
 ```yaml
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaUser
 metadata:
   name: confluent-schema-registry
@@ -109,22 +109,28 @@ spec:
           type: topic
           name: registry-schemas
           patternType: literal
-        operation: All
+        operations:
+          - All
         type: allow
+        host: "*"
       # Allow all operations on the schema-registry* group
       - resource:
           type: group
           name: schema-registry
           patternType: prefix
-        operation: All
+        operations:
+          - All
         type: allow
+        host: "*"
       # Allow Describe on the __consumer_offsets topic
       - resource:
           type: topic
           name: __consumer_offsets
           patternType: literal
-        operation: Describe
+        operations:
+          - Describe
         type: allow
+        host: "*"
 ```
 
 ### Step 3. Deploy the StrimziSchemaRegistry
@@ -140,7 +146,6 @@ metadata:
   labels:
     strimzi.io/cluster: kafka-cluster
 spec:
-  strimziversion:     "v1beta2"
   securehttp:         true
   listener:           "tls"
   compatibilitylevel: "forward"
@@ -240,7 +245,7 @@ These listeners are configured in the `Kafka` resource you created with Strimzi.
 Consider a `Kafka` resource:
 
 ```yaml
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: Kafka
 metadata:
   name: my-cluster
