@@ -2,3 +2,15 @@
 .pytest_cache
 .github
 .bin
+
+# Version control metadata
+.git
+.gitignore
+
+# Build artifacts
+bin
+testbin
+
+# Not copied into the image
+docs
+Dockerfile*
