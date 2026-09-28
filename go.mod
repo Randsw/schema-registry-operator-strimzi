@@ -9,10 +9,10 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/scholzj/strimzi-go v0.11.0
 	go.uber.org/zap v1.28.0
-	k8s.io/api v0.37.0
+	k8s.io/api v0.37.1
 	k8s.io/apiextensions-apiserver v0.37.0
-	k8s.io/apimachinery v0.37.0
-	k8s.io/client-go v0.37.0
+	k8s.io/apimachinery v0.37.1
+	k8s.io/client-go v0.37.1
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
 	sigs.k8s.io/controller-runtime v0.25.1
 	software.sslmate.com/src/go-pkcs12 v0.7.3
@@ -101,7 +101,7 @@ require (
 	k8s.io/component-base v0.37.0 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad // indirect
-	k8s.io/streaming v0.37.0 // indirect
+	k8s.io/streaming v0.37.1 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.36.0 // indirect
 	sigs.k8s.io/gateway-api v1.6.1 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
