@@ -130,7 +130,18 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		}
 	}
 
-	return r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, TLSSecretName, auth, logger)
+	// Track the KafkaUser secret version for SASL modes so credential changes
+	// trigger a rollout without rebuilding any JKS material.
+	saslUserResourceVersion := ""
+	if auth.NeedsSASL {
+		saslUserResourceVersion, err = r.getSASLUserSecretVersion(instance, ctx, logger)
+		if err != nil {
+			logger.Error(err, "Failed to get KafkaUser secret version for SASL")
+			return nil, err
+		}
+	}
+
+	return r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
 }
 
 // buildDeploymentSpec builds the Deployment spec from the CR spec and pre-fetched external inputs.
@@ -142,6 +153,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	kafkaBootstrapServer string,
 	kafkaClusterName string,
 	jksResourceVersion string,
+	saslUserResourceVersion string,
 	TLSSecretName string,
 	auth kafkaAuth,
 	logger logr.Logger,
@@ -181,6 +193,11 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
 	podSpec.Labels = ls
 	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": jksResourceVersion}
+	// Track the KafkaUser secret version for SASL modes so credential changes
+	// trigger a rollout without rebuilding any JKS material.
+	if auth.NeedsSASL {
+		podSpec.Annotations[saslUserVersionKey] = saslUserResourceVersion
+	}
 
 	// Compute spec hash and store it in annotation to detect spec changes on subsequent reconciliations.
 	specHash, err := computeSpecHash(instance)
@@ -535,6 +552,22 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaUserSecret(instance *strimzire
 	}
 	logger.V(1).Info("Client certification version", "Version", userSecret.ResourceVersion)
 	return userSecret, nil
+}
+
+// getSASLUserSecretVersion returns the ResourceVersion of the KafkaUser secret
+// that carries the SCRAM credentials for SASL modes. This version is stored on
+// the deployment pod template so credential changes can trigger a rollout.
+func (r *StrimziSchemaRegistryReconciler) getSASLUserSecretVersion(
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context,
+	logger logr.Logger,
+) (string, error) {
+	userSecret := &v1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret); err != nil {
+		return "", err
+	}
+	logger.V(1).Info("SASL KafkaUser secret version", "Version", userSecret.ResourceVersion)
+	return userSecret.ResourceVersion, nil
 }
 
 // existingJKSSecret fetches the current -jks secret and reports whether it is
@@ -899,6 +932,16 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 		}
 	}
 
+	// Read the KafkaUser secret ResourceVersion for SASL modes so the
+	// annotation-based rollout marker is preserved across spec updates.
+	saslUserResourceVersion := ""
+	if auth.NeedsSASL {
+		saslUserResourceVersion, err = r.getSASLUserSecretVersion(instance, ctx, logger)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to get KafkaUser secret version: %w", err)
+		}
+	}
+
 	// Determine TLSSecretName without creating any secrets
 	TLSSecretName := ""
 	if instance.Spec.SecureHTTP {
@@ -910,7 +953,7 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	}
 
 	// Generate desired deployment spec — NO side effects (no secret creation/deletion)
-	desired, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, TLSSecretName, auth, logger)
+	desired, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
 	if err != nil {
 		return nil, false, err
 	}
