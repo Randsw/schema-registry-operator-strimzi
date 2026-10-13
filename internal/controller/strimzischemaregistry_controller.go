@@ -327,12 +327,24 @@ func (r *StrimziSchemaRegistryReconciler) handleSecretRotation(
 		clusterCASecretChanged = true
 	}
 
+	// Resolve the Kafka auth mode once so it can be passed to createSecret.
+	kafkaUser, err := r.getKafkaUser(instance, ctx)
+	if err != nil {
+		logger.Error(err, "Failed to get KafkaUser for secret rotation")
+		return ctrl.Result{}, err
+	}
+	auth, err := resolveKafkaAuth(instance, kafkaUser)
+	if err != nil {
+		logger.Error(err, "Failed to resolve Kafka auth mode for secret rotation")
+		return ctrl.Result{}, err
+	}
+
 	if userSecretChanged || clusterCASecretChanged {
 		var newSecret *v1.Secret
 		var newSecretCreated bool
 		if userSecretChanged && clusterCASecretChanged {
 			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
-				CAsecret, userSecret)
+				CAsecret, userSecret, auth)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
 				return ctrl.Result{}, err
@@ -343,14 +355,14 @@ func (r *StrimziSchemaRegistryReconciler) handleSecretRotation(
 			}
 		} else if userSecretChanged && !clusterCASecretChanged {
 			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
-				nil, userSecret)
+				nil, userSecret, auth)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after user secret changed")
 				return ctrl.Result{}, err
 			}
 		} else if !userSecretChanged && clusterCASecretChanged {
 			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
-				CAsecret, nil)
+				CAsecret, nil, auth)
 			if err != nil {
 				logger.Error(err, "Failed to create jks secret after cluster CA secret changed")
 				return ctrl.Result{}, err
