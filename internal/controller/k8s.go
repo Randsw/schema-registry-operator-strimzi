@@ -21,7 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Resource name suffixes used throughout the operator.
@@ -412,18 +411,14 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	ctx context.Context, logger logr.Logger) (string, string, error) {
 	// Get Kafka cluster name. Finding KafkaUser CR with name equal to our SchemaRegistry
 	// and read name from it
-	kafkaUsers := &kafka.KafkaUserList{}
-	var kafkaClusterName string
-	err := r.List(ctx, kafkaUsers, client.InNamespace(instance.Namespace))
+	kafkaUser, err := r.getKafkaUser(instance, ctx)
 	if err != nil {
 		return "", "", err
 	}
-	logger.V(1).Info("Got Kafka User", "Number of Kafka User", len(kafkaUsers.Items))
-	for _, kafkaUser := range kafkaUsers.Items {
-		if kafkaUser.Name == instance.Name {
-			kafkaClusterName = kafkaUser.Labels["strimzi.io/cluster"]
-		}
+	if kafkaUser == nil {
+		return "", "", go_err.New("kafka user not found")
 	}
+	kafkaClusterName := kafkaUser.Labels["strimzi.io/cluster"]
 	logger.V(1).Info("Found kafka cluster CR", "Name", kafkaClusterName)
 	// Find bootstap server address
 	var kafkaBootstrapServer string
