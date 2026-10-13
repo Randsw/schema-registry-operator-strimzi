@@ -447,34 +447,113 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 // createSecret creates or returns an up-to-date JKS secret for the Schema Registry.
 // Returns the secret, a bool indicating whether a new secret was created (as opposed
 // to being already up-to-date), and any error encountered.
+//
+// The produced secret depends on the resolved Kafka auth mode:
+//   - mTLS (SSL): truststore + keystore.
+//   - SASL_SSL: truststore only.
+//   - SASL_PLAINTEXT / PLAINTEXT: no JKS secret is produced (returns nil, false, nil).
 func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret,
 	userCASecret *v1.Secret) (*v1.Secret, bool, error) {
-	logger.Info("Creating secret for schema registry Kafkastore TLS")
+	kafkaUser, err := r.getKafkaUser(instance, ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	auth, err := resolveKafkaAuth(instance, kafkaUser)
+	if err != nil {
+		return nil, false, err
+	}
+
+	switch auth.Mode {
+	case authSASLPlaintext, authPlaintext:
+		logger.V(1).Info("No JKS secret is required for the selected auth mode", "SecurityProtocol", auth.Protocol)
+		return nil, false, nil
+	case authSASLSSL:
+		return r.createSASLTruststoreSecret(instance, ctx, logger, clusterName, clusterCASecret)
+	default:
+		return r.createMTLSSecret(instance, ctx, logger, clusterName, clusterCASecret, userCASecret)
+	}
+}
+
+// getClusterCASecret returns the cluster CA cert secret, fetching it when the
+// provided secret is nil.
+func (r *StrimziSchemaRegistryReconciler) getClusterCASecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret) (*v1.Secret, error) {
+	if clusterCASecret != nil {
+		return clusterCASecret, nil
+	}
+	logger.V(1).Info("Searching for cluster CA secret", "Secret", clusterName+clusterCASuffix)
 	clusterSecret := &v1.Secret{}
-	userSecret := &v1.Secret{}
-	// Get cluster secret
-	if clusterCASecret == nil {
-		logger.V(1).Info("Searching for cluster CA secret", "Secret", clusterName+clusterCASuffix)
-		err := r.Get(ctx, types.NamespacedName{Name: clusterName + clusterCASuffix, Namespace: instance.Namespace}, clusterSecret)
-		if err != nil {
-			return nil, false, err
-		}
-	} else {
-		clusterSecret = clusterCASecret
+	err := r.Get(ctx, types.NamespacedName{Name: clusterName + clusterCASuffix, Namespace: instance.Namespace}, clusterSecret)
+	if err != nil {
+		return nil, err
 	}
 	logger.V(1).Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
-	clusterCACert := string(clusterSecret.Data["ca.crt"])
-	if userCASecret == nil {
-		logger.Info("Searching for user CA secret", "Secret", instance.Name)
-		err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
-		if err != nil {
-			return nil, false, err
-		}
-	} else {
-		userSecret = userCASecret
+	return clusterSecret, nil
+}
+
+// getKafkaUserSecret returns the KafkaUser secret (named after the instance),
+// fetching it when the provided secret is nil.
+func (r *StrimziSchemaRegistryReconciler) getKafkaUserSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, userCASecret *v1.Secret) (*v1.Secret, error) {
+	if userCASecret != nil {
+		return userCASecret, nil
+	}
+	logger.Info("Searching for user CA secret", "Secret", instance.Name)
+	userSecret := &v1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
+	if err != nil {
+		return nil, err
 	}
 	logger.V(1).Info("Client certification version", "Version", userSecret.ResourceVersion)
+	return userSecret, nil
+}
+
+// existingJKSSecret fetches the current -jks secret and reports whether it is
+// up-to-date according to isUpToDate. When it exists but is stale it is deleted
+// so the caller can recreate it.
+func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, isUpToDate func(annotations map[string]string) bool) (*v1.Secret, bool, error) {
+	jks_secret := &v1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, jks_secret)
+	if err == nil {
+		if isUpToDate(jks_secret.Annotations) {
+			logger.V(1).Info("JKS secret is up-to-date")
+			// Return the existing secret (not nil) so the caller has it for
+			// updateDeployment without needing to re-fetch.
+			return jks_secret, true, nil
+		}
+		logger.V(1).Info("About to delete JKS secret")
+		if err := r.Delete(ctx, jks_secret); err != nil {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+	if !errors.IsNotFound(err) {
+		logger.Error(err, "Failed to get schema registry secret")
+		return nil, false, err
+	}
+	return nil, false, nil
+}
+
+// createMTLSSecret creates or returns an up-to-date JKS secret containing both
+// the truststore (built from the cluster CA) and the keystore (built from the
+// KafkaUser client certificate) for mTLS authentication.
+func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret,
+	userCASecret *v1.Secret) (*v1.Secret, bool, error) {
+	logger.Info("Creating secret for schema registry Kafkastore TLS")
+
+	clusterSecret, err := r.getClusterCASecret(instance, ctx, logger, clusterName, clusterCASecret)
+	if err != nil {
+		return nil, false, err
+	}
+	clusterCACert := string(clusterSecret.Data["ca.crt"])
+
+	userSecret, err := r.getKafkaUserSecret(instance, ctx, logger, userCASecret)
+	if err != nil {
+		return nil, false, err
+	}
 	clientCACert := string(userSecret.Data["ca.crt"])
 	clientCert := string(userSecret.Data["user.crt"])
 	clientKey := string(userSecret.Data["user.key"])
@@ -485,27 +564,18 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	}
 	userPassword := string(userPasswordData)
 
-	jks_secret := &v1.Secret{}
-	jks_secret_name := instance.Name + jksSecretSuffix
-	err := r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
-	if err == nil {
-		if jks_secret.Annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
-			jks_secret.Annotations[userVersionKey] == userSecret.ResourceVersion {
-			logger.V(1).Info("JKS secret is up-to-date")
-			// Return the existing secret (not nil) so the caller has it for
-			// updateDeployment without needing to re-fetch.
-			return jks_secret, false, nil
-		}
-		logger.V(1).Info("About to delete JKS secret")
-		err = r.Delete(ctx, jks_secret)
-		if err != nil {
-			return nil, false, err
-		}
-	}
-	if err != nil && !errors.IsNotFound(err) {
-		logger.Error(err, "Failed to get schema registry secret")
+	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
+		return annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
+			annotations[userVersionKey] == userSecret.ResourceVersion
+	})
+	if err != nil {
 		return nil, false, err
 	}
+	if upToDate {
+		return jks_secret, false, nil
+	}
+
+	jks_secret_name := instance.Name + jksSecretSuffix
 	logger.Info("Creating new keystore and truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
 	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
@@ -535,6 +605,61 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 			"keystore.jks":        []byte(keystore),
 			"truststore_password": []byte(truststore_password),
 			"keystore_password":   []byte(keystore_password),
+		},
+	}
+	err = ctrl.SetControllerReference(instance, jks_secret, r.Scheme)
+	if err != nil {
+		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
+		return nil, false, err
+	}
+	return jks_secret, true, nil
+}
+
+// createSASLTruststoreSecret creates or returns an up-to-date JKS secret
+// containing only the truststore (built from the cluster CA) for SASL_SSL.
+func (r *StrimziSchemaRegistryReconciler) createSASLTruststoreSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret) (*v1.Secret, bool, error) {
+	logger.Info("Creating truststore secret for schema registry Kafkastore SASL_SSL")
+
+	clusterSecret, err := r.getClusterCASecret(instance, ctx, logger, clusterName, clusterCASecret)
+	if err != nil {
+		return nil, false, err
+	}
+	clusterCACert := string(clusterSecret.Data["ca.crt"])
+
+	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
+		return annotations[CAVersionKey] == clusterSecret.ResourceVersion
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if upToDate {
+		return jks_secret, false, nil
+	}
+
+	jks_secret_name := instance.Name + jksSecretSuffix
+	logger.Info("Creating new truststore", "Secret Name", jks_secret_name)
+	cp := certprocessor.NewCertProcessor(logger)
+	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
+	if err != nil {
+		return nil, false, err
+	}
+	jks_secret = &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jks_secret_name,
+			Namespace: instance.Namespace,
+			Labels: map[string]string{
+				"app":  "strimzi-schema-registry",
+				"user": instance.Name,
+			},
+			Annotations: map[string]string{
+				CAVersionKey: clusterSecret.ResourceVersion,
+			},
+		},
+		Type: v1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"truststore.jks":      []byte(truststore),
+			"truststore_password": []byte(truststore_password),
 		},
 	}
 	err = ctrl.SetControllerReference(instance, jks_secret, r.Scheme)
