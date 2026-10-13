@@ -168,9 +168,13 @@ func GenerateTestUserCert(ca *TestCA, password string) (*TestUserCert, error) {
 		Bytes: userCertDER,
 	}))
 
+	userKeyPKCS8, err := x509.MarshalPKCS8PrivateKey(userKey)
+	if err != nil {
+		return nil, err
+	}
 	userKeyPEM := string(pem.EncodeToMemory(&pem.Block{
 		Type:  "PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(userKey),
+		Bytes: userKeyPKCS8,
 	}))
 
 	// Create PKCS#12 bundle containing user cert + user key + CA cert
@@ -246,9 +250,13 @@ func GenerateClusterCACert(clusterName string) (*TestCA, error) {
 		Bytes: caCertDER,
 	}))
 
+	caKeyPKCS8, err := x509.MarshalPKCS8PrivateKey(caKey)
+	if err != nil {
+		return nil, err
+	}
 	caKeyPEM := string(pem.EncodeToMemory(&pem.Block{
 		Type:  "PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(caKey),
+		Bytes: caKeyPKCS8,
 	}))
 
 	return &TestCA{
