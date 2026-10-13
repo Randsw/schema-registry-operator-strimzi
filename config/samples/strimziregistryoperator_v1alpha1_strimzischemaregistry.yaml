@@ -1,9 +1,91 @@
+# SSL (default): TLS transport with mTLS (client certificates).
+# Requires a KafkaUser named after this CR with `authentication.type: tls`.
 apiVersion: strimziregistryoperator.randsw.code/v1alpha1
 kind: StrimziSchemaRegistry
 metadata:
   labels:
     app.kubernetes.io/name: operator-schema
     app.kubernetes.io/managed-by: kustomize
+    strimzi.io/cluster: kafka-cluster
   name: strimzischemaregistry-sample
 spec:
-  # TODO(user): Add fields here
+  listener: "tls"
+  securityprotocol: "SSL"
+  compatibilitylevel: "forward"
+  securehttp: false
+  template:
+    spec:
+      containers:
+        - name: confluent-sr
+          image: confluentinc/cp-schema-registry:7.6.5
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+---
+# SASL_SSL: TLS transport with SCRAM-SHA-512 authentication.
+# Requires a KafkaUser named after this CR with `authentication.type: scram-sha-512`.
+apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+kind: StrimziSchemaRegistry
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-schema
+    app.kubernetes.io/managed-by: kustomize
+    strimzi.io/cluster: kafka-cluster
+  name: strimzischemaregistry-sample-sasl-ssl
+spec:
+  listener: "tls"
+  securityprotocol: "SASL_SSL"
+  compatibilitylevel: "forward"
+  securehttp: false
+  template:
+    spec:
+      containers:
+        - name: confluent-sr
+          image: confluentinc/cp-schema-registry:7.6.5
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+---
+# SASL_PLAINTEXT: plaintext transport with SCRAM-SHA-512 authentication (no TLS/certificates).
+# Requires a KafkaUser named after this CR with `authentication.type: scram-sha-512`.
+apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+kind: StrimziSchemaRegistry
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-schema
+    app.kubernetes.io/managed-by: kustomize
+    strimzi.io/cluster: kafka-cluster
+  name: strimzischemaregistry-sample-sasl-plaintext
+spec:
+  listener: "plain"
+  securityprotocol: "SASL_PLAINTEXT"
+  compatibilitylevel: "forward"
+  securehttp: false
+  template:
+    spec:
+      containers:
+        - name: confluent-sr
+          image: confluentinc/cp-schema-registry:7.6.5
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+---
+# PLAINTEXT: plaintext transport with no authentication and no certificates.
+# No KafkaUser secret is required.
+apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+kind: StrimziSchemaRegistry
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-schema
+    app.kubernetes.io/managed-by: kustomize
+    strimzi.io/cluster: kafka-cluster
+  name: strimzischemaregistry-sample-plaintext
+spec:
+  listener: "plain"
+  securityprotocol: "PLAINTEXT"
+  compatibilitylevel: "forward"
+  securehttp: false
+  template:
+    spec:
+      containers:
+        - name: confluent-sr
+          image: confluentinc/cp-schema-registry:7.6.5
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always

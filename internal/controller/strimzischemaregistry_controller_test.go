@@ -2096,4 +2096,451 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(compatLevel).To(Equal("backward"), "Deployment should reflect updated CompatibilityLevel")
 		})
 	})
+
+	// S1: SASL_SSL (SCRAM-SHA-512) reconciliation
+	Context("When reconciling with SASL_SSL and a SCRAM-SHA-512 KafkaUser", func() {
+		const SchemaRegistryName = "test-sasl-ssl"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		var clusterCA *testutil.TestCA
+
+		BeforeEach(func() {
+			var err error
+			clusterCA, err = testutil.GenerateClusterCACert("STIMZI-SR-SASL-SSL")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "tls", Port: 9093, Tls: true, Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+								Authentication: &kafka.KafkaListenerAuthentication{Type: kafka.SCRAM_SHA_512_KAFKALISTENERAUTHENTICATIONTYPE}},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{
+				ClusterId: "sasl-ssl-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.sasl-ssl.svc:9093", Name: "TLS", Certificates: []string{clusterCA.CACertPEM}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			kafkaUser := &kafka.KafkaUser{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec:       &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.SCRAM_SHA_512_KAFKAUSERAUTHENTICATIONTYPE}},
+			}
+			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca-cert", Namespace: SchemaRegistryName},
+				Data:       map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)},
+			})).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName},
+				Data: map[string][]byte{
+					"password":         []byte("scram-password"),
+					"sasl.jaas.config": []byte(`org.apache.kafka.common.security.scram.ScramLoginModule required username="test-sasl-ssl" password="scram-password";`),
+				},
+			})).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					Listener:           "TLS",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "SASL_SSL",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should produce SASL env vars and a truststore-only JKS secret", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking if Deployment was created")
+			Eventually(func() error {
+				found := &appsv1.Deployment{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, found)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).To(Succeed())
+			envVars := deployment.Spec.Template.Spec.Containers[0].Env
+
+			By("Verifying security protocol is SASL_SSL")
+			proto, ok := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL")
+			Expect(ok).To(BeTrue())
+			Expect(proto.Value).To(Equal("SASL_SSL"))
+
+			By("Verifying SASL mechanism and JAAS config reference the KafkaUser secret")
+			mech, ok := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM")
+			Expect(ok).To(BeTrue())
+			Expect(mech.Value).To(Equal("SCRAM-SHA-512"))
+			jaas, ok := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG")
+			Expect(ok).To(BeTrue())
+			Expect(jaas.ValueFrom).NotTo(BeNil())
+			Expect(jaas.ValueFrom.SecretKeyRef).NotTo(BeNil())
+			Expect(jaas.ValueFrom.SecretKeyRef.Name).To(Equal(SchemaRegistryName))
+			Expect(jaas.ValueFrom.SecretKeyRef.Key).To(Equal("sasl.jaas.config"))
+
+			By("Verifying truststore env is present but keystore env is absent")
+			_, truststoreOK := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION")
+			Expect(truststoreOK).To(BeTrue())
+			_, keystoreOK := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION")
+			Expect(keystoreOK).To(BeFalse())
+
+			By("Verifying the JKS secret contains only truststore material")
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}, &corev1.Secret{})
+			}, time.Minute*2, time.Second).Should(Succeed())
+			jks := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}, jks)).To(Succeed())
+			Expect(jks.Data).To(HaveKey("truststore.jks"))
+			Expect(jks.Data).To(HaveKey("truststore_password"))
+			Expect(jks.Data).NotTo(HaveKey("keystore.jks"))
+			Expect(jks.Data).NotTo(HaveKey("keystore_password"))
+		})
+	})
+
+	// S2: SASL_PLAINTEXT (SCRAM-SHA-512, no cert material) reconciliation
+	Context("When reconciling with SASL_PLAINTEXT and a SCRAM-SHA-512 KafkaUser", func() {
+		const SchemaRegistryName = "test-sasl-plaintext"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		BeforeEach(func() {
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+								Authentication: &kafka.KafkaListenerAuthentication{Type: kafka.SCRAM_SHA_512_KAFKALISTENERAUTHENTICATIONTYPE}},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{
+				ClusterId: "sasl-plaintext-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.sasl-plaintext.svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			kafkaUser := &kafka.KafkaUser{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec:       &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.SCRAM_SHA_512_KAFKAUSERAUTHENTICATIONTYPE}},
+			}
+			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName},
+				Data: map[string][]byte{
+					"password":         []byte("scram-password"),
+					"sasl.jaas.config": []byte(`org.apache.kafka.common.security.scram.ScramLoginModule required username="test-sasl-plaintext" password="scram-password";`),
+				},
+			})).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "SASL_PLAINTEXT",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should produce SASL env vars with no JKS secret and no TLS env", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking if Deployment was created")
+			Eventually(func() error {
+				found := &appsv1.Deployment{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, found)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).To(Succeed())
+			envVars := deployment.Spec.Template.Spec.Containers[0].Env
+
+			By("Verifying security protocol is SASL_PLAINTEXT")
+			proto, ok := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL")
+			Expect(ok).To(BeTrue())
+			Expect(proto.Value).To(Equal("SASL_PLAINTEXT"))
+
+			By("Verifying SASL env is present")
+			mech, ok := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM")
+			Expect(ok).To(BeTrue())
+			Expect(mech.Value).To(Equal("SCRAM-SHA-512"))
+			jaas, ok := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG")
+			Expect(ok).To(BeTrue())
+			Expect(jaas.ValueFrom.SecretKeyRef.Name).To(Equal(SchemaRegistryName))
+			Expect(jaas.ValueFrom.SecretKeyRef.Key).To(Equal("sasl.jaas.config"))
+
+			By("Verifying no TLS env vars are present")
+			_, ksOK := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION")
+			Expect(ksOK).To(BeFalse())
+			_, tsOK := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION")
+			Expect(tsOK).To(BeFalse())
+
+			By("Verifying no JKS volume is mounted")
+			_, tlsVolumeOK := volumeByName(deployment.Spec.Template.Spec.Volumes, "tls")
+			Expect(tlsVolumeOK).To(BeFalse())
+
+			By("Verifying no JKS secret was created")
+			jks := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}, jks)
+			Expect(errors.IsNotFound(err)).To(BeTrue(), "JKS secret should not exist for SASL_PLAINTEXT")
+		})
+	})
+
+	// S3: PLAINTEXT (no KafkaUser, no secrets) reconciliation
+	Context("When reconciling with PLAINTEXT and no KafkaUser", func() {
+		const SchemaRegistryName = "test-plaintext"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		BeforeEach(func() {
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{
+				ClusterId: "plaintext-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.plaintext.svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should reconcile with no TLS/SASL env and no JKS secret", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking if Deployment was created")
+			Eventually(func() error {
+				found := &appsv1.Deployment{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, found)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).To(Succeed())
+			envVars := deployment.Spec.Template.Spec.Containers[0].Env
+
+			By("Verifying security protocol is PLAINTEXT")
+			proto, ok := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL")
+			Expect(ok).To(BeTrue())
+			Expect(proto.Value).To(Equal("PLAINTEXT"))
+
+			By("Verifying no TLS env vars are present")
+			_, ksOK := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION")
+			Expect(ksOK).To(BeFalse())
+			_, tsOK := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION")
+			Expect(tsOK).To(BeFalse())
+
+			By("Verifying no SASL env vars are present")
+			_, mechOK := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM")
+			Expect(mechOK).To(BeFalse())
+			_, jaasOK := envByName(envVars, "SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG")
+			Expect(jaasOK).To(BeFalse())
+
+			By("Verifying no JKS volume is mounted")
+			_, tlsVolumeOK := volumeByName(deployment.Spec.Template.Spec.Volumes, "tls")
+			Expect(tlsVolumeOK).To(BeFalse())
+
+			By("Verifying no JKS secret was created")
+			jks := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}, jks)
+			Expect(errors.IsNotFound(err)).To(BeTrue(), "JKS secret should not exist for PLAINTEXT")
+		})
+	})
+
+	// S4: SASL_SSL with a TLS KafkaUser (mismatch) surfaces a clear error
+	Context("When SASL_SSL is configured with a TLS KafkaUser", func() {
+		const SchemaRegistryName = "test-sasl-ssl-mismatch"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		BeforeEach(func() {
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "tls", Port: 9093, Tls: true, Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+								Authentication: &kafka.KafkaListenerAuthentication{Type: kafka.SCRAM_SHA_512_KAFKALISTENERAUTHENTICATIONTYPE}},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{
+				ClusterId: "sasl-ssl-mismatch",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.mismatch.svc:9093", Name: "TLS"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			kafkaUser := &kafka.KafkaUser{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec:       &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE}},
+			}
+			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					Listener:           "TLS",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "SASL_SSL",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should return a clear validation error", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("requires a KafkaUser with scram-sha-512 authentication"))
+		})
+	})
 })

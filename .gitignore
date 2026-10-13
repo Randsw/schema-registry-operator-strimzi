@@ -29,3 +29,4 @@ docs
 .pytest_cache
 
 test-crd.yaml
+plans/

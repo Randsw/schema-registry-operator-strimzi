@@ -21,7 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Resource name suffixes used throughout the operator.
@@ -72,25 +71,40 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		return nil, err
 	}
 
+	// Resolve the Kafka auth mode once and reuse it for secret creation and the
+	// deployment builders.
+	kafkaUser, err := r.getKafkaUser(instance, ctx)
+	if err != nil {
+		logger.Error(err, "Failed to get KafkaUser")
+		return nil, err
+	}
+	auth, err := resolveKafkaAuth(instance, kafkaUser)
+	if err != nil {
+		logger.Error(err, "Failed to resolve Kafka auth mode")
+		return nil, err
+	}
+
 	// Create secret for Kafkastore
-	secret, created, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil)
+	secret, created, err := r.createSecret(instance, ctx, logger, kafkaClusterName, nil, nil, auth)
 	if err != nil {
 		logger.Error(err, "Failed to format secret", "Secret.Name", instance.Name+jksSecretSuffix)
 		return nil, err
 	}
 
 	var jksResourceVersion string
-	if created {
-		err = r.Create(ctx, secret)
-		if err != nil {
-			logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+jksSecretSuffix)
-			return nil, err
+	if secret != nil {
+		if created {
+			err = r.Create(ctx, secret)
+			if err != nil {
+				logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+jksSecretSuffix)
+				return nil, err
+			}
+			jksResourceVersion = secret.ResourceVersion
+			logger.V(1).Info("Secret for Schema Registry KafkaStore TLS created successfully", "Secret.Name", secret.Name)
+		} else {
+			// createSecret returns the existing up-to-date secret instead of nil.
+			jksResourceVersion = secret.ResourceVersion
 		}
-		jksResourceVersion = secret.ResourceVersion
-		logger.V(1).Info("Secret for Schema Registry KafkaStore TLS created successfully", "Secret.Name", secret.Name)
-	} else {
-		// createSecret now returns the existing up-to-date secret instead of nil.
-		jksResourceVersion = secret.ResourceVersion
 	}
 
 	// Schema Registry REST API TLS secret
@@ -116,7 +130,18 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		}
 	}
 
-	return r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, TLSSecretName, logger)
+	// Track the KafkaUser secret version for SASL modes so credential changes
+	// trigger a rollout without rebuilding any JKS material.
+	saslUserResourceVersion := ""
+	if auth.NeedsSASL {
+		saslUserResourceVersion, err = r.getSASLUserSecretVersion(instance, ctx, logger)
+		if err != nil {
+			logger.Error(err, "Failed to get KafkaUser secret version for SASL")
+			return nil, err
+		}
+	}
+
+	return r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
 }
 
 // buildDeploymentSpec builds the Deployment spec from the CR spec and pre-fetched external inputs.
@@ -128,7 +153,9 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	kafkaBootstrapServer string,
 	kafkaClusterName string,
 	jksResourceVersion string,
+	saslUserResourceVersion string,
 	TLSSecretName string,
+	auth kafkaAuth,
 	logger logr.Logger,
 ) (*apps.Deployment, error) {
 	podSpec := instance.Spec.Template
@@ -138,8 +165,8 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	}
 
 	// Build pod environment, volumes, and probes
-	podEnv := buildPodEnv(instance, kafkaBootstrapServer, TLSSecretName)
-	podVolume, containerVolumeMount := buildPodVolumes(instance, TLSSecretName)
+	podEnv := buildPodEnv(instance, kafkaBootstrapServer, TLSSecretName, auth)
+	podVolume, containerVolumeMount := buildPodVolumes(instance, TLSSecretName, auth)
 
 	listenerPort, scheme := listenerPortAndScheme(instance)
 	readinessProbe, livenessProbe, startupProbe := buildProbes(listenerPort, scheme)
@@ -166,6 +193,11 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
 	podSpec.Labels = ls
 	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": jksResourceVersion}
+	// Track the KafkaUser secret version for SASL modes so credential changes
+	// trigger a rollout without rebuilding any JKS material.
+	if auth.NeedsSASL {
+		podSpec.Annotations[saslUserVersionKey] = saslUserResourceVersion
+	}
 
 	// Compute spec hash and store it in annotation to detect spec changes on subsequent reconciliations.
 	specHash, err := computeSpecHash(instance)
@@ -209,7 +241,7 @@ func listenerPortAndScheme(instance *strimziregistryoperatorv1alpha1.StrimziSche
 }
 
 // buildPodEnv constructs the environment variables for the Schema Registry container.
-func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, kafkaBootstrapServer, TLSSecretName string) []v1.EnvVar {
+func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, kafkaBootstrapServer, TLSSecretName string, auth kafkaAuth) []v1.EnvVar {
 	podEnv := []v1.EnvVar{
 		{Name: "SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", Value: kafkaBootstrapServer},
 		{Name: "SCHEMA_REGISTRY_HOST_NAME", ValueFrom: &v1.EnvVarSource{
@@ -226,12 +258,8 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 	}
 	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL", Value: compatLevel})
 
-	// Security protocol
-	securityProtocol := instance.Spec.SecurityProtocol
-	if securityProtocol == "" {
-		securityProtocol = "SSL"
-	}
-	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL", Value: securityProtocol})
+	// Security protocol (already defaulted by resolveKafkaAuth)
+	podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL", Value: auth.Protocol})
 
 	// Heap opts
 	heapOpts := instance.Spec.HeapOpts
@@ -243,25 +271,52 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 		v1.EnvVar{Name: "SCHEMA_REGISTRY_MASTER_ELIGIBILITY", Value: "true"},
 		v1.EnvVar{Name: "SCHEMA_REGISTRY_HEAP_OPTS", Value: heapOpts},
 		v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", Value: "registry-schemas"},
-		v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION", Value: "/var/schemaregistry/keystore.jks"},
-		v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"},
-		v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
-			SecretKeyRef: &v1.SecretKeySelector{
-				LocalObjectReference: v1.LocalObjectReference{
-					Name: instance.Name + jksSecretSuffix,
-				},
-				Key: "keystore_password",
-			},
-		}},
-		v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
-			SecretKeyRef: &v1.SecretKeySelector{
-				LocalObjectReference: v1.LocalObjectReference{
-					Name: instance.Name + jksSecretSuffix,
-				},
-				Key: "truststore_password",
-			},
-		}},
 	)
+
+	// KafkaStore TLS environment. The keystore is only needed for mTLS (SSL);
+	// the truststore is needed for TLS transport (SSL and SASL_SSL).
+	if auth.NeedsKeystore {
+		podEnv = append(podEnv,
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION", Value: "/var/schemaregistry/keystore.jks"},
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+				SecretKeyRef: &v1.SecretKeySelector{
+					LocalObjectReference: v1.LocalObjectReference{
+						Name: instance.Name + jksSecretSuffix,
+					},
+					Key: "keystore_password",
+				},
+			}},
+		)
+	}
+	if auth.NeedsTruststore {
+		podEnv = append(podEnv,
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"},
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+				SecretKeyRef: &v1.SecretKeySelector{
+					LocalObjectReference: v1.LocalObjectReference{
+						Name: instance.Name + jksSecretSuffix,
+					},
+					Key: "truststore_password",
+				},
+			}},
+		)
+	}
+
+	// KafkaStore SASL environment for SASL_SSL and SASL_PLAINTEXT. Strimzi
+	// writes the SCRAM JAAS config into the KafkaUser secret (named after the CR).
+	if auth.NeedsSASL {
+		podEnv = append(podEnv,
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM", Value: auth.SASLMechanism},
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG", ValueFrom: &v1.EnvVarSource{
+				SecretKeyRef: &v1.SecretKeySelector{
+					LocalObjectReference: v1.LocalObjectReference{
+						Name: instance.Name,
+					},
+					Key: "sasl.jaas.config",
+				},
+			}},
+		)
+	}
 
 	// REST API TLS configuration
 	if instance.Spec.SecureHTTP {
@@ -294,19 +349,20 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 }
 
 // buildPodVolumes constructs the volumes and volume mounts for the deployment.
-func buildPodVolumes(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, TLSSecretName string) ([]v1.Volume, []v1.VolumeMount) {
+func buildPodVolumes(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, TLSSecretName string, auth kafkaAuth) ([]v1.Volume, []v1.VolumeMount) {
 	var defaultMode int32 = 420
+	var containerVolumeMount []v1.VolumeMount
+	var podVolume []v1.Volume
 
-	// KafkaStore JKS secret volume
-	containerVolumeMount := []v1.VolumeMount{
-		{
+	// KafkaStore JKS secret volume is only needed when TLS transport or mTLS
+	// keystore material is required (SSL and SASL_SSL).
+	if auth.NeedsTruststore || auth.NeedsKeystore {
+		containerVolumeMount = append(containerVolumeMount, v1.VolumeMount{
 			Name:      "tls",
 			MountPath: "/var/schemaregistry",
 			ReadOnly:  true,
-		},
-	}
-	podVolume := []v1.Volume{
-		{
+		})
+		podVolume = append(podVolume, v1.Volume{
 			Name: "tls",
 			VolumeSource: v1.VolumeSource{
 				Secret: &v1.SecretVolumeSource{
@@ -314,7 +370,7 @@ func buildPodVolumes(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 					DefaultMode: &defaultMode,
 				},
 			},
-		},
+		})
 	}
 
 	// REST API TLS secret volume
@@ -410,19 +466,12 @@ func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe,
 
 func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger) (string, string, error) {
-	// Get Kafka cluster name. Finding KafkaUser CR with name equal to our SchemaRegistry
-	// and read name from it
-	kafkaUsers := &kafka.KafkaUserList{}
-	var kafkaClusterName string
-	err := r.List(ctx, kafkaUsers, client.InNamespace(instance.Namespace))
+	// Get Kafka cluster name from the StrimziSchemaRegistry labels. This keeps
+	// bootstrap server discovery independent of the KafkaUser so that PLAINTEXT
+	// (which requires no KafkaUser) can still resolve the bootstrap address.
+	kafkaClusterName, err := getStrimziClusterName(instance)
 	if err != nil {
 		return "", "", err
-	}
-	logger.V(1).Info("Got Kafka User", "Number of Kafka User", len(kafkaUsers.Items))
-	for _, kafkaUser := range kafkaUsers.Items {
-		if kafkaUser.Name == instance.Name {
-			kafkaClusterName = kafkaUser.Labels["strimzi.io/cluster"]
-		}
 	}
 	logger.V(1).Info("Found kafka cluster CR", "Name", kafkaClusterName)
 	// Find bootstap server address
@@ -452,34 +501,120 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 // createSecret creates or returns an up-to-date JKS secret for the Schema Registry.
 // Returns the secret, a bool indicating whether a new secret was created (as opposed
 // to being already up-to-date), and any error encountered.
+//
+// The produced secret depends on the resolved Kafka auth mode:
+//   - mTLS (SSL): truststore + keystore.
+//   - SASL_SSL: truststore only.
+//   - SASL_PLAINTEXT / PLAINTEXT: no JKS secret is produced (returns nil, false, nil).
 func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret,
+	userCASecret *v1.Secret, auth kafkaAuth) (*v1.Secret, bool, error) {
+	switch auth.Mode {
+	case authSASLPlaintext, authPlaintext:
+		logger.V(1).Info("No JKS secret is required for the selected auth mode", "SecurityProtocol", auth.Protocol)
+		return nil, false, nil
+	case authSASLSSL:
+		return r.createSASLTruststoreSecret(instance, ctx, logger, clusterName, clusterCASecret)
+	default:
+		return r.createMTLSSecret(instance, ctx, logger, clusterName, clusterCASecret, userCASecret)
+	}
+}
+
+// getClusterCASecret returns the cluster CA cert secret, fetching it when the
+// provided secret is nil.
+func (r *StrimziSchemaRegistryReconciler) getClusterCASecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret) (*v1.Secret, error) {
+	if clusterCASecret != nil {
+		return clusterCASecret, nil
+	}
+	logger.V(1).Info("Searching for cluster CA secret", "Secret", clusterName+clusterCASuffix)
+	clusterSecret := &v1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: clusterName + clusterCASuffix, Namespace: instance.Namespace}, clusterSecret)
+	if err != nil {
+		return nil, err
+	}
+	logger.V(1).Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
+	return clusterSecret, nil
+}
+
+// getKafkaUserSecret returns the KafkaUser secret (named after the instance),
+// fetching it when the provided secret is nil.
+func (r *StrimziSchemaRegistryReconciler) getKafkaUserSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, userCASecret *v1.Secret) (*v1.Secret, error) {
+	if userCASecret != nil {
+		return userCASecret, nil
+	}
+	logger.Info("Searching for user CA secret", "Secret", instance.Name)
+	userSecret := &v1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
+	if err != nil {
+		return nil, err
+	}
+	logger.V(1).Info("Client certification version", "Version", userSecret.ResourceVersion)
+	return userSecret, nil
+}
+
+// getSASLUserSecretVersion returns the ResourceVersion of the KafkaUser secret
+// that carries the SCRAM credentials for SASL modes. This version is stored on
+// the deployment pod template so credential changes can trigger a rollout.
+func (r *StrimziSchemaRegistryReconciler) getSASLUserSecretVersion(
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context,
+	logger logr.Logger,
+) (string, error) {
+	userSecret := &v1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret); err != nil {
+		return "", err
+	}
+	logger.V(1).Info("SASL KafkaUser secret version", "Version", userSecret.ResourceVersion)
+	return userSecret.ResourceVersion, nil
+}
+
+// existingJKSSecret fetches the current -jks secret and reports whether it is
+// up-to-date according to isUpToDate. When it exists but is stale it is deleted
+// so the caller can recreate it.
+func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, isUpToDate func(annotations map[string]string) bool) (*v1.Secret, bool, error) {
+	jks_secret := &v1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, jks_secret)
+	if err == nil {
+		if isUpToDate(jks_secret.Annotations) {
+			logger.V(1).Info("JKS secret is up-to-date")
+			// Return the existing secret (not nil) so the caller has it for
+			// updateDeployment without needing to re-fetch.
+			return jks_secret, true, nil
+		}
+		logger.V(1).Info("About to delete JKS secret")
+		if err := r.Delete(ctx, jks_secret); err != nil {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+	if !errors.IsNotFound(err) {
+		logger.Error(err, "Failed to get schema registry secret")
+		return nil, false, err
+	}
+	return nil, false, nil
+}
+
+// createMTLSSecret creates or returns an up-to-date JKS secret containing both
+// the truststore (built from the cluster CA) and the keystore (built from the
+// KafkaUser client certificate) for mTLS authentication.
+func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret,
 	userCASecret *v1.Secret) (*v1.Secret, bool, error) {
 	logger.Info("Creating secret for schema registry Kafkastore TLS")
-	clusterSecret := &v1.Secret{}
-	userSecret := &v1.Secret{}
-	// Get cluster secret
-	if clusterCASecret == nil {
-		logger.V(1).Info("Searching for cluster CA secret", "Secret", clusterName+clusterCASuffix)
-		err := r.Get(ctx, types.NamespacedName{Name: clusterName + clusterCASuffix, Namespace: instance.Namespace}, clusterSecret)
-		if err != nil {
-			return nil, false, err
-		}
-	} else {
-		clusterSecret = clusterCASecret
+
+	clusterSecret, err := r.getClusterCASecret(instance, ctx, logger, clusterName, clusterCASecret)
+	if err != nil {
+		return nil, false, err
 	}
-	logger.V(1).Info("Cluster CA certificate version", "Version", clusterSecret.ResourceVersion)
 	clusterCACert := string(clusterSecret.Data["ca.crt"])
-	if userCASecret == nil {
-		logger.Info("Searching for user CA secret", "Secret", instance.Name)
-		err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret)
-		if err != nil {
-			return nil, false, err
-		}
-	} else {
-		userSecret = userCASecret
+
+	userSecret, err := r.getKafkaUserSecret(instance, ctx, logger, userCASecret)
+	if err != nil {
+		return nil, false, err
 	}
-	logger.V(1).Info("Client certification version", "Version", userSecret.ResourceVersion)
 	clientCACert := string(userSecret.Data["ca.crt"])
 	clientCert := string(userSecret.Data["user.crt"])
 	clientKey := string(userSecret.Data["user.key"])
@@ -490,27 +625,18 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 	}
 	userPassword := string(userPasswordData)
 
-	jks_secret := &v1.Secret{}
-	jks_secret_name := instance.Name + jksSecretSuffix
-	err := r.Get(ctx, types.NamespacedName{Name: jks_secret_name, Namespace: instance.Namespace}, jks_secret)
-	if err == nil {
-		if jks_secret.Annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
-			jks_secret.Annotations[userVersionKey] == userSecret.ResourceVersion {
-			logger.V(1).Info("JKS secret is up-to-date")
-			// Return the existing secret (not nil) so the caller has it for
-			// updateDeployment without needing to re-fetch.
-			return jks_secret, false, nil
-		}
-		logger.V(1).Info("About to delete JKS secret")
-		err = r.Delete(ctx, jks_secret)
-		if err != nil {
-			return nil, false, err
-		}
-	}
-	if err != nil && !errors.IsNotFound(err) {
-		logger.Error(err, "Failed to get schema registry secret")
+	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
+		return annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
+			annotations[userVersionKey] == userSecret.ResourceVersion
+	})
+	if err != nil {
 		return nil, false, err
 	}
+	if upToDate {
+		return jks_secret, false, nil
+	}
+
+	jks_secret_name := instance.Name + jksSecretSuffix
 	logger.Info("Creating new keystore and truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
 	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
@@ -540,6 +666,61 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 			"keystore.jks":        []byte(keystore),
 			"truststore_password": []byte(truststore_password),
 			"keystore_password":   []byte(keystore_password),
+		},
+	}
+	err = ctrl.SetControllerReference(instance, jks_secret, r.Scheme)
+	if err != nil {
+		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
+		return nil, false, err
+	}
+	return jks_secret, true, nil
+}
+
+// createSASLTruststoreSecret creates or returns an up-to-date JKS secret
+// containing only the truststore (built from the cluster CA) for SASL_SSL.
+func (r *StrimziSchemaRegistryReconciler) createSASLTruststoreSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret) (*v1.Secret, bool, error) {
+	logger.Info("Creating truststore secret for schema registry Kafkastore SASL_SSL")
+
+	clusterSecret, err := r.getClusterCASecret(instance, ctx, logger, clusterName, clusterCASecret)
+	if err != nil {
+		return nil, false, err
+	}
+	clusterCACert := string(clusterSecret.Data["ca.crt"])
+
+	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
+		return annotations[CAVersionKey] == clusterSecret.ResourceVersion
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if upToDate {
+		return jks_secret, false, nil
+	}
+
+	jks_secret_name := instance.Name + jksSecretSuffix
+	logger.Info("Creating new truststore", "Secret Name", jks_secret_name)
+	cp := certprocessor.NewCertProcessor(logger)
+	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
+	if err != nil {
+		return nil, false, err
+	}
+	jks_secret = &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jks_secret_name,
+			Namespace: instance.Namespace,
+			Labels: map[string]string{
+				"app":  "strimzi-schema-registry",
+				"user": instance.Name,
+			},
+			Annotations: map[string]string{
+				CAVersionKey: clusterSecret.ResourceVersion,
+			},
+		},
+		Type: v1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"truststore.jks":      []byte(truststore),
+			"truststore_password": []byte(truststore_password),
 		},
 	}
 	err = ctrl.SetControllerReference(instance, jks_secret, r.Scheme)
@@ -727,15 +908,38 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 		return nil, false, fmt.Errorf("failed to get Kafka bootstrap servers: %w", err)
 	}
 
-	// Read the existing JKS secret ResourceVersion (read-only, no side effects)
-	jksResourceVersion := ""
-	existingJKS := &v1.Secret{}
-	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, existingJKS)
-	if err != nil && !errors.IsNotFound(err) {
-		return nil, false, fmt.Errorf("failed to get existing JKS secret: %w", err)
+	// Resolve the Kafka auth mode once (read-only, no side effects)
+	kafkaUser, err := r.getKafkaUser(instance, ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to get KafkaUser: %w", err)
 	}
-	if err == nil {
-		jksResourceVersion = existingJKS.ResourceVersion
+	auth, err := resolveKafkaAuth(instance, kafkaUser)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to resolve Kafka auth mode: %w", err)
+	}
+
+	// Read the existing JKS secret ResourceVersion only when TLS material is
+	// required (read-only, no side effects).
+	jksResourceVersion := ""
+	if auth.NeedsTruststore || auth.NeedsKeystore {
+		existingJKS := &v1.Secret{}
+		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, existingJKS)
+		if err != nil && !errors.IsNotFound(err) {
+			return nil, false, fmt.Errorf("failed to get existing JKS secret: %w", err)
+		}
+		if err == nil {
+			jksResourceVersion = existingJKS.ResourceVersion
+		}
+	}
+
+	// Read the KafkaUser secret ResourceVersion for SASL modes so the
+	// annotation-based rollout marker is preserved across spec updates.
+	saslUserResourceVersion := ""
+	if auth.NeedsSASL {
+		saslUserResourceVersion, err = r.getSASLUserSecretVersion(instance, ctx, logger)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to get KafkaUser secret version: %w", err)
+		}
 	}
 
 	// Determine TLSSecretName without creating any secrets
@@ -749,7 +953,7 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	}
 
 	// Generate desired deployment spec — NO side effects (no secret creation/deletion)
-	desired, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, TLSSecretName, logger)
+	desired, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
 	if err != nil {
 		return nil, false, err
 	}

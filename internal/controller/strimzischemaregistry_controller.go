@@ -51,6 +51,7 @@ const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
 const keyPrefix = "strimziregistryoperator.randsw.code"
 const CAVersionKey = keyPrefix + "/caSecretVersion"
 const userVersionKey = keyPrefix + "/clientSecretVersion"
+const saslUserVersionKey = keyPrefix + "/saslUserSecretVersion"
 
 // strimziClusterLabel is the label key used by Strimzi to identify the Kafka cluster name.
 const strimziClusterLabel = "strimzi.io/cluster"
@@ -281,13 +282,63 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 
 // handleSecretRotation detects changes to the user secret or cluster CA secret,
 // and triggers secret recreation plus deployment update when needed.
-// It encapsulates the secret-change detection and re-creation logic that was
-// previously inline in Reconcile.
+// The rotation behavior depends on the resolved Kafka auth mode:
+//   - SSL (mTLS): rebuild the JKS keystore + truststore when the KafkaUser or
+//     cluster CA secret changes.
+//   - SASL_SSL: rebuild only the truststore when the cluster CA changes, and
+//     roll the deployment when the KafkaUser (SCRAM credential) secret changes.
+//   - SASL_PLAINTEXT: roll the deployment when the KafkaUser secret changes.
+//   - PLAINTEXT: no secret material, so there is nothing to rotate.
 func (r *StrimziSchemaRegistryReconciler) handleSecretRotation(
 	ctx context.Context,
 	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	logger logr.Logger,
 	strimziClusterName string,
+) (ctrl.Result, error) {
+	// Nothing to rotate before the Deployment exists: createDeployment
+	// bootstraps all dependent secrets and annotations.
+	deployment := &apps.Deployment{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, deployment)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "Failed to get deployment during secret rotation")
+		return ctrl.Result{}, err
+	}
+
+	// Resolve the Kafka auth mode once so the rotation path knows which
+	// secrets to track and how to react to changes.
+	kafkaUser, err := r.getKafkaUser(instance, ctx)
+	if err != nil {
+		logger.Error(err, "Failed to get KafkaUser for secret rotation")
+		return ctrl.Result{}, err
+	}
+	auth, err := resolveKafkaAuth(instance, kafkaUser)
+	if err != nil {
+		logger.Error(err, "Failed to resolve Kafka auth mode for secret rotation")
+		return ctrl.Result{}, err
+	}
+
+	switch auth.Mode {
+	case authPlaintext:
+		// PLAINTEXT needs no KafkaUser secret and no JKS secret.
+		return ctrl.Result{}, nil
+	case authSASLPlaintext, authSASLSSL:
+		return r.handleSASLSecretRotation(ctx, instance, logger, strimziClusterName, auth)
+	default:
+		return r.handleMTLSSecretRotation(ctx, instance, logger, strimziClusterName, auth)
+	}
+}
+
+// handleMTLSSecretRotation rebuilds the JKS keystore + truststore secret and
+// rolls the deployment when the KafkaUser or cluster CA secret changes (SSL).
+func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+	strimziClusterName string,
+	auth kafkaAuth,
 ) (ctrl.Result, error) {
 	userSecretChanged := false
 	clusterCASecretChanged := false
@@ -327,64 +378,196 @@ func (r *StrimziSchemaRegistryReconciler) handleSecretRotation(
 		clusterCASecretChanged = true
 	}
 
-	if userSecretChanged || clusterCASecretChanged {
-		var newSecret *v1.Secret
-		var newSecretCreated bool
-		if userSecretChanged && clusterCASecretChanged {
-			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
-				CAsecret, userSecret)
-			if err != nil {
-				logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
-				return ctrl.Result{}, err
-			}
-			// Renew REST API TLS secret after cluster CA secret changed
-			if err = r.renewTLSSecret(instance, ctx, logger); err != nil {
-				return ctrl.Result{}, err
-			}
-		} else if userSecretChanged && !clusterCASecretChanged {
-			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
-				nil, userSecret)
-			if err != nil {
-				logger.Error(err, "Failed to create jks secret after user secret changed")
-				return ctrl.Result{}, err
-			}
-		} else if !userSecretChanged && clusterCASecretChanged {
-			newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
-				CAsecret, nil)
-			if err != nil {
-				logger.Error(err, "Failed to create jks secret after cluster CA secret changed")
-				return ctrl.Result{}, err
-			}
-			// Renew REST API TLS secret after cluster CA secret changed
-			if err = r.renewTLSSecret(instance, ctx, logger); err != nil {
-				return ctrl.Result{}, err
-			}
+	if !userSecretChanged && !clusterCASecretChanged {
+		return ctrl.Result{}, nil
+	}
+
+	var newSecret *v1.Secret
+	var newSecretCreated bool
+	if userSecretChanged && clusterCASecretChanged {
+		newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
+			CAsecret, userSecret, auth)
+		if err != nil {
+			logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
+			return ctrl.Result{}, err
 		}
-		// Only create the secret if createSecret indicated it was newly generated.
+		// Renew REST API TLS secret after cluster CA secret changed
+		if err = r.renewTLSSecret(instance, ctx, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+	} else if userSecretChanged && !clusterCASecretChanged {
+		newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
+			nil, userSecret, auth)
+		if err != nil {
+			logger.Error(err, "Failed to create jks secret after user secret changed")
+			return ctrl.Result{}, err
+		}
+	} else {
+		newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
+			CAsecret, nil, auth)
+		if err != nil {
+			logger.Error(err, "Failed to create jks secret after cluster CA secret changed")
+			return ctrl.Result{}, err
+		}
+		// Renew REST API TLS secret after cluster CA secret changed
+		if err = r.renewTLSSecret(instance, ctx, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	// Only create the secret if createSecret indicated it was newly generated.
+	if newSecretCreated {
+		err = r.Create(ctx, newSecret)
+		if err != nil {
+			logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+			return ctrl.Result{}, err
+		}
+	}
+	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
+	logger.Info("Creating new jks secret after user or cluster CA secret changed was successful")
+	dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
+	if err != nil {
+		logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		return ctrl.Result{}, err
+	}
+	err = r.Update(ctx, dep)
+	if err != nil {
+		logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
+		return ctrl.Result{}, err
+	}
+	logger.Info("Deployment updated after secret change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+	return ctrl.Result{RequeueAfter: time.Second}, nil
+}
+
+// handleSASLSecretRotation handles secret rotation for SASL_SSL and
+// SASL_PLAINTEXT. It never rebuilds a keystore:
+//   - SASL_SSL rebuilds only the truststore when the cluster CA changes.
+//   - Both modes roll the deployment (annotation-based) when the KafkaUser
+//     SCRAM credential secret changes.
+func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+	strimziClusterName string,
+	auth kafkaAuth,
+) (ctrl.Result, error) {
+	// The KafkaUser secret (named after the instance) carries the SCRAM
+	// credentials (sasl.jaas.config / password).
+	userSecret := &v1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, userSecret); err != nil {
+		logger.Error(err, "Failed to get KafkaUser secret for SASL rotation")
+		return ctrl.Result{}, err
+	}
+
+	// Detect a cluster CA change for SASL_SSL (truststore-only rebuild).
+	var CAsecret *v1.Secret
+	clusterCASecretChanged := false
+	if auth.NeedsTruststore {
+		CAsecret = &v1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: strimziClusterName + clusterCASuffix, Namespace: instance.Namespace}, CAsecret); err != nil {
+			logger.Error(err, "Failed to get cluster CA secret for SASL_SSL rotation")
+			return ctrl.Result{}, err
+		}
+		curr_secret := &v1.Secret{}
+		err := r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, curr_secret)
+		if err != nil && !errors.IsNotFound(err) {
+			logger.Error(err, "Failed to get jks secret for SASL_SSL rotation")
+			return ctrl.Result{}, err
+		}
+		if errors.IsNotFound(err) || curr_secret.Annotations[CAVersionKey] != CAsecret.ResourceVersion {
+			clusterCASecretChanged = true
+		}
+	}
+
+	if clusterCASecretChanged {
+		newSecret, newSecretCreated, err := r.createSecret(instance, ctx, logger, strimziClusterName, CAsecret, nil, auth)
+		if err != nil {
+			logger.Error(err, "Failed to create truststore secret after cluster CA secret changed")
+			return ctrl.Result{}, err
+		}
 		if newSecretCreated {
-			err = r.Create(ctx, newSecret)
-			if err != nil {
-				logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+			if err := r.Create(ctx, newSecret); err != nil {
+				logger.Error(err, "Failed to create new truststore secret after cluster CA secret changed")
 				return ctrl.Result{}, err
 			}
 		}
 		monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
-		logger.Info("Creating new jks secret after user or cluster CA secret changed was successful")
 		dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
 		if err != nil {
 			logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 			return ctrl.Result{}, err
 		}
-		err = r.Update(ctx, dep)
-		if err != nil {
-			logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
+		if err := r.Update(ctx, dep); err != nil {
+			logger.Error(err, "Failed to update deployment after cluster CA secret changed")
 			return ctrl.Result{}, err
 		}
-		logger.Info("Deployment updated after secret change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		logger.Info("Deployment updated after cluster CA secret changed", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	// Roll the deployment when the KafkaUser SCRAM credential secret changes.
+	userSecretChanged, err := r.saslUserSecretChanged(ctx, instance, userSecret)
+	if err != nil {
+		logger.Error(err, "Failed to detect KafkaUser secret change")
+		return ctrl.Result{}, err
+	}
+	if userSecretChanged {
+		dep, err := r.rollDeploymentForSASLUserSecret(instance, ctx, logger, userSecret)
+		if err != nil {
+			logger.Error(err, "Failed to update deployment after KafkaUser secret changed")
+			return ctrl.Result{}, err
+		}
+		if err := r.Update(ctx, dep); err != nil {
+			logger.Error(err, "Failed to update deployment after KafkaUser secret changed")
+			return ctrl.Result{}, err
+		}
+		logger.Info("Deployment updated after KafkaUser secret changed", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// saslUserSecretChanged reports whether the KafkaUser secret version recorded on
+// the deployment differs from the current secret, indicating that the SASL
+// credentials have changed and the pods need to be rolled.
+func (r *StrimziSchemaRegistryReconciler) saslUserSecretChanged(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	userSecret *v1.Secret,
+) (bool, error) {
+	dep := &apps.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, dep); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	recorded := ""
+	if dep.Spec.Template.Annotations != nil {
+		recorded = dep.Spec.Template.Annotations[saslUserVersionKey]
+	}
+	return recorded != userSecret.ResourceVersion, nil
+}
+
+// rollDeploymentForSASLUserSecret records the current KafkaUser secret version
+// on the deployment pod template, triggering a rollout so pods pick up the new
+// SASL credentials.
+func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSASLUserSecret(
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context,
+	logger logr.Logger,
+	userSecret *v1.Secret,
+) (*apps.Deployment, error) {
+	dep := &apps.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, dep); err != nil {
+		logger.Error(err, "Failed to get deployment after KafkaUser secret changed")
+		return nil, err
+	}
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations[saslUserVersionKey] = userSecret.ResourceVersion
+	return dep, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

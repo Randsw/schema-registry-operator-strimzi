@@ -196,12 +196,12 @@ spec:
   The ["In-detail: listener configuration"](#in-detail-listener-configuration) section, below, explains this in more detail.
   See also: Schema Registry [listeners](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#listeners) docs.
 
-- `securityProtocol` is the security protocol for the Schema Registry to communicate with Kafka. Default is SSL. Can be:
+- `securityProtocol` is the security protocol for the Schema Registry to communicate with Kafka. Default is `SSL`. The authentication method is auto-detected from the referenced `KafkaUser` (`spec.authentication.type`). Supported values:
   
-  - `SSL`
-  - `PLAINTEXT`
-  - `SASL_PLAINTEXT`
-  - `SASL_SSL`
+  - `SSL` — TLS transport with mTLS (client certificates). Requires a `KafkaUser` with `authentication.type: tls`. The operator builds a keystore and truststore from the KafkaUser secret.
+  - `SASL_SSL` — TLS transport with SCRAM-SHA-512 authentication. Requires a `KafkaUser` with `authentication.type: scram-sha-512`. The operator builds only a truststore and reads the SCRAM credentials directly from the KafkaUser secret.
+  - `SASL_PLAINTEXT` — plaintext transport with SCRAM-SHA-512 authentication. Requires a `KafkaUser` with `authentication.type: scram-sha-512`. No certificates or keystore are required.
+  - `PLAINTEXT` — plaintext transport with no authentication. No `KafkaUser` secret or certificates are required.
 
   See also: Schema Registry [kafkastore.security.protocol](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#kafkastore-security-protocol) docs.
 

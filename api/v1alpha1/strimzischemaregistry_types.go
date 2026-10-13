@@ -37,6 +37,9 @@ type StrimziSchemaRegistrySpec struct {
 	// SecurityProtocol defines the Kafka security protocol to use.
 	// +kubebuilder:default="SSL"
 	// Valid values: SSL, SASL_SSL, PLAINTEXT, SASL_PLAINTEXT.
+	// SSL uses mTLS with certificates from the referenced KafkaUser secret.
+	// SASL_SSL and SASL_PLAINTEXT use SCRAM-SHA-512, auto-detected from the
+	// referenced KafkaUser secret. PLAINTEXT requires no KafkaUser secret.
 	// +kubebuilder:validation:Enum=SSL;SASL_SSL;PLAINTEXT;SASL_PLAINTEXT
 	SecurityProtocol string `json:"securityprotocol,omitempty"`
 
