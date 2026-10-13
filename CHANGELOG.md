@@ -1,3 +1,57 @@
+## [1.10.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.9.3...1.10.0) (2026-10-13)
+
+
+### 📔 Docs
+
+* document SASL security protocols and add sample CRs (Step 7) ([fe1f9cb](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fe1f9cb353bcdab3c622be9aa1c4bdaa72cb9a7b))
+* update README to Strimzi Kafka API v1 ([0f1265e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0f1265e512c107e753655d54fb2692e2d1fb65ea))
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump docker/login-action from 4 to 4.5.2 ([877ad25](https://github.com/Randsw/schema-registry-operator-strimzi/commit/877ad2508f2873019673a469f1280e58261eab7b))
+* **deps:** Bump docker/login-action from 4.5.2 to 4.6.0 ([9ab2752](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9ab2752ffd69df6f5c8f65752fc23445e2418605))
+* **deps:** Bump github.com/go-logr/logr from 1.4.3 to 1.4.4 ([750cece](https://github.com/Randsw/schema-registry-operator-strimzi/commit/750cece2cfd777ee6f47c18b78dd5c711dc3a291))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.32.0 to 2.32.1 ([7677a61](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7677a61efc1faf1db2d6f3d7ac1caf470a06b2c3))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.32.1 to 2.32.2 ([cebe3e4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/cebe3e4debcacc5f67e18ae6591ac851ef41fd6b))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.32.2 to 2.33.0 ([54fe845](https://github.com/Randsw/schema-registry-operator-strimzi/commit/54fe8453d77ec0f9e27ce3c9c9e3ccd4b4f79237))
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.33.0 to 2.33.1 ([d8d05a6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d8d05a6699ad9c3d540b1b812585caa73477a37a))
+* **deps:** Bump github.com/onsi/gomega from 1.42.1 to 1.43.0 ([d910d9a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d910d9a8d625dfdeda59ae20899c0f7a42252cc5))
+* **deps:** Bump github.com/onsi/gomega from 1.43.0 to 1.43.1 ([eaaf3c5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/eaaf3c58ef6299c8b8b325a682541925c8a24a1f))
+* **deps:** Bump github.com/onsi/gomega from 1.43.1 to 1.44.0 ([e5aa984](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e5aa9845200ceaa69a4f2523f93a1927a9f634dc))
+* **deps:** Bump github.com/prometheus/client_golang ([84c96c0](https://github.com/Randsw/schema-registry-operator-strimzi/commit/84c96c05ffd8d111f625b6db90a2c5e9a696f866))
+* **deps:** Bump github.com/prometheus/client_golang ([1f6a5c6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1f6a5c655a94f3c4377b39e2a142380fa8824a07))
+* **deps:** Bump github.com/scholzj/strimzi-go from 0.10.0 to 0.11.0 ([3ba0789](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3ba07890a4bc2fcc01460fddc2aac9f8d7d87fcf))
+* **deps:** Bump github.com/scholzj/strimzi-go from 0.10.0 to 0.11.0 ([0104b7d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0104b7dc23a625572a2b54441cc537f540350216))
+* **deps:** Bump golang from 1.26 to 1.27 ([9c2ea9c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9c2ea9c5e4f0f3d27b4b58b56e36108b8fe6987d))
+* **deps:** Bump helm/chart-testing-action from 2.8.0 to 2.9.0 ([cd0cb48](https://github.com/Randsw/schema-registry-operator-strimzi/commit/cd0cb48f855732ae9ea8419db2157474e7128ed3))
+* **deps:** Bump helm/kind-action from 1.14.0 to 1.15.0 ([ccff982](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ccff9827c539c5a577bc63333e5e843346064a42))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.36.2 to 0.36.3 ([ac42489](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ac42489835b3d5f9ca733f9b82c65af22b393289))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.36.3 to 0.36.4 ([997287e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/997287e6796af552b1a9085053b63c6af0d84970))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.36.4 to 0.37.0 ([938c985](https://github.com/Randsw/schema-registry-operator-strimzi/commit/938c98509207527dbad5a5353b3d690f80097d17))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.37.0 to 0.37.1 ([f4fdfde](https://github.com/Randsw/schema-registry-operator-strimzi/commit/f4fdfdebf068a7e4917e7b5903ada2ab6236e18e))
+* **deps:** Bump k8s.io/client-go from 0.36.4 to 0.37.0 ([1e6d56d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1e6d56da0a81a28fb5750f5f6b3b66c73bf98fa5))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.24.1 to 0.25.0 ([cf6ab4a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/cf6ab4ad8b773e5385c65c6c244c2862450e1a8c))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.25.0 to 0.25.1 ([b36e738](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b36e738024925009765c3d371e2cc77e0d770f72))
+* **deps:** Bump sigs.k8s.io/controller-runtime from 0.25.1 to 0.25.2 ([e2d06ad](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e2d06ad7f7f34759d28da80f17925a7a01881cb9))
+* **docker:** improve Dockerfile for multi-arch, size and reproducibility ([c8c6de9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c8c6de98117dc83419bddedd07608389a8cccbac))
+* **docker:** keep trailing newline in .dockerignore ([e6aea5a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e6aea5a8fdb160b1f22651921f8c952ed34cd33f))
+
+
+### 🧪 Tests
+
+* **controller:** add SASL/SCRAM auth unit and envtest coverage (Step 6) ([4c79152](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4c79152274d35f42a11dc6282f15f78aed1a89d8))
+
+
+### 🚀 Features
+
+* add SASL auth support with PKCS8 cert keys and envtest e2e ([3bd3824](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3bd3824767f9421ffadb349d57676450bd304501))
+* **controller:** add auth resolver and KafkaUser lookup for SASL/SCRAM (Step 2) ([7f042e7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7f042e7ea78f4b1736a6cb794b8b4516d5a23fb2))
+* **controller:** branch deployment pod spec for SASL/SSL security protocols (Step 4) ([3b78449](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3b78449d4e1878ddbe52a71d4ee65f9437294271))
+* **controller:** branch secret creation for SASL/SSL security protocols (Step 3) ([fcf244e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fcf244eb4b1e4808e176ac04afdf944e1218f56a))
+* **controller:** rework secret rotation for SASL/SSL modes (Step 5) ([44f54af](https://github.com/Randsw/schema-registry-operator-strimzi/commit/44f54af75d704406b2efa470e83e4eede9057ab6))
+* **crd:** add SASL security protocol values to SecurityProtocol enum (Step 1) ([1638e79](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1638e792c1e9bf2c404f4d352ebdceb15e22beea))
+
 ## [1.9.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.9.2...1.9.3) (2026-07-21)
 
 
