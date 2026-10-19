@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -101,6 +102,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		return ctrl.Result{}, err
 	}
+	// Snapshot the original status so we only write it back when it actually
+	// changes. Writing status unconditionally bumps resourceVersion, which
+	// re-triggers this reconcile forever because the controller watches its
+	// own CR via For().
+	origStatus := instance.Status.DeepCopy()
 	// Add finalizer for metrics
 	if !controllerutil.ContainsFinalizer(instance, finalizer) {
 		logger.V(1).Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
@@ -204,11 +210,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			Message: fmt.Sprintf("Schema Registry deployment is no ready: %d/%d replicas ready", found.Status.ReadyReplicas, found.Status.Replicas),
 		})
 	}
-	err = r.Status().Update(ctx, instance)
-	if err != nil {
-		logger.Error(err, "Failed to update CR Status")
-		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-		return ctrl.Result{}, err
+	if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
+		err = r.Status().Update(ctx, instance)
+		if err != nil {
+			logger.Error(err, "Failed to update CR Status")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			return ctrl.Result{}, err
+		}
 	}
 	// Creating service for deployment
 	foundSvc := &v1.Service{}
