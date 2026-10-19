@@ -45,11 +45,24 @@ spec:
               heapopts:
                 pattern: ^(-Xms[a-fA-F0-9]+(m|M|g|G) -Xmx[a-fA-F0-9]+(m|M|g|G))?$
                 type: string
+              kafkastoretopic:
+                default: registry-schemas
+                type: string
+              kafkastoretopicreplicationfactor:
+                format: int32
+                minimum: 1
+                type: integer
               listener:
                 default: tls
                 maxLength: 255
                 minLength: 1
                 pattern: ^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,253}[a-zA-Z0-9])?$
+                type: string
+              mastereligibility:
+                default: true
+                type: boolean
+              schemaregistrygroupid:
+                default: schema-registry
                 type: string
               securehttp:
                 type: boolean
