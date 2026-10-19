@@ -7,7 +7,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
 	github.com/prometheus/client_golang v1.25.0
-	github.com/scholzj/strimzi-go v0.11.0
+	github.com/scholzj/strimzi-go v0.12.0
 	go.uber.org/zap v1.28.0
 	k8s.io/api v0.37.1
 	k8s.io/apiextensions-apiserver v0.37.1
@@ -103,7 +103,7 @@ require (
 	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad // indirect
 	k8s.io/streaming v0.37.1 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.36.0 // indirect
-	sigs.k8s.io/gateway-api v1.6.1 // indirect
+	sigs.k8s.io/gateway-api v1.6.3 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
