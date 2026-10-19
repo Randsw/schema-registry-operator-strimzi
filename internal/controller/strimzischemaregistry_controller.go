@@ -197,17 +197,19 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	conditionType := "Ready"
 	if found.Status.ReadyReplicas == found.Status.Replicas {
 		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-			Type:    conditionType,
-			Status:  metav1.ConditionTrue,
-			Reason:  "Ready",
-			Message: fmt.Sprintf("Schema Registry is ready with %d replicas", found.Status.ReadyReplicas),
+			Type:               conditionType,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Ready",
+			Message:            fmt.Sprintf("Schema Registry is ready with %d replicas", found.Status.ReadyReplicas),
+			ObservedGeneration: instance.Generation,
 		})
 	} else {
 		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-			Type:    conditionType,
-			Status:  metav1.ConditionFalse,
-			Reason:  "Not Ready",
-			Message: fmt.Sprintf("Schema Registry deployment is no ready: %d/%d replicas ready", found.Status.ReadyReplicas, found.Status.Replicas),
+			Type:               conditionType,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NotReady",
+			Message:            fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready", found.Status.ReadyReplicas, found.Status.Replicas),
+			ObservedGeneration: instance.Generation,
 		})
 	}
 	if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
