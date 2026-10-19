@@ -175,17 +175,24 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	podSpec.Spec.Containers[0].LivenessProbe = livenessProbe
 	podSpec.Spec.Containers[0].StartupProbe = startupProbe
 
-	if podSpec.Spec.Containers[0].Resources.Limits == nil && podSpec.Spec.Containers[0].Resources.Requests == nil {
-		podSpec.Spec.Containers[0].Resources = v1.ResourceRequirements{
-			Requests: v1.ResourceList{
-				v1.ResourceCPU:    mustParseQuantity("250m"),
-				v1.ResourceMemory: mustParseQuantity("512Mi"),
-			},
-			Limits: v1.ResourceList{
-				v1.ResourceCPU:    mustParseQuantity("1000m"),
-				v1.ResourceMemory: mustParseQuantity("1Gi"),
-			},
-		}
+	resources := &podSpec.Spec.Containers[0].Resources
+	if resources.Requests == nil {
+		resources.Requests = v1.ResourceList{}
+	}
+	if _, ok := resources.Requests[v1.ResourceCPU]; !ok {
+		resources.Requests[v1.ResourceCPU] = mustParseQuantity("250m")
+	}
+	if _, ok := resources.Requests[v1.ResourceMemory]; !ok {
+		resources.Requests[v1.ResourceMemory] = mustParseQuantity("512Mi")
+	}
+	if resources.Limits == nil {
+		resources.Limits = v1.ResourceList{}
+	}
+	if _, ok := resources.Limits[v1.ResourceCPU]; !ok {
+		resources.Limits[v1.ResourceCPU] = mustParseQuantity("1000m")
+	}
+	if _, ok := resources.Limits[v1.ResourceMemory]; !ok {
+		resources.Limits[v1.ResourceMemory] = mustParseQuantity("1Gi")
 	}
 	podSpec.Spec.Containers[0].Env = podEnv
 	podSpec.Spec.Containers[0].VolumeMounts = containerVolumeMount
@@ -434,11 +441,10 @@ func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe,
 	}
 
 	readinessProbe := &v1.Probe{
-		ProbeHandler:        readinessHandler,
-		InitialDelaySeconds: 30,
-		PeriodSeconds:       10,
-		TimeoutSeconds:      5,
-		FailureThreshold:    3,
+		ProbeHandler:     readinessHandler,
+		PeriodSeconds:    10,
+		TimeoutSeconds:   5,
+		FailureThreshold: 3,
 	}
 
 	livenessProbe := &v1.Probe{
@@ -447,10 +453,9 @@ func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe,
 				Port: intstr.IntOrString{IntVal: listenerPort},
 			},
 		},
-		InitialDelaySeconds: 30,
-		PeriodSeconds:       15,
-		TimeoutSeconds:      5,
-		FailureThreshold:    3,
+		PeriodSeconds:    15,
+		TimeoutSeconds:   5,
+		FailureThreshold: 3,
 	}
 
 	startupProbe := &v1.Probe{
