@@ -434,11 +434,10 @@ func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe,
 	}
 
 	readinessProbe := &v1.Probe{
-		ProbeHandler:        readinessHandler,
-		InitialDelaySeconds: 30,
-		PeriodSeconds:       10,
-		TimeoutSeconds:      5,
-		FailureThreshold:    3,
+		ProbeHandler:     readinessHandler,
+		PeriodSeconds:    10,
+		TimeoutSeconds:   5,
+		FailureThreshold: 3,
 	}
 
 	livenessProbe := &v1.Probe{
@@ -447,10 +446,9 @@ func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe,
 				Port: intstr.IntOrString{IntVal: listenerPort},
 			},
 		},
-		InitialDelaySeconds: 30,
-		PeriodSeconds:       15,
-		TimeoutSeconds:      5,
-		FailureThreshold:    3,
+		PeriodSeconds:    15,
+		TimeoutSeconds:   5,
+		FailureThreshold: 3,
 	}
 
 	startupProbe := &v1.Probe{
