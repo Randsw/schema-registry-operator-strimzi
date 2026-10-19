@@ -1,0 +1,28 @@
+# Storage & identity parameters example.
+# Demonstrates overriding the default kafkastore topic and consumer group,
+# disabling master eligibility, and pinning the replication factor for
+# auto-created topics on small/single-node clusters.
+apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+kind: StrimziSchemaRegistry
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-schema
+    app.kubernetes.io/managed-by: kustomize
+    strimzi.io/cluster: kafka-cluster
+  name: strimzischemaregistry-sample-storage-identity
+spec:
+  listener: "tls"
+  securityprotocol: "SSL"
+  compatibilitylevel: "forward"
+  securehttp: false
+  kafkastoretopic: "my-schemas"
+  kafkastoretopicreplicationfactor: 1
+  schemaregistrygroupid: "my-schema-registry"
+  mastereligibility: false
+  template:
+    spec:
+      containers:
+        - name: confluent-sr
+          image: confluentinc/cp-schema-registry:7.6.5
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always

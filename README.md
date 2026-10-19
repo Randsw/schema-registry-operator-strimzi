@@ -81,8 +81,9 @@ spec:
 ```
 
 > **Note**
-> The name `registry-schemas` is currently required.
-> The default name, `_schemas` isn't used because it isn't convenient to create with `KafkaTopic` resources.
+> The default topic name is `registry-schemas`. It can now be overridden with `spec.kafkastoretopic`.
+> The name `_schemas` (Confluent's own default) isn't used because it isn't convenient to create with `KafkaTopic` resources.
+> For auto-creation, the replication factor follows `spec.kafkastoretopicreplicationfactor`; leave it unset to use Confluent's built-in default (`3`), or set `1` for small or single-node clusters.
 
 ### Step 2. Deploy a KafkaUser
 
@@ -180,6 +181,10 @@ spec:
   compatibilitylevel: "forward"
   securityprotocol:   "SSL"
   tlssecretName:      ""
+  kafkastoretopic: "registry-schemas"
+  kafkastoretopicreplicationfactor: 1
+  schemaregistrygroupid: "schema-registry"
+  mastereligibility: true
   template:
     spec:
       containers:
@@ -234,6 +239,23 @@ spec:
   [Java Generate Keys Tutorial](https://docs.oracle.com/javase/tutorial/security/toolsign/step3.html)
 
   See also: Schema Registry [Configuring the REST API for HTTP or HTTPS](https://docs.confluent.io/platform/current/schema-registry/security/index.html#configuring-the-rest-api-for-http-or-https)
+
+- `kafkastoretopic` is the name of the Kafka topic Schema Registry uses to store schemas. Default is `registry-schemas`.
+
+  See also: Schema Registry [kafkastore.topic](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#kafkastore-topic) docs.
+
+- `kafkastoretopicreplicationfactor` is the replication factor used when Schema Registry creates the storage topic.
+  It has no default: leave it unset to preserve Confluent's built-in default (`3`), or set `1` for small or single-node clusters. The value must be `>= 1`.
+
+  See also: Schema Registry [kafkastore.topic.replication.factor](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#kafkastore-topic-replication-factor) docs.
+
+- `schemaregistrygroupid` is the Kafka consumer group id used by Schema Registry. Default is `schema-registry`.
+
+  See also: Schema Registry [schema.registry.group.id](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#schema-registry-group-id) docs.
+
+- `mastereligibility` controls whether this Schema Registry instance is eligible to be elected master. Default is `true`.
+
+  See also: Schema Registry [master.eligibility](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#master-eligibility) docs.
 
 - `template` is a standart Kubernetes template for pod. you can configure it as you want according to the [pod specification](https://dev-k8sref-io.web.app/docs/workloads/podtemplate-v1/)
 
