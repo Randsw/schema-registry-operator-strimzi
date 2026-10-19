@@ -63,6 +63,29 @@ type StrimziSchemaRegistrySpec struct {
 	// +kubebuilder:validation:Pattern="^(-Xms[a-fA-F0-9]+(m|M|g|G) -Xmx[a-fA-F0-9]+(m|M|g|G))?$"
 	HeapOpts string `json:"heapopts,omitempty"`
 
+	// KafkastoreTopic is the name of the Kafka topic Schema Registry uses to store
+	// schemas. Defaults to "registry-schemas".
+	// +kubebuilder:default="registry-schemas"
+	KafkastoreTopic string `json:"kafkastoretopic,omitempty"`
+
+	// KafkastoreTopicReplicationFactor is the replication factor for the Kafka
+	// topic used by Schema Registry. When unset, the Schema Registry built-in
+	// default (3) is preserved. Set to 1 for small or single-node clusters.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	KafkastoreTopicReplicationFactor *int32 `json:"kafkastoretopicreplicationfactor,omitempty"`
+
+	// SchemaRegistryGroupID is the Kafka consumer group id Schema Registry uses.
+	// Defaults to "schema-registry".
+	// +kubebuilder:default="schema-registry"
+	SchemaRegistryGroupID string `json:"schemaregistrygroupid,omitempty"`
+
+	// MasterEligibility determines whether this Schema Registry instance is
+	// eligible to be elected master. Defaults to true.
+	// +optional
+	// +kubebuilder:default=true
+	MasterEligibility *bool `json:"mastereligibility,omitempty"`
+
 	Template corev1.PodTemplateSpec `json:"template"`
 }
 
