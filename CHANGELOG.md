@@ -1,3 +1,25 @@
+## [1.10.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.10.0...1.10.1) (2026-10-19)
+
+
+### 🦊 CI/CD
+
+* fix golangci-lint v2 install path ([640c68d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/640c68dc302a0237a79a6ef32356e0f868c2374e))
+* **deps:** Bump github.com/prometheus/client_golang ([1bf8e91](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1bf8e91bd356f29ff58cf296d2dfb38003b648e5))
+* **deps:** Bump helm/kind-action from 1.15.0 to 1.15.1 ([21fa5a1](https://github.com/Randsw/schema-registry-operator-strimzi/commit/21fa5a1d4ec0d84f06676ee1fc12ee5a0c53e3b7))
+
+
+### 🧪 Tests
+
+* cover phase 0 correctness fixes ([1afa594](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1afa5948c6723d35b1716e2e27ba8662f8feb117))
+
+
+### 🛠 Fixes
+
+* **controller:** correct condition reason and message formatting ([359bdf4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/359bdf4d0a28a02c942b240caa31a6dbb8f197ed))
+* **k8s:** apply resource defaults per-field ([42c75fd](https://github.com/Randsw/schema-registry-operator-strimzi/commit/42c75fdf4365259f201c53ea6c5520770e835b17))
+* **k8s:** remove dead probe initial delays ([5bff905](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5bff9054cf7d65237ed9b7a2d6da5145b424aadc))
+* **status:** avoid unconditional status update reconcile hot loop ([866adf4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/866adf4497d0fb31e24727cbc62472ff1eda2dcd))
+
 ## [1.10.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.9.3...1.10.0) (2026-10-13)
 
 
