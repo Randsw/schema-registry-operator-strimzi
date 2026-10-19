@@ -469,6 +469,99 @@ func TestBuildProbesInitialDelay(t *testing.T) {
 	})
 }
 
+// TestBuildPodEnvStorageIdentity verifies the storage and identity env vars,
+// including their empty/nil fallback defaults and the nil replication factor
+// being omitted entirely.
+func TestBuildPodEnvStorageIdentity(t *testing.T) {
+	auth := kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}
+
+	t.Run("defaults when fields are empty or nil", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.KafkastoreTopic = ""
+		inst.Spec.KafkastoreTopicReplicationFactor = nil
+		inst.Spec.SchemaRegistryGroupID = ""
+		inst.Spec.MasterEligibility = nil
+
+		env := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", "registry-schemas")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SCHEMA_REGISTRY_GROUP_ID", "schema-registry")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_MASTER_ELIGIBILITY", "true")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR")
+	})
+
+	t.Run("explicit values are propagated", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.KafkastoreTopic = "custom-schemas"
+		rf := int32(1)
+		inst.Spec.KafkastoreTopicReplicationFactor = &rf
+		inst.Spec.SchemaRegistryGroupID = "custom-group"
+		masterEligibility := false
+		inst.Spec.MasterEligibility = &masterEligibility
+
+		env := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", "custom-schemas")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR", "1")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SCHEMA_REGISTRY_GROUP_ID", "custom-group")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_MASTER_ELIGIBILITY", "false")
+	})
+}
+
+// TestComputeSpecHashStorageIdentity verifies that the four new spec fields
+// participate in the spec hash so changes trigger a deployment rollout.
+func TestComputeSpecHashStorageIdentity(t *testing.T) {
+	t.Run("different KafkastoreTopic produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.KafkastoreTopic = "custom-schemas"
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different KafkastoreTopic: both %q", hash1)
+		}
+	})
+
+	t.Run("different KafkastoreTopicReplicationFactor produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		rf := int32(1)
+		inst2.Spec.KafkastoreTopicReplicationFactor = &rf
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different KafkastoreTopicReplicationFactor: both %q", hash1)
+		}
+	})
+
+	t.Run("different SchemaRegistryGroupID produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.SchemaRegistryGroupID = "custom-group"
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different SchemaRegistryGroupID: both %q", hash1)
+		}
+	})
+
+	t.Run("different MasterEligibility produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		masterEligibility := false
+		inst2.Spec.MasterEligibility = &masterEligibility
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different MasterEligibility: both %q", hash1)
+		}
+	})
+}
+
 // assertQuantity fails the test when the resource quantity does not equal want.
 func assertQuantity(t *testing.T, got resource.Quantity, want string) {
 	t.Helper()
