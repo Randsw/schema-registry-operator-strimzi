@@ -22,7 +22,9 @@ import (
 
 	"github.com/go-logr/logr"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -433,5 +435,138 @@ func TestRenewTLSSecret_NoOp(t *testing.T) {
 		if err == nil {
 			t.Error("expected error when strimzi.io/cluster label is missing, got nil")
 		}
+	})
+}
+
+// TestBuildProbesInitialDelay verifies that readiness and liveness probes no
+// longer carry an InitialDelaySeconds value (the startup probe already gates
+// them), while the startup probe keeps its 30s initial delay.
+func TestBuildProbesInitialDelay(t *testing.T) {
+	t.Run("HTTP probes have no initial delay and startup keeps 30s", func(t *testing.T) {
+		readiness, liveness, startup := buildProbes(8081, corev1.URISchemeHTTP)
+		if readiness.InitialDelaySeconds != 0 {
+			t.Errorf("expected readiness InitialDelaySeconds=0, got %d", readiness.InitialDelaySeconds)
+		}
+		if liveness.InitialDelaySeconds != 0 {
+			t.Errorf("expected liveness InitialDelaySeconds=0, got %d", liveness.InitialDelaySeconds)
+		}
+		if startup.InitialDelaySeconds != 30 {
+			t.Errorf("expected startup InitialDelaySeconds=30, got %d", startup.InitialDelaySeconds)
+		}
+	})
+
+	t.Run("HTTPS probes have no initial delay and startup keeps 30s", func(t *testing.T) {
+		readiness, liveness, startup := buildProbes(8085, corev1.URISchemeHTTPS)
+		if readiness.InitialDelaySeconds != 0 {
+			t.Errorf("expected readiness InitialDelaySeconds=0, got %d", readiness.InitialDelaySeconds)
+		}
+		if liveness.InitialDelaySeconds != 0 {
+			t.Errorf("expected liveness InitialDelaySeconds=0, got %d", liveness.InitialDelaySeconds)
+		}
+		if startup.InitialDelaySeconds != 30 {
+			t.Errorf("expected startup InitialDelaySeconds=30, got %d", startup.InitialDelaySeconds)
+		}
+	})
+}
+
+// assertQuantity fails the test when the resource quantity does not equal want.
+func assertQuantity(t *testing.T, got resource.Quantity, want string) {
+	t.Helper()
+	if got.Cmp(mustParseQuantity(want)) != 0 {
+		t.Errorf("expected quantity %s, got %s", want, got.String())
+	}
+}
+
+// TestBuildDeploymentSpecResourceDefaults verifies that resource requests and
+// limits are defaulted per-field, rather than only when both are nil.
+func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+
+	t.Run("only limits set gets default requests", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "sr",
+						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    mustParseQuantity("2000m"),
+								corev1.ResourceMemory: mustParseQuantity("2Gi"),
+							},
+						},
+					},
+				},
+			},
+		}
+
+		dep, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		res := dep.Spec.Template.Spec.Containers[0].Resources
+		assertQuantity(t, res.Requests[corev1.ResourceCPU], "250m")
+		assertQuantity(t, res.Requests[corev1.ResourceMemory], "512Mi")
+		assertQuantity(t, res.Limits[corev1.ResourceCPU], "2000m")
+		assertQuantity(t, res.Limits[corev1.ResourceMemory], "2Gi")
+	})
+
+	t.Run("only requests set gets default limits", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "sr",
+						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    mustParseQuantity("300m"),
+								corev1.ResourceMemory: mustParseQuantity("600Mi"),
+							},
+						},
+					},
+				},
+			},
+		}
+
+		dep, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		res := dep.Spec.Template.Spec.Containers[0].Resources
+		assertQuantity(t, res.Requests[corev1.ResourceCPU], "300m")
+		assertQuantity(t, res.Requests[corev1.ResourceMemory], "600Mi")
+		assertQuantity(t, res.Limits[corev1.ResourceCPU], "1000m")
+		assertQuantity(t, res.Limits[corev1.ResourceMemory], "1Gi")
+	})
+
+	t.Run("neither requests nor limits get full defaults", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.5"},
+				},
+			},
+		}
+
+		dep, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		res := dep.Spec.Template.Spec.Containers[0].Resources
+		assertQuantity(t, res.Requests[corev1.ResourceCPU], "250m")
+		assertQuantity(t, res.Requests[corev1.ResourceMemory], "512Mi")
+		assertQuantity(t, res.Limits[corev1.ResourceCPU], "1000m")
+		assertQuantity(t, res.Limits[corev1.ResourceMemory], "1Gi")
 	})
 }
