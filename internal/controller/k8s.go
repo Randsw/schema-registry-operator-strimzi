@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -274,11 +275,38 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 		heapOpts = "-Xms512M -Xmx512M"
 	}
 
+	// Storage and identity settings. Empty/nil values fall back to the documented
+	// defaults so CRs created before CRD defaults existed keep working unchanged.
+	kafkastoreTopic := instance.Spec.KafkastoreTopic
+	if kafkastoreTopic == "" {
+		kafkastoreTopic = "registry-schemas"
+	}
+
+	schemaRegistryGroupID := instance.Spec.SchemaRegistryGroupID
+	if schemaRegistryGroupID == "" {
+		schemaRegistryGroupID = "schema-registry"
+	}
+
+	masterEligibility := true
+	if instance.Spec.MasterEligibility != nil {
+		masterEligibility = *instance.Spec.MasterEligibility
+	}
+
 	podEnv = append(podEnv,
-		v1.EnvVar{Name: "SCHEMA_REGISTRY_MASTER_ELIGIBILITY", Value: "true"},
+		v1.EnvVar{Name: "SCHEMA_REGISTRY_MASTER_ELIGIBILITY", Value: strconv.FormatBool(masterEligibility)},
 		v1.EnvVar{Name: "SCHEMA_REGISTRY_HEAP_OPTS", Value: heapOpts},
-		v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", Value: "registry-schemas"},
+		v1.EnvVar{Name: "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", Value: kafkastoreTopic},
+		v1.EnvVar{Name: "SCHEMA_REGISTRY_SCHEMA_REGISTRY_GROUP_ID", Value: schemaRegistryGroupID},
 	)
+
+	// Only emit the replication factor when explicitly set so Confluent's
+	// built-in default (3) is preserved for unset values.
+	if instance.Spec.KafkastoreTopicReplicationFactor != nil {
+		podEnv = append(podEnv, v1.EnvVar{
+			Name:  "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR",
+			Value: strconv.FormatInt(int64(*instance.Spec.KafkastoreTopicReplicationFactor), 10),
+		})
+	}
 
 	// KafkaStore TLS environment. The keystore is only needed for mTLS (SSL);
 	// the truststore is needed for TLS transport (SSL and SASL_SSL).
@@ -858,7 +886,8 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 
 // computeSpecHash computes a hash of the relevant spec fields to detect changes.
 // The hash covers CompatibilityLevel, SecureHTTP, HeapOpts, Listener, SecurityProtocol,
-// TLSSecretName, and the full PodTemplateSpec — all fields that affect the deployment spec or service ports.
+// TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor, SchemaRegistryGroupID,
+// MasterEligibility, and the full PodTemplateSpec — all fields that affect the deployment spec or service ports.
 func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
 	h := fnv.New32a()
 
@@ -884,6 +913,38 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 
 	if _, err := io.WriteString(h, instance.Spec.TLSSecretName); err != nil {
 		return "", fmt.Errorf("failed to write TLSSecretName to hash: %w", err)
+	}
+
+	// Storage and identity fields are hashed using the same effective/defaulted
+	// values that buildPodEnv emits, so hashing stays deterministic and in sync.
+	kafkastoreTopic := instance.Spec.KafkastoreTopic
+	if kafkastoreTopic == "" {
+		kafkastoreTopic = "registry-schemas"
+	}
+	if _, err := io.WriteString(h, kafkastoreTopic); err != nil {
+		return "", fmt.Errorf("failed to write KafkastoreTopic to hash: %w", err)
+	}
+
+	if instance.Spec.KafkastoreTopicReplicationFactor != nil {
+		if _, err := fmt.Fprintf(h, "%d", *instance.Spec.KafkastoreTopicReplicationFactor); err != nil {
+			return "", fmt.Errorf("failed to write KafkastoreTopicReplicationFactor to hash: %w", err)
+		}
+	}
+
+	schemaRegistryGroupID := instance.Spec.SchemaRegistryGroupID
+	if schemaRegistryGroupID == "" {
+		schemaRegistryGroupID = "schema-registry"
+	}
+	if _, err := io.WriteString(h, schemaRegistryGroupID); err != nil {
+		return "", fmt.Errorf("failed to write SchemaRegistryGroupID to hash: %w", err)
+	}
+
+	masterEligibility := true
+	if instance.Spec.MasterEligibility != nil {
+		masterEligibility = *instance.Spec.MasterEligibility
+	}
+	if _, err := fmt.Fprintf(h, "%t", masterEligibility); err != nil {
+		return "", fmt.Errorf("failed to write MasterEligibility to hash: %w", err)
 	}
 
 	// Include the full PodTemplateSpec so that container image, resources,
