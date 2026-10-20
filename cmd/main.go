@@ -163,8 +163,9 @@ func main() {
 	}
 
 	if err = (&controller.StrimziSchemaRegistryReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("strimzischemaregistry-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "StrimziSchemaRegistry")
 		os.Exit(1)

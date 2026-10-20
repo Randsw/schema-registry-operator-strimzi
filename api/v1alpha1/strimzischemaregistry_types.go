@@ -86,6 +86,13 @@ type StrimziSchemaRegistrySpec struct {
 	// +kubebuilder:default=true
 	MasterEligibility *bool `json:"mastereligibility,omitempty"`
 
+	// Configuration holds arbitrary Confluent Schema Registry properties in
+	// dotted form (e.g. "kafkastore.timeout.ms"). Each key is converted to a
+	// SCHEMA_REGISTRY_* environment variable. Operator-managed settings cannot
+	// be overridden here; see the README for the reserved-key list.
+	// +optional
+	Configuration map[string]string `json:"configuration,omitempty"`
+
 	Template corev1.PodTemplateSpec `json:"template"`
 }
 

@@ -40,12 +40,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 )
 
 // StrimziSchemaRegistryReconciler reconciles a StrimziSchemaRegistry object
 type StrimziSchemaRegistryReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder recorder.EventRecorder
 }
 
 const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
@@ -79,6 +81,7 @@ func getStrimziClusterName(instance *strimziregistryoperatorv1alpha1.StrimziSche
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -679,4 +682,16 @@ func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregist
 
 func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
 	monitoring.StrimziSchemaRegistryCurrentInstanceCount.Dec()
+}
+
+// emitConfigOverriddenEvents records a Warning event for each spec.configuration
+// key that was skipped because it is operator-managed.
+func (r *StrimziSchemaRegistryReconciler) emitConfigOverriddenEvents(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, overridden []string) {
+	if r.Recorder == nil {
+		return
+	}
+	for _, key := range overridden {
+		r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ConfigKeyOverridden", "",
+			"configuration key %q is operator-managed and was ignored", key)
+	}
 }

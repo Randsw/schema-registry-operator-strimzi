@@ -97,6 +97,13 @@ func (in *StrimziSchemaRegistrySpec) DeepCopyInto(out *StrimziSchemaRegistrySpec
 		*out = new(bool)
 		**out = **in
 	}
+	if in.Configuration != nil {
+		in, out := &in.Configuration, &out.Configuration
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	in.Template.DeepCopyInto(&out.Template)
 }
 
