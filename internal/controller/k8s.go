@@ -17,6 +17,8 @@ import (
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,11 +29,12 @@ import (
 
 // Resource name suffixes used throughout the operator.
 const (
-	jksSecretSuffix    = "-jks"
-	tlsSecretSuffix    = "-tls"
-	deploySuffix       = "-deploy"
-	clusterCASuffix    = "-cluster-ca-cert"
-	clusterCAKeySuffix = "-cluster-ca"
+	jksSecretSuffix     = "-jks"
+	tlsSecretSuffix     = "-tls"
+	deploySuffix        = "-deploy"
+	clusterCASuffix     = "-cluster-ca-cert"
+	clusterCAKeySuffix  = "-cluster-ca"
+	networkPolicySuffix = "-network-policy"
 )
 
 // labelsForStrimziSchemaRegistryOperator returns the standard set of labels
@@ -865,14 +868,22 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 	} else {
 		port = append(port, v1.ServicePort{Name: "https", Protocol: "TCP", Port: 443, TargetPort: intstr.IntOrString{IntVal: 8085}})
 	}
+
+	// Start from the CR labels (existing behavior) and overlay the optional
+	// spec.service.labels passthrough.
+	labels := mergeStringMaps(instance.Labels, nil)
+	annotations := map[string]string{"type": port[0].Name}
+	if instance.Spec.Service != nil {
+		labels = mergeStringMaps(labels, instance.Spec.Service.Labels)
+		annotations = mergeStringMaps(annotations, instance.Spec.Service.Annotations)
+	}
+
 	svc := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      instance.Name,
-			Namespace: instance.Namespace,
-			Labels:    instance.Labels,
-			Annotations: map[string]string{
-				"type": port[0].Name,
-			},
+			Name:        instance.Name,
+			Namespace:   instance.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: v1.ServiceSpec{
 			Ports: port,
@@ -887,6 +898,170 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 		return nil, err
 	}
 	return svc, nil
+}
+
+// mergeStringMaps returns a new map containing base overlaid with override.
+// The result is never nil, which keeps hashing and diffing deterministic.
+func mergeStringMaps(base, override map[string]string) map[string]string {
+	merged := make(map[string]string, len(base)+len(override))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range override {
+		merged[k] = v
+	}
+	return merged
+}
+
+// networkPolicyEnabled reports whether the optional NetworkPolicy should be
+// created for the Schema Registry pods.
+func networkPolicyEnabled(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) bool {
+	return instance.Spec.NetworkPolicy != nil && instance.Spec.NetworkPolicy.Enabled
+}
+
+// buildNetworkPolicy constructs the desired NetworkPolicy for the Schema Registry
+// pods. It allows ingress on the SR listener port from within the namespace and
+// egress to the Kafka bootstrap service (identified by the Strimzi cluster label).
+func buildNetworkPolicy(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, kafkaClusterName, kafkaBootstrapServer string) (*networkingv1.NetworkPolicy, error) {
+	listenerPort, _ := listenerPortAndScheme(instance)
+	kafkaPort, err := portFromBootstrapServer(kafkaBootstrapServer)
+	if err != nil {
+		return nil, err
+	}
+
+	image := ""
+	if len(instance.Spec.Template.Spec.Containers) > 0 {
+		image = instance.Spec.Template.Spec.Containers[0].Image
+	}
+
+	tcp := v1.ProtocolTCP
+	listenerPortTarget := intstr.IntOrString{Type: intstr.Int, IntVal: listenerPort}
+	kafkaPortTarget := intstr.IntOrString{Type: intstr.Int, IntVal: kafkaPort}
+
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      instance.Name + networkPolicySuffix,
+			Namespace: instance.Namespace,
+			Labels:    labelsForStrimziSchemaRegistryOperator(instance.Name, image, kafkaClusterName),
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": instance.Name},
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+				networkingv1.PolicyTypeEgress,
+			},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					From: []networkingv1.NetworkPolicyPeer{
+						{
+							// Empty pod selector matches all pods in the same namespace.
+							PodSelector: &metav1.LabelSelector{},
+						},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: &tcp, Port: &listenerPortTarget},
+					},
+				},
+			},
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{
+					To: []networkingv1.NetworkPolicyPeer{
+						{
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"strimzi.io/cluster": kafkaClusterName,
+								},
+							},
+						},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: &tcp, Port: &kafkaPortTarget},
+					},
+				},
+			},
+		},
+	}, nil
+}
+
+// portFromBootstrapServer extracts the TCP port from a Kafka bootstrap server
+// address of the form host:port.
+func portFromBootstrapServer(bootstrap string) (int32, error) {
+	idx := strings.LastIndex(bootstrap, ":")
+	if idx == -1 || idx == len(bootstrap)-1 {
+		return 0, fmt.Errorf("invalid Kafka bootstrap server %q: missing port", bootstrap)
+	}
+	port, err := strconv.Atoi(bootstrap[idx+1:])
+	if err != nil || port <= 0 {
+		return 0, fmt.Errorf("invalid Kafka bootstrap server %q: bad port", bootstrap)
+	}
+	return int32(port), nil
+}
+
+// networkPoliciesEqual reports whether the existing NetworkPolicy matches the
+// desired state (spec and labels only; annotations are operator-managed only
+// when present, and no passthrough exists for them yet).
+func networkPoliciesEqual(existing, desired *networkingv1.NetworkPolicy) bool {
+	if !equality.Semantic.DeepEqual(existing.Spec, desired.Spec) {
+		return false
+	}
+	return equality.Semantic.DeepEqual(existing.Labels, desired.Labels)
+}
+
+// reconcileNetworkPolicy creates, updates, or deletes the NetworkPolicy for the
+// Schema Registry pods according to spec.networkpolicy.enabled.
+func (r *StrimziSchemaRegistryReconciler) reconcileNetworkPolicy(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+) error {
+	name := types.NamespacedName{Name: instance.Name + networkPolicySuffix, Namespace: instance.Namespace}
+	existing := &networkingv1.NetworkPolicy{}
+	getErr := r.Get(ctx, name, existing)
+
+	if !networkPolicyEnabled(instance) {
+		if errors.IsNotFound(getErr) {
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		logger.V(1).Info("NetworkPolicy disabled, deleting existing policy", "NetworkPolicy.Name", name.Name)
+		return r.Delete(ctx, existing)
+	}
+
+	// Resolve the Kafka bootstrap server to derive the egress port.
+	kafkaBootstrapServer, kafkaClusterName, err := r.getKafkaBootstrapServers(instance, ctx, logger)
+	if err != nil {
+		return err
+	}
+	desired, err := buildNetworkPolicy(instance, kafkaClusterName, kafkaBootstrapServer)
+	if err != nil {
+		return err
+	}
+	if err := ctrl.SetControllerReference(instance, desired, r.Scheme); err != nil {
+		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller for NetworkPolicy")
+		return err
+	}
+
+	if errors.IsNotFound(getErr) {
+		logger.Info("Creating NetworkPolicy", "NetworkPolicy.Name", name.Name)
+		return r.Create(ctx, desired)
+	}
+	if getErr != nil {
+		return getErr
+	}
+
+	if !networkPoliciesEqual(existing, desired) {
+		existing.Spec = desired.Spec
+		existing.Labels = desired.Labels
+		existing.Annotations = desired.Annotations
+		logger.Info("NetworkPolicy changed, updating", "NetworkPolicy.Name", name.Name)
+		return r.Update(ctx, existing)
+	}
+
+	return nil
 }
 
 func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
@@ -977,6 +1152,22 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 	return dep, nil
 }
 
+// writeStringMapToHash writes a string map to the hash in sorted key order so
+// hashing is deterministic regardless of map iteration order.
+func writeStringMapToHash(h io.Writer, m map[string]string) error {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, err := fmt.Fprintf(h, "%s=%s", key, m[key]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // computeSpecHash computes a hash of the relevant spec fields to detect changes.
 // The hash covers CompatibilityLevel, SecureHTTP, HeapOpts, Listener, SecurityProtocol,
 // TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor, SchemaRegistryGroupID,
@@ -1047,6 +1238,22 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 		if _, err := fmt.Fprintf(h, "%s=%s", key, instance.Spec.Configuration[key]); err != nil {
 			return "", fmt.Errorf("failed to write configuration entry to hash: %w", err)
 		}
+	}
+
+	// Service passthrough annotations/labels affect the rendered Service, so
+	// they participate in the hash (in sorted key order for determinism).
+	if instance.Spec.Service != nil {
+		if err := writeStringMapToHash(h, instance.Spec.Service.Annotations); err != nil {
+			return "", fmt.Errorf("failed to write service annotations to hash: %w", err)
+		}
+		if err := writeStringMapToHash(h, instance.Spec.Service.Labels); err != nil {
+			return "", fmt.Errorf("failed to write service labels to hash: %w", err)
+		}
+	}
+
+	// NetworkPolicy enablement affects whether the NetworkPolicy is created.
+	if _, err := fmt.Fprintf(h, "%t", networkPolicyEnabled(instance)); err != nil {
+		return "", fmt.Errorf("failed to write NetworkPolicy enabled to hash: %w", err)
 	}
 
 	// Include the full PodTemplateSpec so that container image, resources,

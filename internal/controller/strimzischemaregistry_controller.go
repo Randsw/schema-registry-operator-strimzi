@@ -83,6 +83,7 @@ func getStrimziClusterName(instance *strimziregistryoperatorv1alpha1.StrimziSche
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -255,7 +256,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// Compare service ports to detect changes
+	// Compare service ports, labels, and annotations to detect changes.
 	serviceChanged := false
 	if len(foundSvc.Spec.Ports) != len(desiredSvc.Spec.Ports) {
 		serviceChanged = true
@@ -270,15 +271,19 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			}
 		}
 	}
+	if !equality.Semantic.DeepEqual(foundSvc.Labels, desiredSvc.Labels) {
+		serviceChanged = true
+	}
+	if !equality.Semantic.DeepEqual(foundSvc.Annotations, desiredSvc.Annotations) {
+		serviceChanged = true
+	}
 
 	if serviceChanged {
-		logger.Info("Service ports changed, updating service",
+		logger.Info("Service changed, updating service",
 			"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
 		foundSvc.Spec.Ports = desiredSvc.Spec.Ports
-		if foundSvc.Annotations == nil {
-			foundSvc.Annotations = make(map[string]string)
-		}
-		foundSvc.Annotations["type"] = desiredSvc.Spec.Ports[0].Name
+		foundSvc.Labels = desiredSvc.Labels
+		foundSvc.Annotations = desiredSvc.Annotations
 		err = r.Update(ctx, foundSvc)
 		if err != nil {
 			logger.Error(err, "Failed to update service after spec change")
@@ -287,6 +292,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	// Reconcile the optional NetworkPolicy for the Schema Registry pods.
+	if err = r.reconcileNetworkPolicy(ctx, instance, logger); err != nil {
+		logger.Error(err, "Failed to reconcile NetworkPolicy")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
