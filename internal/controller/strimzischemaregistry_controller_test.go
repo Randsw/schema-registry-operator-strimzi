@@ -2949,4 +2949,177 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			}, time.Minute, time.Second).ShouldNot(Equal(initialHash))
 		})
 	})
+
+	// Phase 3: REST endpoint mutual TLS.
+	Context("When reconciling with clientauth enabled", func() {
+		const SchemaRegistryName = "test-clientauth"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		var clusterCA *testutil.TestCA
+
+		BeforeEach(func() {
+			var err error
+			clusterCA, err = testutil.GenerateClusterCACert("STIMZI-SR-CLIENTAUTH")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{
+				ClusterId: "clientauth-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.clientauth.svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: SchemaRegistryName},
+				Data:       map[string][]byte{"ca.key": []byte(clusterCA.CAKeyPEM)},
+			})).To(Succeed())
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca-cert", Namespace: SchemaRegistryName},
+				Data:       map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)},
+			})).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         true,
+					ClientAuth:         true,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should mount the truststore and set client auth env vars", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking the deployment was created")
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, &appsv1.Deployment{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).To(Succeed())
+			envVars := deployment.Spec.Template.Spec.Containers[0].Env
+
+			clientAuth, ok := envByName(envVars, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
+			Expect(ok).To(BeTrue())
+			Expect(clientAuth.Value).To(Equal("true"))
+
+			truststoreLocation, ok := envByName(envVars, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION")
+			Expect(ok).To(BeTrue())
+			Expect(truststoreLocation.Value).To(Equal("/var/schemaregistry/truststore.jks"))
+
+			_, truststorePasswordOK := envByName(envVars, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD")
+			Expect(truststorePasswordOK).To(BeTrue())
+
+			By("Verifying the cluster-CA truststore volume is mounted")
+			_, tlsVolumeOK := volumeByName(deployment.Spec.Template.Spec.Volumes, "tls")
+			Expect(tlsVolumeOK).To(BeTrue())
+
+			By("Verifying the client-auth truststore secret was created")
+			jks := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}, jks)
+			}, time.Minute*2, time.Second).Should(Succeed())
+			Expect(jks.Data).To(HaveKey("truststore.jks"))
+			Expect(jks.Data).To(HaveKey("truststore_password"))
+		})
+	})
+
+	// Phase 3: clientauth validation.
+	Context("When clientauth is enabled without securehttp", func() {
+		const SchemaRegistryName = "test-clientauth-invalid"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		BeforeEach(func() {
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					ClientAuth:         true,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should set Ready=False with the ClientAuthRequiresSecureHTTP reason", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+
+			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("ClientAuthRequiresSecureHTTP"))
+		})
+	})
 })
