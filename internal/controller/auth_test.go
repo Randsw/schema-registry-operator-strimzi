@@ -276,7 +276,7 @@ func TestBuildPodEnvAuthModes(t *testing.T) {
 
 	t.Run("SSL", func(t *testing.T) {
 		auth := kafkaAuth{Protocol: "SSL", Mode: authMTLS, NeedsTruststore: true, NeedsKeystore: true}
-		env := buildPodEnv(inst, bootstrap, "", auth)
+		env, _ := buildPodEnv(inst, bootstrap, "", auth)
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL", "SSL")
 		requireEnvPresent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION")
 		requireEnvPresent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION")
@@ -286,7 +286,7 @@ func TestBuildPodEnvAuthModes(t *testing.T) {
 
 	t.Run("SASL_SSL", func(t *testing.T) {
 		auth := kafkaAuth{Protocol: "SASL_SSL", Mode: authSASLSSL, NeedsTruststore: true, NeedsSASL: true, SASLMechanism: saslMechanismSCRAMSHA512}
-		env := buildPodEnv(inst, bootstrap, "", auth)
+		env, _ := buildPodEnv(inst, bootstrap, "", auth)
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL", "SASL_SSL")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD")
@@ -302,7 +302,7 @@ func TestBuildPodEnvAuthModes(t *testing.T) {
 
 	t.Run("SASL_PLAINTEXT", func(t *testing.T) {
 		auth := kafkaAuth{Protocol: "SASL_PLAINTEXT", Mode: authSASLPlaintext, NeedsSASL: true, SASLMechanism: saslMechanismSCRAMSHA512}
-		env := buildPodEnv(inst, bootstrap, "", auth)
+		env, _ := buildPodEnv(inst, bootstrap, "", auth)
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD")
@@ -318,7 +318,7 @@ func TestBuildPodEnvAuthModes(t *testing.T) {
 
 	t.Run("PLAINTEXT", func(t *testing.T) {
 		auth := kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}
-		env := buildPodEnv(inst, bootstrap, "", auth)
+		env, _ := buildPodEnv(inst, bootstrap, "", auth)
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL", "PLAINTEXT")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD")

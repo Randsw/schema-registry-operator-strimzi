@@ -482,7 +482,7 @@ func TestBuildPodEnvStorageIdentity(t *testing.T) {
 		inst.Spec.SchemaRegistryGroupID = ""
 		inst.Spec.MasterEligibility = nil
 
-		env := buildPodEnv(inst, "kafka:9092", "", auth)
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
 
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", "registry-schemas")
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_SCHEMA_REGISTRY_GROUP_ID", "schema-registry")
@@ -499,7 +499,7 @@ func TestBuildPodEnvStorageIdentity(t *testing.T) {
 		masterEligibility := false
 		inst.Spec.MasterEligibility = &masterEligibility
 
-		env := buildPodEnv(inst, "kafka:9092", "", auth)
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
 
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", "custom-schemas")
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR", "1")
@@ -562,6 +562,121 @@ func TestComputeSpecHashStorageIdentity(t *testing.T) {
 	})
 }
 
+func TestConfluentPropertyToEnvName(t *testing.T) {
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"kafkastore.timeout.ms", "SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS"},
+		{"access.control.allow.origin", "SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_ORIGIN"},
+		{"authentication.realm", "SCHEMA_REGISTRY_AUTHENTICATION_REALM"},
+		{"debug", "SCHEMA_REGISTRY_DEBUG"},
+		{"foo-bar.baz", "SCHEMA_REGISTRY_FOO_BAR_BAZ"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			if got := confluentPropertyToEnvName(tt.key); got != tt.want {
+				t.Errorf("confluentPropertyToEnvName(%q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildPodEnvConfigurationReserved(t *testing.T) {
+	auth := kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}
+
+	t.Run("reserved keys do not override managed env vars", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.Configuration = map[string]string{
+			"kafkastore.security.protocol":     "SSL",
+			"listeners":                        "http://10.0.0.1:9999",
+			"kafkastore.topic":                 "attacker-topic",
+			"kafkastore.ssl.keystore.location": "/tmp/evil.jks",
+			"access.control.allow.origin":      "*",
+		}
+
+		env, overridden := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL", "PLAINTEXT")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_LISTENERS", "http://0.0.0.0:8081")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC", "registry-schemas")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_ORIGIN", "*")
+
+		wantOverridden := []string{
+			"kafkastore.security.protocol",
+			"kafkastore.ssl.keystore.location",
+			"kafkastore.topic",
+			"listeners",
+		}
+		if len(overridden) != len(wantOverridden) {
+			t.Fatalf("expected %d overridden keys, got %d: %v", len(wantOverridden), len(overridden), overridden)
+		}
+		for i := range wantOverridden {
+			if overridden[i] != wantOverridden[i] {
+				t.Errorf("overridden[%d] = %q, want %q", i, overridden[i], wantOverridden[i])
+			}
+		}
+	})
+
+	t.Run("non-reserved key colliding with managed env is skipped", func(t *testing.T) {
+		inst := newTestInstance()
+		rf := int32(1)
+		inst.Spec.KafkastoreTopicReplicationFactor = &rf
+		inst.Spec.Configuration = map[string]string{
+			"kafkastore.topic.replication.factor": "3",
+		}
+
+		env, overridden := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR", "1")
+		if len(overridden) != 1 || overridden[0] != "kafkastore.topic.replication.factor" {
+			t.Errorf("expected overridden to contain the replication-factor collision, got %v", overridden)
+		}
+	})
+}
+
+func TestComputeSpecHashConfigurationDeterministic(t *testing.T) {
+	t.Run("same configuration with different insertion order produces same hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Configuration = map[string]string{
+			"access.control.allow.origin": "*",
+			"authentication.realm":        "Basic",
+			"debug":                       "true",
+		}
+		inst2 := newTestInstance()
+		inst2.Spec.Configuration = map[string]string{
+			"debug":                       "true",
+			"access.control.allow.origin": "*",
+			"authentication.realm":        "Basic",
+		}
+
+		hash1, err1 := computeSpecHash(inst1)
+		hash2, err2 := computeSpecHash(inst2)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("unexpected error: %v %v", err1, err2)
+		}
+		if hash1 != hash2 {
+			t.Errorf("expected same hash for same configuration with different insertion order: %q vs %q", hash1, hash2)
+		}
+	})
+
+	t.Run("different configuration produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Configuration = map[string]string{"debug": "true"}
+		inst2 := newTestInstance()
+		inst2.Spec.Configuration = map[string]string{"debug": "false"}
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different configuration values: both %q", hash1)
+		}
+	})
+}
+
 // assertQuantity fails the test when the resource quantity does not equal want.
 func assertQuantity(t *testing.T, got resource.Quantity, want string) {
 	t.Helper()
@@ -598,7 +713,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 			},
 		}
 
-		dep, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
+		dep, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -629,7 +744,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 			},
 		}
 
-		dep, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
+		dep, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -651,7 +766,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 			},
 		}
 
-		dep, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
+		dep, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

@@ -2829,4 +2829,124 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(cond.ObservedGeneration).To(Equal(instance.Generation))
 		})
 	})
+
+	// Phase 2: arbitrary configuration escape hatch.
+	Context("When reconciling with spec.configuration", func() {
+		const SchemaRegistryName = "test-configuration"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		BeforeEach(func() {
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = &kafka.KafkaStatus{
+				ClusterId: "configuration-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.config.svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					Configuration: map[string]string{
+						"access.control.allow.origin": "*",
+						"authentication.realm":        "Basic",
+						"debug":                       "true",
+					},
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should render configuration entries as env vars and update the hash when the map changes", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking the deployment was created")
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, &appsv1.Deployment{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).To(Succeed())
+
+			envVars := deployment.Spec.Template.Spec.Containers[0].Env
+			cors, ok := envByName(envVars, "SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_ORIGIN")
+			Expect(ok).To(BeTrue())
+			Expect(cors.Value).To(Equal("*"))
+			realm, ok := envByName(envVars, "SCHEMA_REGISTRY_AUTHENTICATION_REALM")
+			Expect(ok).To(BeTrue())
+			Expect(realm.Value).To(Equal("Basic"))
+			debug, ok := envByName(envVars, "SCHEMA_REGISTRY_DEBUG")
+			Expect(ok).To(BeTrue())
+			Expect(debug.Value).To(Equal("true"))
+
+			initialHash := deployment.Annotations[keyPrefix+"/specHash"]
+			Expect(initialHash).NotTo(BeEmpty())
+
+			By("Updating the configuration map")
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			instance.Spec.Configuration = map[string]string{
+				"access.control.allow.origin": "*",
+				"authentication.realm":        "Basic",
+				"debug":                       "false",
+			}
+			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+
+			By("Reconciling again to trigger a deployment update")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking the spec hash changed")
+			Eventually(func() string {
+				updated := &appsv1.Deployment{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, updated); err != nil {
+					return ""
+				}
+				return updated.Annotations[keyPrefix+"/specHash"]
+			}, time.Minute, time.Second).ShouldNot(Equal(initialHash))
+		})
+	})
 })
