@@ -50,7 +50,8 @@ type StrimziSchemaRegistryReconciler struct {
 	Recorder recorder.EventRecorder
 }
 
-const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
+const finalizer = "strimziregistryoperator.randsw.code/finalizer"
+const legacyFinalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
 const keyPrefix = "strimziregistryoperator.randsw.code"
 const CAVersionKey = keyPrefix + "/caSecretVersion"
 const userVersionKey = keyPrefix + "/clientSecretVersion"
@@ -110,15 +111,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	// re-triggers this reconcile forever because the controller watches its
 	// own CR via For().
 	origStatus := instance.Status.DeepCopy()
-	// Add finalizer for metrics
-	if !controllerutil.ContainsFinalizer(instance, finalizer) {
-		logger.V(1).Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
-		controllerutil.AddFinalizer(instance, finalizer)
-		if err = r.Update(ctx, instance); err != nil {
-			logger.Error(err, "Failed to update custom resource to add finalizer")
-			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-			return ctrl.Result{}, err
-		}
+	// Migrate the finalizer from the legacy value to the current value, adding
+	// or removing finalizers in a single update so existing objects do not end
+	// up with a dangling legacy finalizer.
+	if err = r.migrateFinalizer(ctx, instance, logger); err != nil {
+		logger.Error(err, "Failed to migrate finalizer")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		return ctrl.Result{}, err
 	}
 	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
 	if isApplicationMarkedToBeDeleted {
@@ -682,6 +681,30 @@ func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregist
 
 func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
 	monitoring.StrimziSchemaRegistryCurrentInstanceCount.Dec()
+}
+
+// migrateFinalizer ensures the object carries the current finalizer and drops
+// the legacy finalizer. When nothing changes it performs no write, avoiding a
+// reconcile hot loop. The legacy->current swap happens in a single update.
+func (r *StrimziSchemaRegistryReconciler) migrateFinalizer(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+) error {
+	changed := false
+	if controllerutil.ContainsFinalizer(instance, legacyFinalizer) {
+		controllerutil.RemoveFinalizer(instance, legacyFinalizer)
+		changed = true
+	}
+	if !controllerutil.ContainsFinalizer(instance, finalizer) {
+		controllerutil.AddFinalizer(instance, finalizer)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	logger.V(1).Info("Migrating finalizers", "Finalizers", instance.Finalizers)
+	return r.Update(ctx, instance)
 }
 
 // emitConfigOverriddenEvents records a Warning event for each spec.configuration
