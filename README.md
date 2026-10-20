@@ -259,6 +259,60 @@ spec:
 
 - `template` is a standart Kubernetes template for pod. you can configure it as you want according to the [pod specification](https://dev-k8sref-io.web.app/docs/workloads/podtemplate-v1/)
 
+### Arbitrary Schema Registry configuration
+
+Use `spec.configuration` to pass arbitrary Confluent Schema Registry properties
+that are not exposed as dedicated spec fields. Keys are the dotted Confluent
+property names and values are strings:
+
+```yaml
+spec:
+  # ...
+  configuration:
+    access.control.allow.origin: "*"
+    authentication.realm: "Basic"
+    debug: "true"
+```
+
+Each key is converted into a `SCHEMA_REGISTRY_*` environment variable with these
+rules:
+
+- The key is uppercased.
+- `.` becomes `_`.
+- `-` becomes `_`.
+- The result is prefixed with `SCHEMA_REGISTRY_`.
+
+Examples:
+
+| Confluent property            | Environment variable                              |
+|-------------------------------|---------------------------------------------------|
+| `access.control.allow.origin` | `SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_ORIGIN`      |
+| `authentication.realm`        | `SCHEMA_REGISTRY_AUTHENTICATION_REALM`             |
+| `debug`                       | `SCHEMA_REGISTRY_DEBUG`                            |
+| `kafkastore.timeout.ms`       | `SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS`            |
+
+The following keys are operator-managed and are **ignored** when supplied through
+`spec.configuration` (their managed value wins). Each overridden key is logged
+and surfaced as a `Warning` event (`ConfigKeyOverridden`) on the CR; reconciliation
+still succeeds.
+
+| Reserved key                               | Operator-managed setting                                    |
+|--------------------------------------------|-------------------------------------------------------------|
+| `kafkastore.bootstrap.servers`             | Kafka bootstrap servers (from the Strimzi listener)         |
+| `kafkastore.security.protocol`             | `spec.securityprotocol`                                     |
+| `listeners`                                | REST listener (`http`/`https` based on `spec.securehttp`)   |
+| `host.name`                                | Pod IP                                                      |
+| `kafkastore.topic`                         | `spec.kafkastoretopic`                                      |
+| `schema.registry.group.id`                 | `spec.schemaregistrygroupid`                                |
+| `master.eligibility`                       | `spec.mastereligibility`                                    |
+| `schema.compatibility.level`               | `spec.compatibilitylevel`                                   |
+| `heap.opts`                                | `spec.heapopts`                                             |
+| `schema.registry.inter.instance.protocol`  | Derived from `spec.securehttp`                              |
+| `kafkastore.ssl.*`                         | KafkaStore TLS keystore/truststore                          |
+| `kafkastore.sasl.*`                        | KafkaStore SASL (SCRAM) credentials                         |
+| `ssl.keystore.*`                           | REST API TLS keystore                                       |
+| `ssl.key.password`                         | REST API TLS key password                                   |
+
 ### In detail: listener configuration
 
 The `spec.listener` field in the `StrimziSchemaRegistry` resource specifies the Kafka broker listener that the Schema Registry uses.
