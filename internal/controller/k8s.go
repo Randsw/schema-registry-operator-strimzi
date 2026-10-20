@@ -109,6 +109,20 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		}
 	}
 
+	// REST API mutual TLS requires a cluster-CA truststore. When the Kafka auth
+	// mode does not already produce one (PLAINTEXT/SASL_PLAINTEXT), build it now
+	// so the deployment can mount it.
+	if clientAuthNeedsTruststoreSecret(instance, auth) {
+		clientAuthSecret, _, err := r.ensureClientAuthTruststoreSecret(instance, ctx, logger, kafkaClusterName)
+		if err != nil {
+			logger.Error(err, "Failed to ensure client-auth truststore secret")
+			return nil, err
+		}
+		if clientAuthSecret != nil {
+			jksResourceVersion = clientAuthSecret.ResourceVersion
+		}
+	}
+
 	// Schema Registry REST API TLS secret
 	var TLSSecretName string
 	if instance.Spec.SecureHTTP {
@@ -472,6 +486,22 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
 	}
 
+	// REST API mutual TLS: require client certificates signed by the cluster CA.
+	if instance.Spec.ClientAuth && instance.Spec.SecureHTTP {
+		podEnv = append(podEnv,
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_CLIENT_AUTH", Value: "true"},
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"},
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+				SecretKeyRef: &v1.SecretKeySelector{
+					LocalObjectReference: v1.LocalObjectReference{
+						Name: instance.Name + jksSecretSuffix,
+					},
+					Key: "truststore_password",
+				},
+			}},
+		)
+	}
+
 	podEnv, overridden := appendConfigurationEnv(podEnv, instance.Spec.Configuration)
 	return podEnv, overridden
 }
@@ -482,9 +512,10 @@ func buildPodVolumes(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 	var containerVolumeMount []v1.VolumeMount
 	var podVolume []v1.Volume
 
-	// KafkaStore JKS secret volume is only needed when TLS transport or mTLS
-	// keystore material is required (SSL and SASL_SSL).
-	if auth.NeedsTruststore || auth.NeedsKeystore {
+	// KafkaStore JKS secret volume is needed when TLS transport or mTLS
+	// keystore material is required (SSL and SASL_SSL), and also when REST API
+	// mutual TLS is enabled (the cluster-CA truststore is reused for it).
+	if auth.NeedsTruststore || auth.NeedsKeystore || (instance.Spec.ClientAuth && instance.Spec.SecureHTTP) {
 		containerVolumeMount = append(containerVolumeMount, v1.VolumeMount{
 			Name:      "tls",
 			MountPath: "/var/schemaregistry",
@@ -590,6 +621,13 @@ func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe,
 	return readinessProbe, livenessProbe, startupProbe
 }
 
+// clientAuthNeedsTruststoreSecret reports whether REST API mutual TLS requires
+// an operator-managed cluster-CA truststore secret that is not already produced
+// for the Kafka auth mode (i.e. PLAINTEXT and SASL_PLAINTEXT).
+func clientAuthNeedsTruststoreSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, auth kafkaAuth) bool {
+	return instance.Spec.ClientAuth && instance.Spec.SecureHTTP && !auth.NeedsTruststore
+}
+
 func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger) (string, string, error) {
 	// Get Kafka cluster name from the StrimziSchemaRegistry labels. This keeps
@@ -640,7 +678,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 		logger.V(1).Info("No JKS secret is required for the selected auth mode", "SecurityProtocol", auth.Protocol)
 		return nil, false, nil
 	case authSASLSSL:
-		return r.createSASLTruststoreSecret(instance, ctx, logger, clusterName, clusterCASecret)
+		return r.createTruststoreSecret(instance, ctx, logger, clusterName, clusterCASecret)
 	default:
 		return r.createMTLSSecret(instance, ctx, logger, clusterName, clusterCASecret, userCASecret)
 	}
@@ -802,11 +840,12 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 	return jks_secret, true, nil
 }
 
-// createSASLTruststoreSecret creates or returns an up-to-date JKS secret
-// containing only the truststore (built from the cluster CA) for SASL_SSL.
-func (r *StrimziSchemaRegistryReconciler) createSASLTruststoreSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+// createTruststoreSecret creates or returns an up-to-date JKS secret
+// containing only the truststore (built from the cluster CA). It is used for
+// SASL_SSL and for REST API mutual TLS in PLAINTEXT/SASL_PLAINTEXT modes.
+func (r *StrimziSchemaRegistryReconciler) createTruststoreSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret) (*v1.Secret, bool, error) {
-	logger.Info("Creating truststore secret for schema registry Kafkastore SASL_SSL")
+	logger.Info("Creating truststore secret for schema registry")
 
 	clusterSecret, err := r.getClusterCASecret(instance, ctx, logger, clusterName, clusterCASecret)
 	if err != nil {
@@ -855,6 +894,30 @@ func (r *StrimziSchemaRegistryReconciler) createSASLTruststoreSecret(instance *s
 		return nil, false, err
 	}
 	return jks_secret, true, nil
+}
+
+// ensureClientAuthTruststoreSecret ensures an operator-managed cluster-CA
+// truststore secret exists for REST API mutual TLS. It is used when the Kafka
+// auth mode does not already produce a truststore secret (PLAINTEXT and
+// SASL_PLAINTEXT). It returns the secret and whether it was newly created.
+func (r *StrimziSchemaRegistryReconciler) ensureClientAuthTruststoreSecret(
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context,
+	logger logr.Logger,
+	clusterName string,
+) (*v1.Secret, bool, error) {
+	secret, created, err := r.createTruststoreSecret(instance, ctx, logger, clusterName, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if !created {
+		return secret, false, nil
+	}
+	if err := r.Create(ctx, secret); err != nil {
+		logger.Error(err, "Failed to create client-auth truststore secret")
+		return nil, false, err
+	}
+	return secret, true, nil
 }
 
 func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger logr.Logger) (*v1.Service, error) {
@@ -978,10 +1041,10 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 }
 
 // computeSpecHash computes a hash of the relevant spec fields to detect changes.
-// The hash covers CompatibilityLevel, SecureHTTP, HeapOpts, Listener, SecurityProtocol,
-// TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor, SchemaRegistryGroupID,
-// MasterEligibility, Configuration, and the full PodTemplateSpec — all fields that affect
-// the deployment spec or service ports.
+// The hash covers CompatibilityLevel, SecureHTTP, ClientAuth, HeapOpts, Listener,
+// SecurityProtocol, TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor,
+// SchemaRegistryGroupID, MasterEligibility, Configuration, and the full PodTemplateSpec —
+// all fields that affect the deployment spec or service ports.
 func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
 	h := fnv.New32a()
 
@@ -991,6 +1054,10 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 
 	if _, err := fmt.Fprintf(h, "%t", instance.Spec.SecureHTTP); err != nil {
 		return "", fmt.Errorf("failed to write SecureHTTP to hash: %w", err)
+	}
+
+	if _, err := fmt.Fprintf(h, "%t", instance.Spec.ClientAuth); err != nil {
+		return "", fmt.Errorf("failed to write ClientAuth to hash: %w", err)
 	}
 
 	if _, err := io.WriteString(h, instance.Spec.HeapOpts); err != nil {
@@ -1089,7 +1156,7 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	// Read the existing JKS secret ResourceVersion only when TLS material is
 	// required (read-only, no side effects).
 	jksResourceVersion := ""
-	if auth.NeedsTruststore || auth.NeedsKeystore {
+	if auth.NeedsTruststore || auth.NeedsKeystore || clientAuthNeedsTruststoreSecret(instance, auth) {
 		existingJKS := &v1.Secret{}
 		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, existingJKS)
 		if err != nil && !errors.IsNotFound(err) {
