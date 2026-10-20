@@ -42,6 +42,10 @@ spec:
                 - full
                 - full_transitive
                 type: string
+              configuration:
+                additionalProperties:
+                  type: string
+                type: object
               heapopts:
                 pattern: ^(-Xms[a-fA-F0-9]+(m|M|g|G) -Xmx[a-fA-F0-9]+(m|M|g|G))?$
                 type: string
