@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -142,7 +143,13 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		}
 	}
 
-	return r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
+	dep, configOverridden, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
+	if err != nil {
+		logger.Error(err, "Failed to build deployment spec")
+		return nil, err
+	}
+	r.emitConfigOverriddenEvents(instance, configOverridden)
+	return dep, nil
 }
 
 // buildDeploymentSpec builds the Deployment spec from the CR spec and pre-fetched external inputs.
@@ -158,15 +165,15 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	TLSSecretName string,
 	auth kafkaAuth,
 	logger logr.Logger,
-) (*apps.Deployment, error) {
+) (*apps.Deployment, []string, error) {
 	podSpec := instance.Spec.Template
 	// Validate that at least one container exists
 	if len(podSpec.Spec.Containers) == 0 {
-		return nil, fmt.Errorf("template must contain at least one container")
+		return nil, nil, fmt.Errorf("template must contain at least one container")
 	}
 
 	// Build pod environment, volumes, and probes
-	podEnv := buildPodEnv(instance, kafkaBootstrapServer, TLSSecretName, auth)
+	podEnv, configOverridden := buildPodEnv(instance, kafkaBootstrapServer, TLSSecretName, auth)
 	podVolume, containerVolumeMount := buildPodVolumes(instance, TLSSecretName, auth)
 
 	listenerPort, scheme := listenerPortAndScheme(instance)
@@ -211,7 +218,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	specHash, err := computeSpecHash(instance)
 	if err != nil {
 		logger.Error(err, "Failed to calculate CR spec hash")
-		return nil, err
+		return nil, nil, err
 	}
 	podSpec.Annotations[keyPrefix+"/specHash"] = specHash
 
@@ -235,9 +242,9 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	err = ctrl.SetControllerReference(instance, dep, r.Scheme)
 	if err != nil {
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
-		return nil, err
+		return nil, nil, err
 	}
-	return dep, nil
+	return dep, configOverridden, nil
 }
 
 // listenerPortAndScheme returns the container port and URI scheme based on SecureHTTP.
@@ -248,8 +255,93 @@ func listenerPortAndScheme(instance *strimziregistryoperatorv1alpha1.StrimziSche
 	return 8081, v1.URISchemeHTTP
 }
 
-// buildPodEnv constructs the environment variables for the Schema Registry container.
-func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, kafkaBootstrapServer, TLSSecretName string, auth kafkaAuth) []v1.EnvVar {
+// confluentPropertyToEnvName converts a Confluent Schema Registry property key
+// into the SCHEMA_REGISTRY_* environment variable name. Dots and dashes become
+// underscores and the result is uppercased.
+func confluentPropertyToEnvName(key string) string {
+	return "SCHEMA_REGISTRY_" + confluentPropertyEnvReplacer.Replace(strings.ToUpper(key))
+}
+
+var confluentPropertyEnvReplacer = strings.NewReplacer(".", "_", "-", "_")
+
+// reservedConfigurationKeys are Confluent Schema Registry properties managed by
+// the operator and therefore not settable through spec.configuration.
+var reservedConfigurationKeys = map[string]struct{}{
+	"kafkastore.bootstrap.servers":            {},
+	"kafkastore.security.protocol":            {},
+	"listeners":                               {},
+	"host.name":                               {},
+	"kafkastore.topic":                        {},
+	"schema.registry.group.id":                {},
+	"master.eligibility":                      {},
+	"schema.compatibility.level":              {},
+	"heap.opts":                               {},
+	"schema.registry.inter.instance.protocol": {},
+	"ssl.key.password":                        {},
+}
+
+// reservedConfigurationPrefixes are property key prefixes managed by the operator.
+var reservedConfigurationPrefixes = []string{
+	"kafkastore.ssl.",
+	"kafkastore.sasl.",
+	"ssl.keystore.",
+}
+
+// isReservedConfigurationKey reports whether the given Confluent property key is
+// operator-managed and must be ignored when supplied through spec.configuration.
+func isReservedConfigurationKey(key string) bool {
+	if _, ok := reservedConfigurationKeys[key]; ok {
+		return true
+	}
+	for _, prefix := range reservedConfigurationPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// sortedConfigurationKeys returns the keys of configuration in sorted order so
+// rendering and hashing are deterministic.
+func sortedConfigurationKeys(configuration map[string]string) []string {
+	keys := make([]string, 0, len(configuration))
+	for key := range configuration {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// appendConfigurationEnv appends user-supplied configuration properties as
+// SCHEMA_REGISTRY_* env vars. Reserved keys and keys whose converted env name
+// collides with an operator-managed env var are skipped. It returns the updated
+// env slice and the list of skipped keys in deterministic sorted order.
+func appendConfigurationEnv(podEnv []v1.EnvVar, configuration map[string]string) ([]v1.EnvVar, []string) {
+	managed := make(map[string]struct{}, len(podEnv))
+	for _, env := range podEnv {
+		managed[env.Name] = struct{}{}
+	}
+
+	var overridden []string
+	for _, key := range sortedConfigurationKeys(configuration) {
+		envName := confluentPropertyToEnvName(key)
+		if isReservedConfigurationKey(key) {
+			overridden = append(overridden, key)
+			continue
+		}
+		if _, exists := managed[envName]; exists {
+			overridden = append(overridden, key)
+			continue
+		}
+		podEnv = append(podEnv, v1.EnvVar{Name: envName, Value: configuration[key]})
+	}
+	return podEnv, overridden
+}
+
+// buildPodEnv constructs the environment variables for the Schema Registry
+// container and returns them along with the spec.configuration keys that were
+// skipped because they are operator-managed.
+func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, kafkaBootstrapServer, TLSSecretName string, auth kafkaAuth) ([]v1.EnvVar, []string) {
 	podEnv := []v1.EnvVar{
 		{Name: "SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", Value: kafkaBootstrapServer},
 		{Name: "SCHEMA_REGISTRY_HOST_NAME", ValueFrom: &v1.EnvVarSource{
@@ -380,7 +472,8 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
 	}
 
-	return podEnv
+	podEnv, overridden := appendConfigurationEnv(podEnv, instance.Spec.Configuration)
+	return podEnv, overridden
 }
 
 // buildPodVolumes constructs the volumes and volume mounts for the deployment.
@@ -887,7 +980,8 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 // computeSpecHash computes a hash of the relevant spec fields to detect changes.
 // The hash covers CompatibilityLevel, SecureHTTP, HeapOpts, Listener, SecurityProtocol,
 // TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor, SchemaRegistryGroupID,
-// MasterEligibility, and the full PodTemplateSpec — all fields that affect the deployment spec or service ports.
+// MasterEligibility, Configuration, and the full PodTemplateSpec — all fields that affect
+// the deployment spec or service ports.
 func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
 	h := fnv.New32a()
 
@@ -945,6 +1039,14 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 	}
 	if _, err := fmt.Fprintf(h, "%t", masterEligibility); err != nil {
 		return "", fmt.Errorf("failed to write MasterEligibility to hash: %w", err)
+	}
+
+	// Configuration entries are hashed in sorted key order so the hash is
+	// deterministic regardless of map iteration order.
+	for _, key := range sortedConfigurationKeys(instance.Spec.Configuration) {
+		if _, err := fmt.Fprintf(h, "%s=%s", key, instance.Spec.Configuration[key]); err != nil {
+			return "", fmt.Errorf("failed to write configuration entry to hash: %w", err)
+		}
 	}
 
 	// Include the full PodTemplateSpec so that container image, resources,
@@ -1019,10 +1121,11 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	}
 
 	// Generate desired deployment spec — NO side effects (no secret creation/deletion)
-	desired, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
+	desired, configOverridden, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
 	if err != nil {
 		return nil, false, err
 	}
+	r.emitConfigOverriddenEvents(instance, configOverridden)
 
 	// Compute desired spec hash
 	desiredHash, err := computeSpecHash(instance)
