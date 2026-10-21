@@ -1,6 +1,7 @@
 # Default values for cascadeAutoOperator.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
+# dummy change to trigger helm chart workflow
 
 replicaCount: 1
 
