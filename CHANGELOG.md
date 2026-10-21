@@ -1,3 +1,51 @@
+## [1.11.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.10.1...1.11.0) (2026-10-21)
+
+
+### 📔 Docs
+
+* document arbitrary configuration field ([7af6e05](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7af6e05beeaf66004a2367b3d6eaec24b0625d0f))
+* document clientauth and REST BASIC/RBAC auth ([ee4750e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ee4750ef1eb0b01b172bb7fbe1475d8f6d012b30))
+* document storage and identity parameters ([6233eec](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6233eecc6db9b0cebab4fda511e24f11d5fb31d3))
+* observability and single-replica notes ([6ebc4bc](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6ebc4bcdfc20cd025988c3ba0937cd8d7455c778))
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump github.com/scholzj/strimzi-go from 0.11.0 to 0.12.0 ([bb52453](https://github.com/Randsw/schema-registry-operator-strimzi/commit/bb52453c481be4357a0ac0661a7ffc039dd89618))
+* **deps:** Bump software.sslmate.com/src/go-pkcs12 from 0.7.3 to 0.7.4 ([6a2b8d2](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6a2b8d2313341d0c191f8d8625694fcba9f1f2ed))
+
+
+### 🧪 Tests
+
+* cover clientauth rendering, validation and truststore ([9aa30d4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9aa30d440aa948d513bf9c25cc8efe7fb1b123a6))
+* cover configuration rendering and hashing ([6ddb83a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6ddb83ac94765ec5cec80f86f04f09d849148a24))
+* cover phase 4 observability and polish ([973edf9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/973edf99bc25521e8e2709ee78675187ec4261eb))
+* cover storage and identity parameter wiring ([43100cb](https://github.com/Randsw/schema-registry-operator-strimzi/commit/43100cbca222f09070b7b9ef3b1c0c62b37111ce))
+
+
+### 🚀 Features
+
+* regenerate CRD manifests and sync helm chart ([0d7e44f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0d7e44f7706ef2e5d390c65ef5455e75a0603959))
+* regenerate CRD manifests and sync helm chart ([c07dbce](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c07dbce9bbb501f6a029c744106c78c0c800a30b))
+* regenerate CRD manifests and sync helm chart ([604ae6a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/604ae6aff734eeab0366eec3a776bd4ff9603322))
+* regenerate CRD manifests and sync helm chart ([1899f90](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1899f90a2713d12b00263b7811ebf8ae3a89b2f3))
+* **api:** add clientauth field ([2db70c2](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2db70c29cf70a5b07a921c2be1eb3142749cc82b))
+* **api:** add configuration map field ([7ba7b30](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7ba7b301df3c823408ecf5bdc90e33adb2ac7376))
+* **api:** add service passthrough and networkpolicy spec fields ([6c6dacc](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6c6dacca509eb7dd7daedb37d179ea5fe5fdedd8))
+* **api:** add storage and identity spec fields ([72dce6b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/72dce6bb8ffb0529441dc6f7f25f3d1fecbdf4f0))
+* **controller:** validate clientauth and rotate REST truststore ([7f1057b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7f1057bb4e28eacea9bb79c997e1a1022c954144))
+* **k8s:** render arbitrary configuration with reserved-key protection ([778046a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/778046a140e630d2994e21b269c1b7eb02870ac2))
+* **k8s:** render REST mTLS with clientauth ([a5d9857](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a5d9857e950012afa21488f28283f2d3cb72f0e0))
+* **k8s:** render service annotations/labels and networkpolicy ([eee2ce9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/eee2ce99c5541e187c912ad99d8ce6d2a4bf8652))
+* **k8s:** wire storage/identity params into pod env and spec hash ([0fcc916](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0fcc916fae2ebba4c635c7ef35710123e22aadb6))
+
+
+### 🛠 Fixes
+
+* bump app and helm chart versions in a single semantic-release commit ([0159184](https://github.com/Randsw/schema-registry-operator-strimzi/commit/015918430c141439c7317c91932ec230b986e00c))
+* trigger app and helm chart version bump verification ([7ce029f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7ce029fbf399216662b04ac49ad1ebdb490e0a52))
+* **controller:** rename finalizer with migration ([2424a98](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2424a98beb644434052c8765f07209d15d027cbd))
+
 ## [1.10.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.10.0...1.10.1) (2026-10-19)
 
 
