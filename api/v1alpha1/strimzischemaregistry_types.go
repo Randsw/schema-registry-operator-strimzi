@@ -100,7 +100,35 @@ type StrimziSchemaRegistrySpec struct {
 	// +optional
 	Configuration map[string]string `json:"configuration,omitempty"`
 
+	// Service configures the Kubernetes Service created for Schema Registry.
+	// Annotations and labels are passed through to the managed Service so users
+	// can expose custom metadata (e.g. Prometheus scraping annotations).
+	// +optional
+	Service *Service `json:"service,omitempty"`
+
+	// NetworkPolicy configures the NetworkPolicy created for Schema Registry pods.
+	// +optional
+	NetworkPolicy *NetworkPolicy `json:"networkpolicy,omitempty"`
+
 	Template corev1.PodTemplateSpec `json:"template"`
+}
+
+// Service configures the Kubernetes Service created for Schema Registry.
+type Service struct {
+	// Annotations are added to the managed Service's metadata.annotations.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Labels are added to the managed Service's metadata.labels.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// NetworkPolicy configures the NetworkPolicy created for Schema Registry pods.
+type NetworkPolicy struct {
+	// Enabled toggles creation of the NetworkPolicy for Schema Registry pods.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
 }
 
 // StrimziSchemaRegistryStatus defines the observed state of StrimziSchemaRegistry

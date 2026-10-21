@@ -28,6 +28,7 @@ import (
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/utils/ptr"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -2947,6 +2948,112 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				}
 				return updated.Annotations[keyPrefix+"/specHash"]
 			}, time.Minute, time.Second).ShouldNot(Equal(initialHash))
+		})
+	})
+
+	// Phase 4: service passthrough and NetworkPolicy reconciliation.
+	Context("When reconciling with service passthrough and networkpolicy", func() {
+		const SchemaRegistryName = "test-service-networkpolicy"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		BeforeEach(func() {
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = &kafka.KafkaStatus{
+				ClusterId: "service-networkpolicy-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.svc-networkpolicy.svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					Service: &strimziregistryoperatorv1alpha1.Service{
+						Annotations: map[string]string{"prometheus.io/scrape": "true"},
+						Labels:      map[string]string{"monitoring.example.com/team": "schemas"},
+					},
+					NetworkPolicy: &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true},
+					Template:      corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should create the service with passthrough metadata and a NetworkPolicy", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("Reconciling until the deployment, service, and NetworkPolicy are created")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking the service carries the passthrough annotations and labels")
+			Eventually(func() error {
+				svc := &corev1.Service{}
+				return k8sClient.Get(ctx, typeNamespacedName, svc)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			svc := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, svc)).To(Succeed())
+			Expect(svc.Annotations["prometheus.io/scrape"]).To(Equal("true"))
+			Expect(svc.Labels["monitoring.example.com/team"]).To(Equal("schemas"))
+
+			By("Checking the NetworkPolicy was created with ingress and egress rules")
+			Eventually(func() error {
+				np := &networkingv1.NetworkPolicy{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-network-policy", Namespace: SchemaRegistryName}, np)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			np := &networkingv1.NetworkPolicy{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-network-policy", Namespace: SchemaRegistryName}, np)).To(Succeed())
+			Expect(np.Spec.Ingress).To(HaveLen(1))
+			Expect(np.Spec.Ingress[0].Ports).To(HaveLen(1))
+			Expect(np.Spec.Ingress[0].Ports[0].Port.IntVal).To(Equal(int32(8081)))
+			Expect(np.Spec.Egress).To(HaveLen(1))
+			Expect(np.Spec.Egress[0].To).To(HaveLen(1))
+			Expect(np.Spec.Egress[0].To[0].PodSelector.MatchLabels["strimzi.io/cluster"]).To(Equal("kafka-cluster"))
 		})
 	})
 

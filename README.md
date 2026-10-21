@@ -22,7 +22,7 @@
 ***
 [Strimzi](https://strimzi.io/) is one of the best and easiest way to deploy [Kafka](https://kafka.apache.org/) cluster on Kubernetes. It provides a simple way of managing users, topics, security, etc.
 
-[Confluent Schema Registry](https://docs.confluent.io/platform/6.2/schema-registry/index.html) provides a serving layer for your metadata. It provides a RESTful interface for storing and retrieving your Avro®, JSON Schema, and Protobuf schemas.
+[Confluent Schema Registry](https://docs.confluent.io/platform/current/schema-registry/index.html) provides a serving layer for your metadata. It provides a RESTful interface for storing and retrieving your Avro®, JSON Schema, and Protobuf schemas.
 
 It is an application that resides outside your Kafka cluster and handles the distribution of schemas to producers and consumers by storing a copy of the schema in its storage.
 
@@ -202,7 +202,7 @@ spec:
   The ["In-detail: listener configuration"](#in-detail-listener-configuration) section, below, explains this in more detail.
   See also: Schema Registry [listeners](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#listeners) docs.
 
-- `securityProtocol` is the security protocol for the Schema Registry to communicate with Kafka. Default is `SSL`. The authentication method is auto-detected from the referenced `KafkaUser` (`spec.authentication.type`). Supported values:
+- `securityprotocol` is the security protocol for the Schema Registry to communicate with Kafka. Default is `SSL`. The authentication method is auto-detected from the referenced `KafkaUser` (`spec.authentication.type`). Supported values:
   
   - `SSL` — TLS transport with mTLS (client certificates). Requires a `KafkaUser` with `authentication.type: tls`. The operator builds a keystore and truststore from the KafkaUser secret.
   - `SASL_SSL` — TLS transport with SCRAM-SHA-512 authentication. Requires a `KafkaUser` with `authentication.type: scram-sha-512`. The operator builds only a truststore and reads the SCRAM credentials directly from the KafkaUser secret.
@@ -220,6 +220,11 @@ spec:
   - `forward_transitive`
   - `full`
   - `full_transitive`
+
+  > **Note**
+  > The operator deliberately defaults `compatibilitylevel` to `forward`. This
+  > diverges from Confluent's own default of `backward`; set `compatibilitylevel`
+  > explicitly if you need Confluent's default behavior.
 
   See also: Schema Registry [schema.compatibility.level](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#schema-compatibility-level) docs.
 
@@ -267,6 +272,40 @@ spec:
   See also: Schema Registry [master.eligibility](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#master-eligibility) docs.
 
 - `template` is a standart Kubernetes template for pod. you can configure it as you want according to the [pod specification](https://dev-k8sref-io.web.app/docs/workloads/podtemplate-v1/)
+
+- `service.annotations` and `service.labels` are passed through to the managed Kubernetes Service.
+  They are useful for exposing custom metadata such as Prometheus scraping annotations (`prometheus.io/scrape`),
+  without editing the Service by hand. The operator always preserves its own `type` annotation and merges
+  the CR labels into the Service.
+
+  ```yaml
+  spec:
+    # ...
+    service:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+      labels:
+        monitoring.example.com/team: schemas
+  ```
+
+- `networkpolicy.enabled` (default `false`) creates a `NetworkPolicy` for the Schema Registry pods.
+  When enabled, the policy allows ingress on the Schema Registry listener port from within the namespace
+  and egress to the Kafka bootstrap service. Enable it to restrict pod traffic in namespaces that enforce
+  a default-deny policy.
+
+  ```yaml
+  spec:
+    # ...
+    networkpolicy:
+      enabled: true
+  ```
+
+### Single replica support
+
+Only a **single replica** is supported. Running multiple replicas with `securehttp: true` is not supported
+because the generated REST TLS certificate SANs are DNS-only (the Service DNS name) while the Schema Registry
+`host.name` is set to the pod IP, so inter-instance HTTPS forwarding between replicas breaks.
 
 ### Arbitrary Schema Registry configuration
 

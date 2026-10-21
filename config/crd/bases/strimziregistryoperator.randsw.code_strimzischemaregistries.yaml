@@ -68,6 +68,14 @@ spec:
               mastereligibility:
                 default: true
                 type: boolean
+              networkpolicy:
+                properties:
+                  enabled:
+                    default: false
+                    type: boolean
+                required:
+                - enabled
+                type: object
               schemaregistrygroupid:
                 default: schema-registry
                 type: string
@@ -81,6 +89,17 @@ spec:
                 - PLAINTEXT
                 - SASL_PLAINTEXT
                 type: string
+              service:
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    type: object
+                type: object
               template:
                 properties:
                   metadata:

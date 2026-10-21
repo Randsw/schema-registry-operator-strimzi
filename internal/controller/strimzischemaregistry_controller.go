@@ -50,7 +50,8 @@ type StrimziSchemaRegistryReconciler struct {
 	Recorder recorder.EventRecorder
 }
 
-const finalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
+const finalizer = "strimziregistryoperator.randsw.code/finalizer"
+const legacyFinalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
 const keyPrefix = "strimziregistryoperator.randsw.code"
 const CAVersionKey = keyPrefix + "/caSecretVersion"
 const userVersionKey = keyPrefix + "/clientSecretVersion"
@@ -91,6 +92,7 @@ func clientAuthValidationError(instance *strimziregistryoperatorv1alpha1.Strimzi
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -119,15 +121,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	// re-triggers this reconcile forever because the controller watches its
 	// own CR via For().
 	origStatus := instance.Status.DeepCopy()
-	// Add finalizer for metrics
-	if !controllerutil.ContainsFinalizer(instance, finalizer) {
-		logger.V(1).Info("Adding Finalizer for StrimziSchemaRegistry for correct metrics calculation")
-		controllerutil.AddFinalizer(instance, finalizer)
-		if err = r.Update(ctx, instance); err != nil {
-			logger.Error(err, "Failed to update custom resource to add finalizer")
-			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-			return ctrl.Result{}, err
-		}
+	// Migrate the finalizer from the legacy value to the current value, adding
+	// or removing finalizers in a single update so existing objects do not end
+	// up with a dangling legacy finalizer.
+	if err = r.migrateFinalizer(ctx, instance, logger); err != nil {
+		logger.Error(err, "Failed to migrate finalizer")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		return ctrl.Result{}, err
 	}
 	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
 	if isApplicationMarkedToBeDeleted {
@@ -289,7 +289,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// Compare service ports to detect changes
+	// Compare service ports, labels, and annotations to detect changes.
 	serviceChanged := false
 	if len(foundSvc.Spec.Ports) != len(desiredSvc.Spec.Ports) {
 		serviceChanged = true
@@ -304,15 +304,19 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			}
 		}
 	}
+	if !equality.Semantic.DeepEqual(foundSvc.Labels, desiredSvc.Labels) {
+		serviceChanged = true
+	}
+	if !equality.Semantic.DeepEqual(foundSvc.Annotations, desiredSvc.Annotations) {
+		serviceChanged = true
+	}
 
 	if serviceChanged {
-		logger.Info("Service ports changed, updating service",
+		logger.Info("Service changed, updating service",
 			"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
 		foundSvc.Spec.Ports = desiredSvc.Spec.Ports
-		if foundSvc.Annotations == nil {
-			foundSvc.Annotations = make(map[string]string)
-		}
-		foundSvc.Annotations["type"] = desiredSvc.Spec.Ports[0].Name
+		foundSvc.Labels = desiredSvc.Labels
+		foundSvc.Annotations = desiredSvc.Annotations
 		err = r.Update(ctx, foundSvc)
 		if err != nil {
 			logger.Error(err, "Failed to update service after spec change")
@@ -321,6 +325,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	// Reconcile the optional NetworkPolicy for the Schema Registry pods.
+	if err = r.reconcileNetworkPolicy(ctx, instance, logger); err != nil {
+		logger.Error(err, "Failed to reconcile NetworkPolicy")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -758,6 +769,30 @@ func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregist
 
 func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
 	monitoring.StrimziSchemaRegistryCurrentInstanceCount.Dec()
+}
+
+// migrateFinalizer ensures the object carries the current finalizer and drops
+// the legacy finalizer. When nothing changes it performs no write, avoiding a
+// reconcile hot loop. The legacy->current swap happens in a single update.
+func (r *StrimziSchemaRegistryReconciler) migrateFinalizer(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+) error {
+	changed := false
+	if controllerutil.ContainsFinalizer(instance, legacyFinalizer) {
+		controllerutil.RemoveFinalizer(instance, legacyFinalizer)
+		changed = true
+	}
+	if !controllerutil.ContainsFinalizer(instance, finalizer) {
+		controllerutil.AddFinalizer(instance, finalizer)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	logger.V(1).Info("Migrating finalizers", "Finalizers", instance.Finalizers)
+	return r.Update(ctx, instance)
 }
 
 // emitConfigOverriddenEvents records a Warning event for each spec.configuration

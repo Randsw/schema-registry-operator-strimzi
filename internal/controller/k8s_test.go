@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -777,6 +778,219 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 		assertQuantity(t, res.Limits[corev1.ResourceCPU], "1000m")
 		assertQuantity(t, res.Limits[corev1.ResourceMemory], "1Gi")
 	})
+}
+
+func TestCreateServicePassthrough(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+
+	inst := newTestInstance()
+	inst.Labels = map[string]string{"strimzi.io/cluster": "kafka-cluster"}
+	inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+		Annotations: map[string]string{"prometheus.io/scrape": "true"},
+		Labels:      map[string]string{"monitoring.example.com/team": "schemas"},
+	}
+
+	svc, err := reconciler.createService(inst, logr.Logger{})
+	if err != nil {
+		t.Fatalf("unexpected error creating service: %v", err)
+	}
+
+	if svc.Annotations["type"] != "http" {
+		t.Errorf("expected operator-managed type annotation 'http', got %q", svc.Annotations["type"])
+	}
+	if svc.Annotations["prometheus.io/scrape"] != "true" {
+		t.Errorf("expected passthrough annotation to be applied, got %v", svc.Annotations)
+	}
+	if svc.Labels["strimzi.io/cluster"] != "kafka-cluster" {
+		t.Errorf("expected CR labels to be preserved, got %v", svc.Labels)
+	}
+	if svc.Labels["monitoring.example.com/team"] != "schemas" {
+		t.Errorf("expected passthrough label to be applied, got %v", svc.Labels)
+	}
+}
+
+func TestComputeSpecHashServiceNetworkPolicy(t *testing.T) {
+	t.Run("different service annotations produce different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+			Annotations: map[string]string{"prometheus.io/scrape": "true"},
+		}
+		inst2 := newTestInstance()
+		inst2.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+			Annotations: map[string]string{"prometheus.io/scrape": "false"},
+		}
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different service annotations: both %q", hash1)
+		}
+	})
+
+	t.Run("different service labels produce different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "a"}}
+		inst2 := newTestInstance()
+		inst2.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "b"}}
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different service labels: both %q", hash1)
+		}
+	})
+
+	t.Run("networkpolicy enabled produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes when networkpolicy is enabled: both %q", hash1)
+		}
+	})
+}
+
+func TestBuildNetworkPolicy(t *testing.T) {
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = false
+
+	np, err := buildNetworkPolicy(inst, "kafka-cluster", "kafka-cluster-kafka-bootstrap.kafka.svc:9093")
+	if err != nil {
+		t.Fatalf("unexpected error building networkpolicy: %v", err)
+	}
+
+	if np.Name != "test-sr-network-policy" {
+		t.Errorf("expected name test-sr-network-policy, got %q", np.Name)
+	}
+	if np.Spec.PodSelector.MatchLabels["app"] != "test-sr" {
+		t.Errorf("expected pod selector app=test-sr, got %v", np.Spec.PodSelector.MatchLabels)
+	}
+	if len(np.Spec.PolicyTypes) != 2 {
+		t.Fatalf("expected Ingress and Egress policy types, got %v", np.Spec.PolicyTypes)
+	}
+	if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].Ports) != 1 {
+		t.Fatalf("expected a single ingress rule with one port, got %v", np.Spec.Ingress)
+	}
+	if np.Spec.Ingress[0].Ports[0].Port.IntVal != 8081 {
+		t.Errorf("expected ingress on SR listener port 8081, got %d", np.Spec.Ingress[0].Ports[0].Port.IntVal)
+	}
+	if len(np.Spec.Egress) != 1 || len(np.Spec.Egress[0].Ports) != 1 {
+		t.Fatalf("expected a single egress rule with one port, got %v", np.Spec.Egress)
+	}
+	if np.Spec.Egress[0].Ports[0].Port.IntVal != 9093 {
+		t.Errorf("expected egress to Kafka bootstrap port 9093, got %d", np.Spec.Egress[0].Ports[0].Port.IntVal)
+	}
+	if len(np.Spec.Egress[0].To) != 1 {
+		t.Fatalf("expected one egress peer, got %v", np.Spec.Egress[0].To)
+	}
+	if np.Spec.Egress[0].To[0].PodSelector.MatchLabels["strimzi.io/cluster"] != "kafka-cluster" {
+		t.Errorf("expected egress peer to target strimzi.io/cluster=kafka-cluster, got %v",
+			np.Spec.Egress[0].To[0].PodSelector.MatchLabels)
+	}
+}
+
+func TestPortFromBootstrapServer(t *testing.T) {
+	t.Run("valid host port", func(t *testing.T) {
+		port, err := portFromBootstrapServer("kafka-bootstrap.kafka.svc:9093")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if port != 9093 {
+			t.Errorf("expected 9093, got %d", port)
+		}
+	})
+
+	t.Run("missing port returns error", func(t *testing.T) {
+		if _, err := portFromBootstrapServer("kafka-bootstrap.kafka.svc"); err == nil {
+			t.Error("expected error for missing port")
+		}
+	})
+
+	t.Run("non-numeric port returns error", func(t *testing.T) {
+		if _, err := portFromBootstrapServer("kafka-bootstrap.kafka.svc:notaport"); err == nil {
+			t.Error("expected error for non-numeric port")
+		}
+	})
+}
+
+func TestMigrateFinalizer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+
+	t.Run("legacy removed and current added in one pass", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Finalizers = []string{legacyFinalizer}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		if err := reconciler.migrateFinalizer(context.Background(), inst, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		got := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: "test-sr", Namespace: "default"}, got); err != nil {
+			t.Fatalf("unexpected get error: %v", err)
+		}
+		if containsFinalizer(got.Finalizers, legacyFinalizer) {
+			t.Errorf("legacy finalizer should be removed, got %v", got.Finalizers)
+		}
+		if !containsFinalizer(got.Finalizers, finalizer) {
+			t.Errorf("current finalizer should be added, got %v", got.Finalizers)
+		}
+	})
+
+	t.Run("already migrated is a no-op", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Finalizers = []string{finalizer}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		if err := reconciler.migrateFinalizer(context.Background(), inst, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		got := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: "test-sr", Namespace: "default"}, got); err != nil {
+			t.Fatalf("unexpected get error: %v", err)
+		}
+		if len(got.Finalizers) != 1 || got.Finalizers[0] != finalizer {
+			t.Errorf("finalizers should be unchanged after idempotent migration, got %v", got.Finalizers)
+		}
+	})
+
+	t.Run("fresh object gets current finalizer", func(t *testing.T) {
+		inst := newTestInstance()
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		if err := reconciler.migrateFinalizer(context.Background(), inst, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		got := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: "test-sr", Namespace: "default"}, got); err != nil {
+			t.Fatalf("unexpected get error: %v", err)
+		}
+		if !containsFinalizer(got.Finalizers, finalizer) {
+			t.Errorf("expected current finalizer to be added, got %v", got.Finalizers)
+		}
+	})
+}
+
+func containsFinalizer(finalizers []string, target string) bool {
+	for _, f := range finalizers {
+		if f == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestClientAuthValidationError(t *testing.T) {
