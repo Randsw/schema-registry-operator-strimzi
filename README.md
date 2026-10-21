@@ -177,6 +177,7 @@ metadata:
     strimzi.io/cluster: kafka-cluster
 spec:
   securehttp:         true
+  clientauth:         false
   listener:           "tls"
   compatibilitylevel: "forward"
   securityprotocol:   "SSL"
@@ -224,6 +225,14 @@ spec:
 
 - `securehttp` enable TLS on Schema Registry REST API endpoint.
   If `securehttp` is disabled the associated service points to `8081` port in Schema Registry pod. If enabled - to `8085` port.
+- `clientauth` enables mutual TLS (mTLS) on the Schema Registry REST API endpoint. Default is `false`.
+  It is only valid when `securehttp` is `true`: setting it without `securehttp` marks the CR
+  `Ready=False` with reason `ClientAuthRequiresSecureHTTP` and emits a `Warning` event, while reconciliation
+  still succeeds. When enabled, clients must present a certificate signed by the Kafka cluster CA. The operator
+  reuses the cluster-CA truststore and sets `SCHEMA_REGISTRY_SSL_CLIENT_AUTH=true` together with
+  `SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION` and `SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD`. For
+  `PLAINTEXT`/`SASL_PLAINTEXT` security protocols (which do not otherwise need a truststore), the operator
+  builds a truststore-only secret from the cluster CA certificate for this purpose.
 - `tlssecretName` is name of secret that contain TLS certificate and private key pair in JKS format. Must be in same
   namespace  with `StrimziSchemaRegistry` CR
   If this field is omitted or an empty string, the SSR operator automatically creates a TLS certificate and private key pair in JKS format, signs them with the Strimzi Kafka cluster CA(stored in the `<kafka-clustername>-cluster-ca` and `<kafka-clustername>-cluster-ca-cert` secrets)
@@ -312,6 +321,42 @@ still succeeds.
 | `kafkastore.sasl.*`                        | KafkaStore SASL (SCRAM) credentials                         |
 | `ssl.keystore.*`                           | REST API TLS keystore                                       |
 | `ssl.key.password`                         | REST API TLS key password                                   |
+
+### BASIC/RBAC authentication on the REST API
+
+REST API authentication is not exposed as a dedicated spec field. Instead, combine
+the `configuration` escape hatch with a JAAS configuration mounted through
+`spec.template`. For example, to enable HTTP Basic authentication:
+
+```yaml
+spec:
+  securehttp: true
+  configuration:
+    authentication.method: BASIC
+    authentication.realm: SchemaRegistry-Props
+    authentication.roles: admins,developers
+  template:
+    spec:
+      containers:
+        - name: confluent-sr
+          image: confluentinc/cp-schema-registry:7.6.5
+          env:
+            - name: SCHEMA_REGISTRY_AUTHENTICATION_JAAS_CONFIG
+              value: /etc/schema-registry/auth/jaas.conf
+          volumeMounts:
+            - name: auth-jaas
+              mountPath: /etc/schema-registry/auth
+              readOnly: true
+      volumes:
+        - name: auth-jaas
+          secret:
+            secretName: schema-registry-basic-auth
+```
+
+Create the `schema-registry-basic-auth` secret containing the JAAS configuration
+file (for example `jaas.conf`). For more details see the Confluent documentation on
+[Schema Registry authentication](https://docs.confluent.io/platform/current/schema-registry/security/index.html#authentication)
+and [authentication.roles](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#authentication-roles).
 
 ### In detail: listener configuration
 

@@ -778,3 +778,131 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 		assertQuantity(t, res.Limits[corev1.ResourceMemory], "1Gi")
 	})
 }
+
+func TestClientAuthValidationError(t *testing.T) {
+	t.Run("valid when ClientAuth is false", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.ClientAuth = false
+		if msg := clientAuthValidationError(inst); msg != "" {
+			t.Errorf("expected no validation error, got %q", msg)
+		}
+	})
+
+	t.Run("valid when ClientAuth is true with SecureHTTP", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.ClientAuth = true
+		if msg := clientAuthValidationError(inst); msg != "" {
+			t.Errorf("expected no validation error, got %q", msg)
+		}
+	})
+
+	t.Run("invalid when ClientAuth is true without SecureHTTP", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.ClientAuth = true
+		if msg := clientAuthValidationError(inst); msg == "" {
+			t.Error("expected validation error, got empty message")
+		}
+	})
+}
+
+func TestClientAuthNeedsTruststoreSecret(t *testing.T) {
+	t.Run("requires truststore for PLAINTEXT with ClientAuth and SecureHTTP", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.ClientAuth = true
+		if !clientAuthNeedsTruststoreSecret(inst, kafkaAuth{Mode: authPlaintext}) {
+			t.Error("expected truststore secret to be required")
+		}
+	})
+
+	t.Run("no additional truststore for SSL", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.ClientAuth = true
+		if clientAuthNeedsTruststoreSecret(inst, kafkaAuth{Mode: authMTLS, NeedsTruststore: true}) {
+			t.Error("expected no additional truststore secret for SSL")
+		}
+	})
+
+	t.Run("no truststore when ClientAuth is disabled", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.ClientAuth = false
+		if clientAuthNeedsTruststoreSecret(inst, kafkaAuth{Mode: authPlaintext}) {
+			t.Error("expected no truststore secret when ClientAuth is disabled")
+		}
+	})
+}
+
+func TestBuildPodEnvClientAuth(t *testing.T) {
+	auth := kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}
+
+	t.Run("client auth env is emitted when SecureHTTP is true", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.ClientAuth = true
+
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH", "true")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", "/var/schemaregistry/truststore.jks")
+		truststorePassword, ok := envByName(env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD")
+		if !ok {
+			t.Fatal("expected SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD to be present")
+		}
+		requireSecretRef(t, truststorePassword, inst.Name+jksSecretSuffix, "truststore_password")
+	})
+
+	t.Run("client auth env is absent when ClientAuth is false", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.ClientAuth = false
+
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD")
+	})
+}
+
+func TestBuildPodVolumesClientAuth(t *testing.T) {
+	t.Run("client auth mounts JKS volume even for PLAINTEXT", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.ClientAuth = true
+		auth := kafkaAuth{Mode: authPlaintext}
+
+		volumes, mounts := buildPodVolumes(inst, "tls-secret", auth)
+		v, ok := volumeByName(volumes, "tls")
+		if !ok {
+			t.Fatal("expected tls volume for client auth")
+		}
+		if v.Secret == nil || v.Secret.SecretName != inst.Name+jksSecretSuffix {
+			t.Errorf("expected tls volume to reference %q", inst.Name+jksSecretSuffix)
+		}
+		if len(mounts) == 0 || mounts[0].MountPath != "/var/schemaregistry" {
+			t.Errorf("expected /var/schemaregistry volume mount")
+		}
+	})
+}
+
+func TestComputeSpecHashClientAuth(t *testing.T) {
+	t.Run("different ClientAuth produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.SecureHTTP = true
+		inst1.Spec.ClientAuth = false
+		inst2 := newTestInstance()
+		inst2.Spec.SecureHTTP = true
+		inst2.Spec.ClientAuth = true
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different ClientAuth: both %q", hash1)
+		}
+	})
+}

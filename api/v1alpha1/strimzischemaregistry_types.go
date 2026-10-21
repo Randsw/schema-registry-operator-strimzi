@@ -51,6 +51,13 @@ type StrimziSchemaRegistrySpec struct {
 
 	SecureHTTP bool `json:"securehttp"`
 
+	// ClientAuth enables mutual TLS (mTLS) on the Schema Registry REST API.
+	// When enabled, clients must present a certificate signed by the Kafka
+	// cluster CA. Only valid when SecureHTTP is true.
+	// +optional
+	// +kubebuilder:default=false
+	ClientAuth bool `json:"clientauth,omitempty"`
+
 	// TLSSecretName is the name of the Kubernetes secret containing TLS certificates.
 	// Must be a valid Kubernetes resource name (DNS subdomain) or empty.
 	// +kubebuilder:default=""
