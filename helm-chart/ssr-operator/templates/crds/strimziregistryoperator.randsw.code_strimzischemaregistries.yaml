@@ -31,6 +31,9 @@ spec:
             type: object
           spec:
             properties:
+              clientauth:
+                default: false
+                type: boolean
               compatibilitylevel:
                 default: forward
                 enum:

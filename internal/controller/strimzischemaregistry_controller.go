@@ -76,6 +76,15 @@ func getStrimziClusterName(instance *strimziregistryoperatorv1alpha1.StrimziSche
 	return clusterName, nil
 }
 
+// clientAuthValidationError returns a non-empty message describing why the
+// ClientAuth spec is invalid, or an empty string when it is valid.
+func clientAuthValidationError(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+	if instance.Spec.ClientAuth && !instance.Spec.SecureHTTP {
+		return "spec.clientauth is only valid when spec.securehttp is true"
+	}
+	return ""
+}
+
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/finalizers,verbs=update
@@ -129,6 +138,30 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			if err != nil {
 				return ctrl.Result{}, err
 			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Validate that ClientAuth is only enabled when SecureHTTP is enabled.
+	if msg := clientAuthValidationError(instance); msg != "" {
+		logger.Info("Invalid ClientAuth configuration; skipping reconciliation")
+		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "ClientAuthRequiresSecureHTTP",
+			Message:            msg,
+			ObservedGeneration: instance.Generation,
+		})
+		if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
+			if err := r.Status().Update(ctx, instance); err != nil {
+				logger.Error(err, "Failed to update CR status")
+				monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+				return ctrl.Result{}, err
+			}
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ClientAuthRequiresSecureHTTP", "",
+				"spec.clientauth is set but spec.securehttp is false; mutual TLS on the REST API will not be enabled")
 		}
 		return ctrl.Result{}, nil
 	}
@@ -346,9 +379,19 @@ func (r *StrimziSchemaRegistryReconciler) handleSecretRotation(
 
 	switch auth.Mode {
 	case authPlaintext:
+		if clientAuthNeedsTruststoreSecret(instance, auth) {
+			return r.handleClientAuthTruststoreRotation(ctx, instance, logger, strimziClusterName)
+		}
 		// PLAINTEXT needs no KafkaUser secret and no JKS secret.
 		return ctrl.Result{}, nil
-	case authSASLPlaintext, authSASLSSL:
+	case authSASLPlaintext:
+		if clientAuthNeedsTruststoreSecret(instance, auth) {
+			if result, err := r.handleClientAuthTruststoreRotation(ctx, instance, logger, strimziClusterName); err != nil || result.RequeueAfter > 0 {
+				return result, err
+			}
+		}
+		return r.handleSASLSecretRotation(ctx, instance, logger, strimziClusterName, auth)
+	case authSASLSSL:
 		return r.handleSASLSecretRotation(ctx, instance, logger, strimziClusterName, auth)
 	default:
 		return r.handleMTLSSecretRotation(ctx, instance, logger, strimziClusterName, auth)
@@ -549,6 +592,39 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// handleClientAuthTruststoreRotation ensures the cluster-CA truststore secret
+// used for REST API mutual TLS exists and is up to date for PLAINTEXT and
+// SASL_PLAINTEXT modes (where the Kafka auth path does not already build it).
+// When the secret is newly created it records its version on the deployment to
+// trigger a rollout.
+func (r *StrimziSchemaRegistryReconciler) handleClientAuthTruststoreRotation(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+	strimziClusterName string,
+) (ctrl.Result, error) {
+	secret, created, err := r.ensureClientAuthTruststoreSecret(instance, ctx, logger, strimziClusterName)
+	if err != nil {
+		logger.Error(err, "Failed to ensure client-auth truststore secret")
+		return ctrl.Result{}, err
+	}
+	if !created {
+		return ctrl.Result{}, nil
+	}
+	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
+	dep, err := r.updateDeployment(instance, ctx, logger, secret)
+	if err != nil {
+		logger.Error(err, "Failed to update deployment after client-auth truststore change")
+		return ctrl.Result{}, err
+	}
+	if err := r.Update(ctx, dep); err != nil {
+		logger.Error(err, "Failed to update deployment after client-auth truststore change")
+		return ctrl.Result{}, err
+	}
+	logger.Info("Deployment updated after client-auth truststore change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
 // saslUserSecretChanged reports whether the KafkaUser secret version recorded on
