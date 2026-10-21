@@ -74,11 +74,6 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: 3.11
-
       - name: Get changed files in the helm folder
         id: changed-files-helm-chart
         uses: tj-actions/changed-files@v47
@@ -90,44 +85,6 @@ jobs:
             chart_version:
               - 'helm-chart/ssr-operator/Chart.yaml'
 
-      - name: Install PyBump
-        run: |
-          python3 -m pip install pybump
-        shell: bash
-        if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true' && steps.changed-files-helm-chart.outputs.chart_version_any_changed != 'true' && github.ref == 'refs/heads/main'
-
-      - name: Automated Version Bump
-        id: version-bump
-        run: |
-          echo "VER=$(pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch)" >> $GITHUB_OUTPUT
-        shell: bash
-        if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true' && steps.changed-files-helm-chart.outputs.chart_version_any_changed != 'true' && github.ref == 'refs/heads/main'
-
-      - name: Output Name
-        id: chart-name
-        run: |
-          echo "::set-output name=chart::$(basename helm-chart/ssr-operator)"
-        shell: bash
-        if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true' && steps.changed-files-helm-chart.outputs.chart_version_any_changed != 'true' && github.ref == 'refs/heads/main'
-
-      - name: Configure Git
-        run: |
-            git config user.name "$GITHUB_ACTOR"
-            git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-        if: github.ref == 'refs/heads/main'
-
-      - name: GIT Commit
-        run: |
-          git add helm-chart/ssr-operator/Chart.yaml
-          git commit -m "Automatic bump Helm chart version to ${{ steps.version-bump.outputs.VER }}"
-        if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true' && steps.changed-files-helm-chart.outputs.chart_version_any_changed != 'true' && github.ref == 'refs/heads/main'
-
-      - name: Push changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.SEMANTIC_TOKEN }}
-        if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true' && steps.changed-files-helm-chart.outputs.chart_version_any_changed != 'true' && github.ref == 'refs/heads/main'
-    
       - name: Run chart-releaser
         uses: helm/chart-releaser-action@v1.7.0
         with:
