@@ -95,11 +95,11 @@ func (c *registryClient) listSubjects() ([]string, error) {
 	return subjects, nil
 }
 
-// registerSchema registers a JSON schema under the given subject and returns
-// the assigned schema ID.
+// registerSchema registers an Avro schema (the default schema type) under the
+// given subject and returns the assigned schema ID.
 func (c *registryClient) registerSchema(subject, schema string) (int, error) {
 	status, data, err := c.do(http.MethodPost, fmt.Sprintf("/subjects/%s/versions", subject),
-		map[string]string{"schemaType": "JSON", "schema": schema})
+		map[string]string{"schema": schema})
 	if err != nil {
 		return 0, err
 	}

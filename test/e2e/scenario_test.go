@@ -30,7 +30,7 @@ const (
 	// testSubject is the schema subject used for the REST round-trip.
 	testSubject = "e2e-test-value"
 
-	// testSchema is a JSON schema registered under testSubject.
+	// testSchema is an Avro schema registered under testSubject.
 	testSchema = `{"type":"record","name":"e2etest","fields":[{"name":"user","type":"string"},{"name":"car","type":"string"},{"name":"color","type":"string"}]}`
 
 	// readyTimeout is the maximum time to wait for the CR or deployment
@@ -229,7 +229,7 @@ func waitForDeploymentRollout(ctx context.Context, timeout time.Duration) {
 }
 
 // verifyRoundTrip exercises the Schema Registry REST API: list subjects,
-// register a JSON schema, fetch it back by ID, verify the subject is listed
+// register an Avro schema, fetch it back by ID, verify the subject is listed
 // and check the global compatibility level. Registering a schema persists it
 // to the registry-schemas Kafka topic, so a successful round-trip proves the
 // Kafka connection works with the scenario's security protocol.
@@ -239,7 +239,7 @@ func verifyRoundTrip(ca *clusterCA, clientCert *tls.Certificate) {
 		_, err := client.listSubjects()
 		Expect(err).NotTo(HaveOccurred())
 
-		By("registering a JSON schema")
+		By("registering an Avro schema")
 		schemaID, err := client.registerSchema(testSubject, testSchema)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(schemaID).To(BeNumerically(">", 0))
