@@ -1,3 +1,17 @@
+## [1.11.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.0...1.11.1) (2026-10-22)
+
+
+### 🧪 Tests
+
+* add kind-based e2e tests for all security protocols with and without client auth ([2d7480d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2d7480dc50c9da081e07f2a19c3d7d1d2a69868b))
+
+
+### 🛠 Fixes
+
+* move entityOperator to spec level in e2e Kafka manifests ([7a0b6bc](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7a0b6bcae5610141ba32fd5d6d2c4b56f44d9ce4))
+* register the e2e test schema as Avro instead of JSON ([f5fa9f1](https://github.com/Randsw/schema-registry-operator-strimzi/commit/f5fa9f1995432cf2e7805e6278ee251e54cd00d5))
+* send service DNS name in the Host header of e2e REST requests ([df28e54](https://github.com/Randsw/schema-registry-operator-strimzi/commit/df28e54db27a2568ec25a8d29149296d0d90cf3f))
+
 ## [1.11.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.10.1...1.11.0) (2026-10-21)
 
 
