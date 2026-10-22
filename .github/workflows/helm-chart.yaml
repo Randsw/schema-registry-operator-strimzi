@@ -85,6 +85,12 @@ jobs:
             chart_version:
               - 'helm-chart/ssr-operator/Chart.yaml'
 
+      - name: Configure Git
+        run: |
+            git config user.name "$GITHUB_ACTOR"
+            git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+        if: github.ref == 'refs/heads/main'
+
       - name: Run chart-releaser
         uses: helm/chart-releaser-action@v1.7.0
         with:
