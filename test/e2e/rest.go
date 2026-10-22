@@ -18,15 +18,21 @@ import (
 // Strimzi cluster CA and carries the <registry>.<namespace>.svc DNS SANs, so
 // ServerName is set to the in-cluster service DNS name for hostname
 // verification while connecting to 127.0.0.1.
+//
+// The request Host header is set to the same service DNS name: the Schema
+// Registry's Jetty server rejects requests whose Host does not match the TLS
+// SNI value with "400 Host does not match SNI".
 type registryClient struct {
 	baseURL string
+	host    string
 	http    *http.Client
 }
 
 func newRegistryClient(caPool *x509.CertPool, clientCert *tls.Certificate, port int) *registryClient {
+	host := fmt.Sprintf("%s.%s.svc", scenario.RegistryName, scenario.Namespace)
 	tlsConfig := &tls.Config{
 		RootCAs:    caPool,
-		ServerName: fmt.Sprintf("%s.%s.svc", scenario.RegistryName, scenario.Namespace),
+		ServerName: host,
 		MinVersion: tls.VersionTLS12,
 	}
 	if clientCert != nil {
@@ -34,6 +40,7 @@ func newRegistryClient(caPool *x509.CertPool, clientCert *tls.Certificate, port 
 	}
 	return &registryClient{
 		baseURL: fmt.Sprintf("https://127.0.0.1:%d", port),
+		host:    host,
 		http: &http.Client{
 			Timeout:   30 * time.Second,
 			Transport: &http.Transport{TLSClientConfig: tlsConfig},
@@ -57,6 +64,7 @@ func (c *registryClient) do(method, path string, body any) (int, []byte, error) 
 	if err != nil {
 		return 0, nil, err
 	}
+	req.Host = c.host
 	req.Header.Set("Content-Type", "application/vnd.schemaregistry.v1+json")
 
 	resp, err := c.http.Do(req)
