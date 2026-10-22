@@ -1,0 +1,15 @@
+# Kafka topic used by the Schema Registry to persist schemas.
+# Single partition and replica to match the scaled-down CI Kafka cluster.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: registry-schemas
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: kafka-cluster
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    # http://kafka.apache.org/documentation/#topicconfigs
+    cleanup.policy: compact

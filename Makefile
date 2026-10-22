@@ -120,6 +120,14 @@ test-e2e: envtest
 	$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path >/dev/null
 	ENVTEST_K8S_VERSION=$(ENVTEST_K8S_VERSION) go test ./internal/controller/... -v -ginkgo.v
 
+# Run the end-to-end tests against an existing kind cluster with a Strimzi
+# Kafka cluster (see README "End-to-end tests"). The scenario is selected via
+# E2E_SECURITY_PROTOCOL (SSL, SASL_SSL, PLAINTEXT, SASL_PLAINTEXT) and
+# E2E_LISTENER (tls, saslssl, plain, saslplain).
+.PHONY: e2e
+e2e: ## Run end-to-end tests against an existing kind cluster.
+	go test -tags=e2e ./test/e2e/... -v -ginkgo.v
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run

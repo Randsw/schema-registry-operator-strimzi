@@ -468,15 +468,50 @@ spec:
   listener: plain
 ```
 
-## 7. Example
+## 7. End-to-end tests
+
+The operator has end-to-end tests that run in GitHub Actions on kind clusters
+(`.github/workflows/e2e.yaml`). Each `securityprotocol` (`SSL`, `SASL_SSL`,
+`PLAINTEXT`, `SASL_PLAINTEXT`) runs in its own kind cluster with a scaled-down
+Kafka (1 KRaft controller + 1 broker, replication factor 1) and only the
+listener it needs. Inside each job the Schema Registry is tested first with
+`clientauth: false` and then with `clientauth: true` (mutual TLS on the REST
+API), plus the `clientauth`-without-`securehttp` validation path.
+
+The verification is a REST round-trip (list subjects, register a JSON schema,
+fetch it back, check the compatibility level). Because schemas are persisted
+to the `registry-schemas` Kafka topic, a successful round-trip proves the
+Kafka connection works with the scenario's security protocol.
+
+To run a single scenario locally against an existing kind cluster:
+
+```bash
+# 1. Create a kind cluster and deploy the scenario infrastructure
+#    (Strimzi operator, Kafka with the scenario listener, topic, KafkaUser)
+kind create cluster --name e2e --config test/e2e/kind-config.yaml
+./test/e2e/scripts/setup-cluster.sh ssl   # or sasl-ssl, plaintext, sasl-plaintext
+
+# 2. Build the operator image, load it into kind and install the helm chart
+docker build -t ssr-operator:e2e .
+kind load docker-image ssr-operator:e2e --name e2e
+helm install --wait --timeout 10m --namespace kafka --create-namespace \
+  ssr-operator ./helm-chart/ssr-operator \
+  --set image.repository=ssr-operator --set image.tag=e2e \
+  --set image.pullPolicy=IfNotPresent
+
+# 3. Run the tests (E2E_SECURITY_PROTOCOL: SSL, SASL_SSL, PLAINTEXT, SASL_PLAINTEXT)
+E2E_SECURITY_PROTOCOL=SSL E2E_LISTENER=tls make e2e
+```
+
+## 8. Example
 
 You can find example of using the schema registry in my repo - `https://github.com/Randsw/strimzi-kafka-cluster`
 
-## 8. Special thanks
+## 9. Special thanks
 
 I want to thank all the people who worked on  [lsst-sqre/strimzi-registry-operator](https://github.com/lsst-sqre/strimzi-registry-operator)
 You create a great instrument!
 
-## 9. Conclusion
+## 10. Conclusion
 
 There are many Schema Registry functionalities that not implemented in this operator because i don't need them. If you need some of that functionality create an issue and i see what i can do

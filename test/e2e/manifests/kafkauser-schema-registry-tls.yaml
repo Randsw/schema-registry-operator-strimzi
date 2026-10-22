@@ -1,0 +1,45 @@
+# KafkaUser for the Schema Registry in the SSL (mTLS) e2e scenario.
+# The name must match the StrimziSchemaRegistry CR name: the operator looks
+# up the KafkaUser secret by instance name.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: confluent-schema-registry
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: kafka-cluster
+spec:
+  authentication:
+    type: tls
+  authorization:
+    # Official docs on authorizations required for the Schema Registry:
+    # https://docs.confluent.io/current/schema-registry/security/index.html#authorizing-access-to-the-schemas-topic
+    type: simple
+    acls:
+      # Allow all operations on the registry-schemas topic
+      - resource:
+          type: topic
+          name: registry-schemas
+          patternType: literal
+        operations:
+          - All
+        type: allow
+        host: "*"
+      # Allow all operations on the schema-registry* group
+      - resource:
+          type: group
+          name: schema-registry
+          patternType: prefix
+        operations:
+          - All
+        type: allow
+        host: "*"
+      # Allow Describe on the __consumer_offsets topic
+      - resource:
+          type: topic
+          name: __consumer_offsets
+          patternType: literal
+        operations:
+          - Describe
+        type: allow
+        host: "*"
