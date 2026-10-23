@@ -140,7 +140,7 @@ jobs:
             go-version: ${{ env.GO_VERSION }}
           id: go
         - name: Set up Helm
-          uses: azure/setup-helm@v4
+          uses: azure/setup-helm@v5
         - name: Create kind cluster
           uses: helm/kind-action@v1
           with:
