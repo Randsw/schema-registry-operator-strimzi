@@ -15,11 +15,21 @@ on:
   pull_request:
     branches:
       - 'main'
+    # opened: a pull request was opened
+    # synchronize: a new commit was pushed to the pull request branch
+    # reopened: a closed pull request was reopened
+    types:
+      - opened
+      - synchronize
+      - reopened
     paths:
       - 'helm-chart/ssr-operator/**/*.yaml'
       - 'helm-chart/ssr-operator/**/*.tpl'
 permissions:
   contents: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   Lint-test:
     runs-on: ubuntu-latest
