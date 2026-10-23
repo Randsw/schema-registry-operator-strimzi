@@ -471,8 +471,10 @@ spec:
 ## 7. End-to-end tests
 
 The operator has end-to-end tests that run in GitHub Actions on kind clusters
-(`.github/workflows/e2e.yaml`). Each `securityprotocol` (`SSL`, `SASL_SSL`,
-`PLAINTEXT`, `SASL_PLAINTEXT`) runs in its own kind cluster with a scaled-down
+as part of the `test-release.yaml` workflow. They run when a pull request is
+opened or updated and when a branch is merged/pushed to `main`. Each
+`securityprotocol` (`SSL`, `SASL_SSL`, `PLAINTEXT`, `SASL_PLAINTEXT`) runs in
+its own kind cluster with a scaled-down
 Kafka (1 KRaft controller + 1 broker, replication factor 1) and only the
 listener it needs. Inside each job the Schema Registry is tested first with
 `clientauth: false` and then with `clientauth: true` (mutual TLS on the REST

@@ -14,16 +14,34 @@ on:
       - '**.mod'
       - '**.sum'
       - 'Dockerfile'
+      - 'helm-chart/**'
+      - 'test/e2e/**'
+      - '.github/workflows/**'
   pull_request:
     branches:
       - 'main'
+    # opened: a pull request was opened
+    # synchronize: a new commit was pushed to the pull request branch
+    # reopened: a closed pull request was reopened
+    types:
+      - opened
+      - synchronize
+      - reopened
     paths:
       - '**.go'
       - '**.mod'
       - '**.sum'
       - 'Dockerfile'
+      - 'helm-chart/**'
+      - 'test/e2e/**'
+      - '.github/workflows/**'
 env:
   GO_VERSION: 1.26.0
+# Superseded pull request runs are cancelled, pushes to long-lived branches
+# (e.g. main) always run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
     # build workflow
     Test:
@@ -62,6 +80,115 @@ jobs:
           with:
             args: --timeout 5m
             skip-cache: true
+    # E2E tests are expensive, so they are only required for pull requests
+    # and pushes/merges to main. Other branch pushes only run lint and tests.
+    e2e_gate:
+      name: E2E gate
+      runs-on: ubuntu-latest
+      outputs:
+        run: ${{ steps.decide.outputs.run }}
+      steps:
+        - name: Decide whether e2e tests must run
+          id: decide
+          env:
+            EVENT_NAME: ${{ github.event_name }}
+            REF: ${{ github.ref }}
+          run: |
+            if [[ "$EVENT_NAME" == "pull_request" ]] ||
+               [[ "$REF" == "refs/heads/main" ]]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
+    E2E:
+      name: e2e-${{ matrix.scenario }}
+      needs:
+        - Lint
+        - Test
+        - e2e_gate
+      if: needs.e2e_gate.outputs.run == 'true'
+      runs-on: ubuntu-latest
+      timeout-minutes: 45
+      strategy:
+        fail-fast: false
+        matrix:
+          # One job per securityprotocol, each with its own kind cluster and
+          # only the Kafka listener it needs. The clientauth=false and
+          # clientauth=true phases run sequentially inside each job
+          # (see test/e2e/scenario_test.go).
+          include:
+            - scenario: ssl
+              security-protocol: SSL
+              listener: tls
+            - scenario: sasl-ssl
+              security-protocol: SASL_SSL
+              listener: saslssl
+            - scenario: plaintext
+              security-protocol: PLAINTEXT
+              listener: plain
+            - scenario: sasl-plaintext
+              security-protocol: SASL_PLAINTEXT
+              listener: saslplain
+      steps:
+        - name: Check out code into the Go module directory
+          uses: actions/checkout@v7
+          with:
+            fetch-depth: 1
+        - name: set up go ${{ env.GO_VERSION }}
+          uses: actions/setup-go@v7
+          with:
+            go-version: ${{ env.GO_VERSION }}
+          id: go
+        - name: Set up Helm
+          uses: azure/setup-helm@v4
+        - name: Create kind cluster
+          uses: helm/kind-action@v1
+          with:
+            cluster_name: e2e-${{ matrix.scenario }}
+            config: test/e2e/kind-config.yaml
+        - name: Build operator image
+          run: docker build -t ssr-operator:e2e .
+        - name: Load operator image into kind
+          run: kind load docker-image ssr-operator:e2e --name e2e-${{ matrix.scenario }}
+        - name: Deploy Kafka cluster for scenario
+          run: ./test/e2e/scripts/setup-cluster.sh ${{ matrix.scenario }}
+        - name: Install ssr-operator
+          run: |
+            helm install --wait --timeout 10m --namespace kafka --create-namespace \
+              ssr-operator ./helm-chart/ssr-operator \
+              --set image.repository=ssr-operator \
+              --set image.tag=e2e \
+              --set image.pullPolicy=IfNotPresent
+        - name: Run e2e tests
+          env:
+            E2E_SECURITY_PROTOCOL: ${{ matrix.security-protocol }}
+            E2E_LISTENER: ${{ matrix.listener }}
+          run: go test -tags=e2e ./test/e2e/... -v -ginkgo.v
+        - name: Collect diagnostics
+          if: failure()
+          run: |
+            mkdir -p /tmp/e2e-diagnostics
+            {
+              echo "=== StrimziSchemaRegistry CR ==="
+              kubectl get strimzischemaregistries -n kafka -o yaml
+              echo "=== Deployments ==="
+              kubectl get deployments -n kafka -o wide
+              echo "=== Pods ==="
+              kubectl get pods -n kafka -o wide
+            } > /tmp/e2e-diagnostics/resources.txt 2>&1 || true
+            kubectl describe deployment confluent-schema-registry-deploy -n kafka \
+              > /tmp/e2e-diagnostics/schema-registry-deployment.txt 2>&1 || true
+            kubectl logs -n kafka deployment/strimzi-schema-registry-operator --tail=300 \
+              > /tmp/e2e-diagnostics/ssr-operator.log 2>&1 || true
+            kubectl logs -n kafka deployment/confluent-schema-registry-deploy --tail=300 \
+              > /tmp/e2e-diagnostics/schema-registry.log 2>&1 || true
+        - name: Upload diagnostics
+          if: failure()
+          uses: actions/upload-artifact@v4
+          with:
+            name: e2e-diagnostics-${{ matrix.scenario }}
+            path: /tmp/e2e-diagnostics
+            if-no-files-found: ignore
     Deploy:
       if: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' && github.actor != 'dependabot[bot]' }}
       needs: Test
