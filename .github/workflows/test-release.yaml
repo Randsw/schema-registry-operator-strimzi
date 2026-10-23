@@ -184,7 +184,7 @@ jobs:
               > /tmp/e2e-diagnostics/schema-registry.log 2>&1 || true
         - name: Upload diagnostics
           if: failure()
-          uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v7
           with:
             name: e2e-diagnostics-${{ matrix.scenario }}
             path: /tmp/e2e-diagnostics
