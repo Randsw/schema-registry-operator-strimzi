@@ -1,3 +1,10 @@
+## [1.11.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.2...1.11.3) (2026-10-26)
+
+
+### 🛠 Fixes
+
+* **rbac:** add kafka.strimzi.io kafkas/kafkausers get;list;watch to manager role ([e521071](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e5210716fdc1182c95c4606fd1ae4a45d7c724c3))
+
 ## [1.11.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.1...1.11.2) (2026-10-26)
 
 
