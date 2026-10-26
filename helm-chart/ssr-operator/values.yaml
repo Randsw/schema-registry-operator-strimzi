@@ -47,7 +47,18 @@ podSecurityContext:
 
 service:
   type: ClusterIP
-  port: 8443
+
+# Metrics endpoint configuration for the operator itself.
+metrics:
+  # When enabled, a Service exposing the operator metrics endpoint is created.
+  enabled: true
+  # When true the metrics endpoint is served via HTTPS with authn/authz
+  # (requires a Prometheus setup that can authenticate). When false it is
+  # served via plain HTTP, which is the practical default for in-cluster
+  # Prometheus scraping.
+  secure: false
+  # Port the metrics endpoint binds to inside the operator container.
+  port: 8080
 
 terminationGracePeriodSeconds: 10
 

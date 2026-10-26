@@ -36,9 +36,14 @@ spec:
             - /manager
           args:
             - --health-probe-bind-address=:8081
-            - --metrics-bind-address=0.0.0.0:8080
+            - --metrics-bind-address=0.0.0.0:{{ .Values.metrics.port }}
+            - --metrics-secure={{ .Values.metrics.secure }}
             - --leader-elect
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
           volumeMounts:
             - mountPath: /tmp
               name: temp-volume
