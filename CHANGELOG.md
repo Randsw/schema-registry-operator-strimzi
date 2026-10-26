@@ -1,3 +1,10 @@
+## [1.11.4](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.3...1.11.4) (2026-10-26)
+
+
+### 🛠 Fixes
+
+* **helm:** repair the operator metrics Service ([a2c49da](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a2c49da19020eb1b84e256022574a94811813496))
+
 ## [1.11.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.2...1.11.3) (2026-10-26)
 
 
