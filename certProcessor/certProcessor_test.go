@@ -1,6 +1,7 @@
 package certprocessor
 
 import (
+	"fmt"
 	"testing"
 	"unicode"
 
@@ -201,6 +202,69 @@ func TestCreateKeystore_EmptyPassword(t *testing.T) {
 	}
 	if password == "" {
 		t.Error("password should be auto-generated when empty password is provided")
+	}
+}
+
+// TestConcurrentCertGeneration verifies that concurrent invocations of the
+// certificate generation functions do not interfere with each other. Before
+// the per-call temp directory fix, all invocations shared fixed file names in
+// /tmp (client.truststore.jks, user.p12, client.keystore.jks, tls.p12,
+// tls.keystore.jks), so concurrent reconciles could corrupt each other's
+// keystore material.
+func TestConcurrentCertGeneration(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+
+	const workers = 8
+	errCh := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			cp := NewCertProcessor(logr.Logger{})
+
+			truststore, _, err := cp.CreateTruststore(ca.CACertPEM, "test1234")
+			if err != nil {
+				errCh <- fmt.Errorf("CreateTruststore: %w", err)
+				return
+			}
+			if len(truststore) == 0 {
+				errCh <- fmt.Errorf("CreateTruststore produced empty truststore")
+				return
+			}
+
+			keystore, _, err := cp.CreateKeystore(ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
+			if err != nil {
+				errCh <- fmt.Errorf("CreateKeystore: %w", err)
+				return
+			}
+			if len(keystore) == 0 {
+				errCh <- fmt.Errorf("CreateKeystore produced empty keystore")
+				return
+			}
+
+			tlsKeystore, _, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+			if err != nil {
+				errCh <- fmt.Errorf("GenerateTLSforHTTP: %w", err)
+				return
+			}
+			if len(tlsKeystore) == 0 {
+				errCh <- fmt.Errorf("GenerateTLSforHTTP produced empty keystore")
+				return
+			}
+
+			errCh <- nil
+		}()
+	}
+
+	for i := 0; i < workers; i++ {
+		if err := <-errCh; err != nil {
+			t.Errorf("concurrent generation failed: %v", err)
+		}
 	}
 }
 
