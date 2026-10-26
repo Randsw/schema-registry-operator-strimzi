@@ -1,3 +1,17 @@
+## [1.11.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.1...1.11.2) (2026-10-26)
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump actions/upload-artifact from 4 to 7 ([182a704](https://github.com/Randsw/schema-registry-operator-strimzi/commit/182a7044055404d9aa7bca36b7eb3f5b49a51f97))
+* **deps:** Bump azure/setup-helm from 4 to 5 ([cd8505c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/cd8505c8b6b89933ae3b259017b89aca7219f5d8))
+* run e2e only on pull requests and main ([26e6178](https://github.com/Randsw/schema-registry-operator-strimzi/commit/26e617880146f14f87ad514601dbe6b1b5acd836))
+
+
+### 🛠 Fixes
+
+* **certProcessor:** use per-call temp directories to prevent concurrent-reconcile races ([45abc2b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/45abc2ba216023980516523a2b6d0d0b3ace2a45))
+
 ## [1.11.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.0...1.11.1) (2026-10-22)
 
 
