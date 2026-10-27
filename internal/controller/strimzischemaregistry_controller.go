@@ -749,21 +749,19 @@ func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregist
 		logger.Error(err, "Failed to get strimzi cluster name from labels")
 		return err
 	}
-	TLSSecret, err := r.createTLSSecret(instance, ctx, logger, strimziClusterName)
+	TLSSecret, exists, err := r.createTLSSecret(instance, ctx, logger, strimziClusterName)
 	if err != nil {
 		logger.Error(err, "Failed to format TLS secret")
 		return err
 	}
-	if TLSSecret == nil {
-		return nil
+	// Update in place when the secret already exists so it is never absent
+	// for pods mounting it; createTLSSecret carries the existing
+	// ResourceVersion to make the Update valid.
+	if exists {
+		err = r.Update(ctx, TLSSecret)
+	} else {
+		err = r.Create(ctx, TLSSecret)
 	}
-	// Use CreateOrUpdate to handle both initial creation and concurrent reconciliation
-	// where another reconcile loop may have already created the secret.
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, TLSSecret, func() error {
-		// The mutate function is called for updates; the secret data is already set
-		// by createTLSSecret, so no mutation is needed here.
-		return nil
-	})
 	if err != nil {
 		logger.Error(err, "Failed to create or update TLS secret")
 		return err
