@@ -1,3 +1,10 @@
+## [1.11.7](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.6...1.11.7) (2026-10-27)
+
+
+### 🛠 Fixes
+
+* **networkpolicy:** allow DNS egress to kube-dns ([a0bf4b8](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a0bf4b84a8f99107cb95f68537bc8d6563ac99b3))
+
 ## [1.11.6](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.5...1.11.6) (2026-10-27)
 
 
