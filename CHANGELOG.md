@@ -1,3 +1,15 @@
+## [1.11.5](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.4...1.11.5) (2026-10-27)
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump docker/login-action from 4.6.0 to 4.7.0 ([5bd1d84](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5bd1d8439e4934642e75f76013fc22bf5227a7a3))
+
+
+### 🛠 Fixes
+
+* **status:** populate the status.status field alongside the Ready condition ([415679c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/415679c2c0d76d1287d195eed308b018b3b06268))
+
 ## [1.11.4](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.3...1.11.4) (2026-10-26)
 
 
