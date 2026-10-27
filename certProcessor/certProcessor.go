@@ -375,6 +375,44 @@ func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, passwor
 	return b, password, nil
 }
 
+// KeystoreCertExpiry returns the NotAfter timestamp of the first certificate
+// entry in the given JKS keystore. It shells out to keytool to export the
+// certificate chain in PEM form and parses it. This works for keystore
+// secrets produced by any operator version, so no extra data key is needed
+// in the secret.
+func (cp *CertProcessor) KeystoreCertExpiry(keystore []byte, password string) (time.Time, error) {
+	if len(keystore) == 0 {
+		return time.Time{}, fmt.Errorf("keystore is empty")
+	}
+	tempDir, err := os.MkdirTemp("", "ssr-expiry-*")
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer cp.removeTempDir(tempDir)
+
+	ksPath := filepath.Join(tempDir, "keystore.jks")
+	if err := os.WriteFile(ksPath, keystore, 0o600); err != nil {
+		return time.Time{}, fmt.Errorf("failed to write keystore temp file: %w", err)
+	}
+
+	cmd := exec.Command("keytool", "-list", "-rfc", "-keystore", ksPath, "-storepass", password, "-noprompt")
+	out, err := cmd.Output()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("keytool failed to list keystore entries: %w", err)
+	}
+
+	// pem.Decode skips any leading keytool output before the first PEM block.
+	block, _ := pem.Decode(out)
+	if block == nil {
+		return time.Time{}, fmt.Errorf("no PEM certificate found in keytool output")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to parse certificate from keystore: %w", err)
+	}
+	return cert.NotAfter, nil
+}
+
 func (cp *CertProcessor) generateCSR(cn string) (*rsa.PrivateKey, *x509.CertificateRequest, error) {
 	// Generate server private key
 	serverKey, err := rsa.GenerateKey(cryptorand.Reader, 4096)
