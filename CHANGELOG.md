@@ -1,3 +1,15 @@
+## [1.12.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.9...1.12.0) (2026-10-27)
+
+
+### 🚀 Features
+
+* **tls:** renew the REST API certificate before it expires ([6182c1b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6182c1b87875c83413b2f2e5d88f9eeaaf1553a9))
+
+
+### 🛠 Fixes
+
+* **ci:** do not publish or release before e2e tests finish ([dabb556](https://github.com/Randsw/schema-registry-operator-strimzi/commit/dabb5566cc4fb3f84305013f4d47fdb7296fe13d))
+
 ## [1.11.9](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.8...1.11.9) (2026-10-27)
 
 
