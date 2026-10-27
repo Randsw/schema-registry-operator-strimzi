@@ -35,6 +35,9 @@ on:
       - 'helm-chart/**'
       - 'test/e2e/**'
       - '.github/workflows/**'
+permissions:
+  contents: read
+  packages: write
 env:
   GO_VERSION: 1.26.0
 # Superseded pull request runs are cancelled, pushes to long-lived branches
@@ -64,8 +67,6 @@ jobs:
     Lint:
       runs-on: ubuntu-latest
       steps:
-        - name: Check actor
-          run: echo ${{ github.actor }}
         - name: set up go ${{env.GO_VERSION}}
           uses: actions/setup-go@v7
           with:
@@ -95,7 +96,8 @@ jobs:
             REF: ${{ github.ref }}
           run: |
             if [[ "$EVENT_NAME" == "pull_request" ]] ||
-               [[ "$REF" == "refs/heads/main" ]]; then
+               [[ "$REF" == "refs/heads/main" ]] ||
+               [[ "$REF" == "refs/heads/develop" ]]; then
               echo "run=true" >> "$GITHUB_OUTPUT"
             else
               echo "run=false" >> "$GITHUB_OUTPUT"
@@ -220,35 +222,34 @@ jobs:
       - name: Build image and push to GitHub Container Registry
         uses: docker/build-push-action@v7
         with:
-          # relative path to the place where source code with Dockerfile is located
-          context: .
-          # Note: tags has to be all lower-case
-          tags: ghcr.io/randsw/strimzi-schema-registry-operator:test
-          labels: ${{ steps.meta.outputs.labels }}
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+         # relative path to the place where source code with Dockerfile is located
+         context: .
+         # Note: tags has to be all lower-case
+         tags: ${{ steps.meta.outputs.tags }}
+         labels: ${{ steps.meta.outputs.labels }}
+         push: true
+         cache-from: type=gha
+         cache-to: type=gha,mode=max
     Semantic-Release:
-      if: ${{ github.event_name == 'push' }}
+      # .releaserc.yaml only releases from main and develop; running the job
+      # on other branches is wasted work.
+      if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
       needs: Test
       runs-on: ubuntu-latest
       steps:
-          - name: Checkout
-            uses: actions/checkout@v7
-            with:
-              fetch-depth: 0
-              token: ${{ secrets.SEMANTIC_TOKEN }}
-          - name: Setup NodeJS
-            uses: actions/setup-node@v7
-  
-          - name: Setup package.json
-            run: echo '{"name":"semantic-release", "devDependencies":{"@semantic-release/changelog":"^6.0.1","@semantic-release/exec":"^6.0.3","@semantic-release/git":"^10.0.1","@semantic-release/release-notes-generator":"^10.0.3","conventional-changelog-conventionalcommits":"^5.0.0","semantic-release":"^21.0.2"}}' > package.json
-          
-          - name: Install dependencies
-            run: npm install
-          
-          - name: Release
-            run: npx semantic-release
-            env:
-              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              GH_TOKEN: ${{ secrets.SEMANTIC_TOKEN }}
+        - name: Checkout
+          uses: actions/checkout@v7
+          with:
+            fetch-depth: 0
+            token: ${{ secrets.SEMANTIC_TOKEN }}
+        - name: Setup NodeJS
+          uses: actions/setup-node@v7
+        - name: Setup package.json
+          run: echo '{"name":"semantic-release", "devDependencies":{"@semantic-release/changelog":"^6.0.1","@semantic-release/exec":"^6.0.3","@semantic-release/git":"^10.0.1","@semantic-release/release-notes-generator":"^10.0.3","conventional-changelog-conventionalcommits":"^5.0.0","semantic-release":"^21.0.2"}}' > package.json
+        - name: Install dependencies
+          run: npm install
+        - name: Release
+          run: npx semantic-release
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            GH_TOKEN: ${{ secrets.SEMANTIC_TOKEN }}
