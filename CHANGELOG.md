@@ -1,3 +1,10 @@
+## [1.11.9](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.8...1.11.9) (2026-10-27)
+
+
+### 🛠 Fixes
+
+* **ci:** repair Deploy job publishing, gate semantic-release, e2e on develop, conditional helm bump ([3e799d3](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3e799d3af0d5fedbed4238e789f28d78b4407495))
+
 ## [1.11.8](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.7...1.11.8) (2026-10-27)
 
 
