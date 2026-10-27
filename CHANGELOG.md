@@ -1,3 +1,10 @@
+## [1.14.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.13.0...1.14.0) (2026-10-27)
+
+
+### 🚀 Features
+
+* **api:** service type/port passthrough and cross-namespace NetworkPolicy ingress ([4e1b49e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4e1b49e33448bf29d080c3b7fb25a608c14f18ea))
+
 ## [1.13.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.12.0...1.13.0) (2026-10-27)
 
 
