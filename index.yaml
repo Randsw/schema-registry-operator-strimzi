@@ -3,6 +3,20 @@ entries:
   ssr-operator:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-10-27T10:24:12.380307095Z"
+    description: Deploy confluent schema registry for use with Strimzi Kafka Cluster
+    digest: 0bfa53a974f0103a2272f90e7fe6c723c8acbbcbb4500af6e925f9a8b5ec9d23
+    maintainers:
+    - email: randsw06@gmail.com
+      name: Randsw
+      url: https://github.com/Randsw
+    name: ssr-operator
+    type: application
+    urls:
+    - https://github.com/Randsw/schema-registry-operator-strimzi/releases/download/ssr-operator-0.0.23/ssr-operator-0.0.23.tgz
+    version: 0.0.23
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-10-27T09:17:41.532927729Z"
     description: Deploy confluent schema registry for use with Strimzi Kafka Cluster
     digest: 5be202a5517253de62c593a74d6035bfa55b8a7b003d7f6ebceac8a1eefb1f09
@@ -295,4 +309,4 @@ entries:
     urls:
     - https://github.com/Randsw/schema-registry-operator-strimzi/releases/download/ssr-operator-0.0.1/ssr-operator-0.0.1.tgz
     version: 0.0.1
-generated: "2026-10-27T09:17:41.533058893Z"
+generated: "2026-10-27T10:24:12.380472225Z"
