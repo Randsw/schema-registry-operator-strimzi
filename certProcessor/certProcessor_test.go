@@ -3,6 +3,7 @@ package certprocessor
 import (
 	"fmt"
 	"testing"
+	"time"
 	"unicode"
 
 	"github.com/go-logr/logr"
@@ -202,6 +203,46 @@ func TestCreateKeystore_EmptyPassword(t *testing.T) {
 	}
 	if password == "" {
 		t.Error("password should be auto-generated when empty password is provided")
+	}
+}
+
+// TestKeystoreCertExpiry verifies that KeystoreCertExpiry extracts the
+// NotAfter timestamp of the certificate inside a JKS keystore produced by
+// GenerateTLSforHTTP. The generated certificate is valid for one year, so
+// the extracted expiry must be roughly one year in the future.
+func TestKeystoreCertExpiry(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	keystore, password, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	if err != nil {
+		t.Fatalf("failed to generate TLS keystore: %v", err)
+	}
+
+	notAfter, err := cp.KeystoreCertExpiry(keystore, password)
+	if err != nil {
+		t.Fatalf("unexpected error reading keystore cert expiry: %v", err)
+	}
+
+	now := time.Now()
+	if !notAfter.After(now) {
+		t.Errorf("expected certificate expiry in the future, got %v", notAfter)
+	}
+	// The generated certificate is valid for one year; allow some slack.
+	if notAfter.Before(now.Add(300*24*time.Hour)) || notAfter.After(now.Add(400*24*time.Hour)) {
+		t.Errorf("expected expiry about one year from now, got %v", notAfter)
+	}
+}
+
+// TestKeystoreCertExpiry_Empty verifies that KeystoreCertExpiry returns an
+// error for an empty keystore.
+func TestKeystoreCertExpiry_Empty(t *testing.T) {
+	cp := NewCertProcessor(logr.Logger{})
+	if _, err := cp.KeystoreCertExpiry(nil, "test1234"); err == nil {
+		t.Error("expected error for empty keystore, got nil")
 	}
 }
 

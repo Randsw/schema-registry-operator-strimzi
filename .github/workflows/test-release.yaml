@@ -193,7 +193,10 @@ jobs:
             if-no-files-found: ignore
     Deploy:
       if: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' && github.actor != 'dependabot[bot]' }}
-      needs: Test
+      # Wait for the e2e tests as well: on PRs and main/develop pushes E2E
+      # runs, and the image must not be published before it passes. On other
+      # branch pushes E2E is skipped, which does not block dependents.
+      needs: [Test, e2e_gate, E2E]
       # The type of runner that the job will run on
       runs-on: ubuntu-latest
       steps:
@@ -234,7 +237,9 @@ jobs:
       # .releaserc.yaml only releases from main and develop; running the job
       # on other branches is wasted work.
       if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
-      needs: Test
+      # No release before the e2e tests have finished on main/develop; on
+      # other branch pushes E2E is skipped, which does not block dependents.
+      needs: [Test, e2e_gate, E2E]
       runs-on: ubuntu-latest
       steps:
         - name: Checkout

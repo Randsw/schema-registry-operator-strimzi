@@ -19,9 +19,12 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
+	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -1147,6 +1150,129 @@ func TestComputeSpecHashClientAuth(t *testing.T) {
 		hash2, _ := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different ClientAuth: both %q", hash1)
+		}
+	})
+}
+
+// TestHandleTLSCertExpiry covers the TLS certificate expiry-based renewal:
+// with the default threshold a freshly generated one-year certificate is not
+// renewed; with a threshold larger than the certificate validity the secret
+// is renewed in place and the deployment is rolled via the tlsVersion
+// pod-template annotation.
+func TestHandleTLSCertExpiry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	cp := certprocessor.NewCertProcessor(logr.Logger{})
+	keystore, password, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "test-sr.default")
+	if err != nil {
+		t.Fatalf("failed to generate TLS keystore: %v", err)
+	}
+
+	cluster := "test-cluster"
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	inst.Labels = map[string]string{"strimzi.io/cluster": cluster}
+
+	caCertSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: cluster + clusterCASuffix, Namespace: inst.Namespace},
+		Data:       map[string][]byte{"ca.crt": []byte(ca.CACertPEM)},
+	}
+	caKeySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: cluster + clusterCAKeySuffix, Namespace: inst.Namespace},
+		Data:       map[string][]byte{"ca.key": []byte(ca.CAKeyPEM)},
+	}
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"tls-keystore.jks":  keystore,
+			"keystore_password": []byte(password),
+			"key_password":      []byte(password),
+		},
+	}
+	jksSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + jksSecretSuffix, Namespace: inst.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{"truststore.jks": []byte("stub")},
+	}
+	deployment := &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + deploySuffix, Namespace: inst.Namespace},
+		Spec: apps.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
+			},
+		},
+	}
+
+	t.Run("no renewal while the certificate is valid", func(t *testing.T) {
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, tlsSecret.DeepCopy(), jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != 0 {
+			t.Errorf("expected no requeue for a valid certificate, got %v", result.RequeueAfter)
+		}
+	})
+
+	t.Run("renews and rolls when the certificate is close to expiry", func(t *testing.T) {
+		originalThreshold := tlsCertRenewalThreshold
+		tlsCertRenewalThreshold = 400 * 24 * time.Hour
+		defer func() { tlsCertRenewalThreshold = originalThreshold }()
+
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, tlsSecret.DeepCopy(), jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			t.Error("expected a requeue after renewal")
+		}
+
+		renewed := &corev1.Secret{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, renewed); err != nil {
+			t.Fatalf("failed to get renewed TLS secret: %v", err)
+		}
+		if string(renewed.Data["keystore_password"]) == password {
+			t.Error("expected the renewed secret to have fresh keystore material")
+		}
+
+		dep := &apps.Deployment{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err != nil {
+			t.Fatalf("failed to get deployment after renewal: %v", err)
+		}
+		if dep.Spec.Template.Annotations[tlsVersionKey] == "" {
+			t.Error("expected the tlsVersion pod-template annotation to trigger a rollout")
+		}
+	})
+
+	t.Run("custom TLSSecretName is never touched", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = "user-managed"
+		inst.Labels = map[string]string{"strimzi.io/cluster": cluster}
+
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != 0 {
+			t.Errorf("expected no requeue for a custom TLS secret, got %v", result.RequeueAfter)
 		}
 	})
 }
