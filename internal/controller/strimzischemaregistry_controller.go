@@ -111,6 +111,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
 			// Return and don't requeue
 			logger.Info("Resource not found. Ignoring since object must be deleted.")
+			r.updateInstanceCountMetric(ctx)
 			return ctrl.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
@@ -134,13 +135,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
 	if isApplicationMarkedToBeDeleted {
 		if controllerutil.ContainsFinalizer(instance, finalizer) {
-			r.finalizeApplication()
 			controllerutil.RemoveFinalizer(instance, finalizer)
 			err := r.Update(ctx, instance)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
 		}
+		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{}, nil
 	}
 
@@ -198,8 +199,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 			return ctrl.Result{}, err
 		}
-		// Increment instance count
-		monitoring.StrimziSchemaRegistryCurrentInstanceCount.Inc()
 		err = r.Create(ctx, deployment)
 		if err != nil {
 			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
@@ -339,6 +338,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	r.updateInstanceCountMetric(ctx)
 	return ctrl.Result{}, nil
 }
 
@@ -772,8 +772,18 @@ func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregist
 	return nil
 }
 
-func (reconciler *StrimziSchemaRegistryReconciler) finalizeApplication() {
-	monitoring.StrimziSchemaRegistryCurrentInstanceCount.Dec()
+// updateInstanceCountMetric recomputes the instance count gauge from the list
+// of StrimziSchemaRegistry CRs. Recomputing (instead of inc/dec bookkeeping)
+// keeps the metric correct across operator restarts, CR deletions and missed
+// events. It is called on every reconcile completion and on the deletion
+// paths; a List error is logged and ignored so it never fails reconciliation.
+func (r *StrimziSchemaRegistryReconciler) updateInstanceCountMetric(ctx context.Context) {
+	list := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+	if err := r.List(ctx, list); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list StrimziSchemaRegistry CRs for the instance count metric")
+		return
+	}
+	monitoring.StrimziSchemaRegistryCurrentInstanceCount.Set(float64(len(list.Items)))
 }
 
 // migrateFinalizer ensures the object carries the current finalizer and drops
