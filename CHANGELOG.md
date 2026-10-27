@@ -1,3 +1,10 @@
+## [1.13.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.12.0...1.13.0) (2026-10-27)
+
+
+### 🚀 Features
+
+* **watches:** reconcile on Kafka and KafkaUser CR changes ([a6a8cff](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a6a8cff10aea2eedfb87339feb1c2337b3ea0ce2))
+
 ## [1.12.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.9...1.12.0) (2026-10-27)
 
 
