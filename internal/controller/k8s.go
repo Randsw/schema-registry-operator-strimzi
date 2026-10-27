@@ -926,13 +926,42 @@ func (r *StrimziSchemaRegistryReconciler) ensureClientAuthTruststoreSecret(
 }
 
 func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger logr.Logger) (*v1.Service, error) {
-	var port []v1.ServicePort
 	logger.Info("Creating a new Service", "Service.Namespace", instance.Namespace, "Service.Name", instance.Name)
-	if !instance.Spec.SecureHTTP {
-		port = append(port, v1.ServicePort{Name: "http", Protocol: "TCP", Port: 80, TargetPort: intstr.IntOrString{IntVal: 8081}})
+
+	// Defaults: ClusterIP on port 80 (http) or 443 (https), overridable via
+	// spec.service.type / port / nodeport.
+	serviceType := v1.ServiceTypeClusterIP
+	var servicePort int32
+	var portName string
+	var targetPort int32
+	if instance.Spec.SecureHTTP {
+		servicePort, portName, targetPort = 443, "https", 8085
 	} else {
-		port = append(port, v1.ServicePort{Name: "https", Protocol: "TCP", Port: 443, TargetPort: intstr.IntOrString{IntVal: 8085}})
+		servicePort, portName, targetPort = 80, "http", 8081
 	}
+	var nodePort int32
+	if instance.Spec.Service != nil {
+		if instance.Spec.Service.Type != "" {
+			serviceType = v1.ServiceType(instance.Spec.Service.Type)
+		}
+		if instance.Spec.Service.Port != nil {
+			servicePort = *instance.Spec.Service.Port
+		}
+		if instance.Spec.Service.NodePort != nil {
+			nodePort = *instance.Spec.Service.NodePort
+		}
+	}
+
+	sp := v1.ServicePort{
+		Name:       portName,
+		Protocol:   "TCP",
+		Port:       servicePort,
+		TargetPort: intstr.IntOrString{IntVal: targetPort},
+	}
+	if nodePort != 0 {
+		sp.NodePort = nodePort
+	}
+	port := []v1.ServicePort{sp}
 
 	// Start from the CR labels (existing behavior) and overlay the optional
 	// spec.service.labels passthrough.
@@ -951,6 +980,7 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 			Annotations: annotations,
 		},
 		Spec: v1.ServiceSpec{
+			Type:  serviceType,
 			Ports: port,
 			Selector: map[string]string{
 				"app": instance.Name,
@@ -1005,6 +1035,21 @@ func buildNetworkPolicy(instance *strimziregistryoperatorv1alpha1.StrimziSchemaR
 	kafkaPortTarget := intstr.IntOrString{Type: intstr.Int, IntVal: kafkaPort}
 	dnsPortTarget := intstr.IntOrString{Type: intstr.Int, IntVal: 53}
 
+	// Ingress sources: by default only pods in the CR's namespace; with
+	// spec.networkpolicy.allowcrossnamespaceingress the empty From list
+	// allows ingress from all namespaces.
+	var ingressFrom []networkingv1.NetworkPolicyPeer
+	if instance.Spec.NetworkPolicy != nil && instance.Spec.NetworkPolicy.AllowCrossNamespaceIngress {
+		ingressFrom = nil
+	} else {
+		ingressFrom = []networkingv1.NetworkPolicyPeer{
+			{
+				// Empty pod selector matches all pods in the same namespace.
+				PodSelector: &metav1.LabelSelector{},
+			},
+		}
+	}
+
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name + networkPolicySuffix,
@@ -1021,12 +1066,7 @@ func buildNetworkPolicy(instance *strimziregistryoperatorv1alpha1.StrimziSchemaR
 			},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{
 				{
-					From: []networkingv1.NetworkPolicyPeer{
-						{
-							// Empty pod selector matches all pods in the same namespace.
-							PodSelector: &metav1.LabelSelector{},
-						},
-					},
+					From: ingressFrom,
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: &tcp, Port: &listenerPortTarget},
 					},

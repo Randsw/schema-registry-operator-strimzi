@@ -70,6 +70,9 @@ spec:
                 type: boolean
               networkpolicy:
                 properties:
+                  allowcrossnamespaceingress:
+                    default: false
+                    type: boolean
                   enabled:
                     default: false
                     type: boolean
@@ -99,6 +102,23 @@ spec:
                     additionalProperties:
                       type: string
                     type: object
+                  nodeport:
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  port:
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  type:
+                    default: ClusterIP
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    type: string
                 type: object
               template:
                 properties:
