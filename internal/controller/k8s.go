@@ -130,19 +130,21 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	var TLSSecretName string
 	if instance.Spec.SecureHTTP {
 		if instance.Spec.TLSSecretName == "" {
-			TLSSecret, err := r.createTLSSecret(instance, ctx, logger, kafkaClusterName)
+			TLSSecret, exists, err := r.createTLSSecret(instance, ctx, logger, kafkaClusterName)
 			if err != nil {
 				logger.Error(err, "Failed to format TLS secret")
 				return nil, err
 			}
-			if TLSSecret != nil {
+			if exists {
+				err = r.Update(ctx, TLSSecret)
+			} else {
 				err = r.Create(ctx, TLSSecret)
-				if err != nil {
-					logger.Error(err, "Failed to create TLS secret")
-					return nil, err
-				}
-				logger.Info("Secret for Schema Registry TLS created successfully", "Secret.Name", TLSSecret.Name)
 			}
+			if err != nil {
+				logger.Error(err, "Failed to persist TLS secret")
+				return nil, err
+			}
+			logger.Info("Secret for Schema Registry TLS created/updated successfully", "Secret.Name", TLSSecret.Name)
 			TLSSecretName = TLSSecret.Name
 		} else {
 			TLSSecretName = instance.Spec.TLSSecretName
@@ -1153,8 +1155,14 @@ func (r *StrimziSchemaRegistryReconciler) reconcileNetworkPolicy(
 	return nil
 }
 
+// createTLSSecret builds the JKS keystore secret for the Schema Registry REST
+// API TLS endpoint. It returns the desired secret and a bool indicating
+// whether the secret already exists (callers must Update instead of Create in
+// that case). The existing secret is never deleted: updating in place keeps
+// the secret present for pods mounting it, avoiding the window where a
+// delete-then-create left the secret absent and pod mounts failed.
 func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
-	ctx context.Context, logger logr.Logger, clusterName string) (*v1.Secret, error) {
+	ctx context.Context, logger logr.Logger, clusterName string) (*v1.Secret, bool, error) {
 	logger.Info("Creating secret for schema registry TLS")
 	clusterCertSecret := &v1.Secret{}
 	clusterKeySecret := &v1.Secret{}
@@ -1162,38 +1170,35 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 	err := r.Get(ctx, types.NamespacedName{Name: clusterName + clusterCASuffix, Namespace: instance.Namespace},
 		clusterCertSecret)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	logger.V(1).Info("Searching for cluster CA key secret", "Secret", clusterName+clusterCAKeySuffix)
 	err = r.Get(ctx, types.NamespacedName{Name: clusterName + clusterCAKeySuffix, Namespace: instance.Namespace},
 		clusterKeySecret)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	clusterCert := string(clusterCertSecret.Data["ca.crt"])
 	clusterKey := string(clusterKeySecret.Data["ca.key"])
-	jksTLSSecret := &v1.Secret{}
 	jksTLSSecretName := instance.Name + tlsSecretSuffix
-	err = r.Get(ctx, types.NamespacedName{Name: jksTLSSecretName, Namespace: instance.Namespace}, jksTLSSecret)
+	existing := &v1.Secret{}
+	exists := false
+	err = r.Get(ctx, types.NamespacedName{Name: jksTLSSecretName, Namespace: instance.Namespace}, existing)
 	if err != nil && !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to get schema registry TLS secret")
-		return nil, err
+		return nil, false, err
 	}
 	if err == nil {
-		// Delete existing tls secret
-		err = r.Delete(ctx, jksTLSSecret)
-		if err != nil {
-			return nil, err
-		}
+		exists = true
 	}
 	logger.Info("Creating keystore for TLS secret", "Secret Name", jksTLSSecretName)
 	cp := certprocessor.NewCertProcessor(logger)
 	TLSKeystore, TLSKeystorePassword, err := cp.GenerateTLSforHTTP(clusterCert, clusterKey, "",
 		instance.Name+"."+instance.Namespace)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	jksTLSSecret = &v1.Secret{
+	jksTLSSecret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jksTLSSecretName,
 			Namespace: instance.Namespace,
@@ -1209,12 +1214,16 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 			"key_password":      []byte(TLSKeystorePassword),
 		},
 	}
+	if exists {
+		// Carry the ResourceVersion so callers can Update the secret in place.
+		jksTLSSecret.ResourceVersion = existing.ResourceVersion
+	}
 	err = ctrl.SetControllerReference(instance, jksTLSSecret, r.Scheme)
 	if err != nil {
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
-		return nil, err
+		return nil, false, err
 	}
-	return jksTLSSecret, nil
+	return jksTLSSecret, exists, nil
 }
 
 func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
