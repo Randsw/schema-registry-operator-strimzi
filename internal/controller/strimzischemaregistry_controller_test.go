@@ -3227,6 +3227,10 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("ClientAuthRequiresSecureHTTP"))
+
+			// The status.status field must be populated alongside the Ready
+			// condition so the CRD printcolumn is not permanently empty.
+			Expect(instance.Status.Status).To(Equal("InvalidSpec"))
 		})
 	})
 })
