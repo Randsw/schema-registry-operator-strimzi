@@ -881,8 +881,11 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	if np.Spec.Ingress[0].Ports[0].Port.IntVal != 8081 {
 		t.Errorf("expected ingress on SR listener port 8081, got %d", np.Spec.Ingress[0].Ports[0].Port.IntVal)
 	}
-	if len(np.Spec.Egress) != 1 || len(np.Spec.Egress[0].Ports) != 1 {
-		t.Fatalf("expected a single egress rule with one port, got %v", np.Spec.Egress)
+	if len(np.Spec.Egress) != 2 {
+		t.Fatalf("expected two egress rules (Kafka + DNS), got %v", np.Spec.Egress)
+	}
+	if len(np.Spec.Egress[0].Ports) != 1 {
+		t.Fatalf("expected a single port on the Kafka egress rule, got %v", np.Spec.Egress[0].Ports)
 	}
 	if np.Spec.Egress[0].Ports[0].Port.IntVal != 9093 {
 		t.Errorf("expected egress to Kafka bootstrap port 9093, got %d", np.Spec.Egress[0].Ports[0].Port.IntVal)
@@ -893,6 +896,33 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	if np.Spec.Egress[0].To[0].PodSelector.MatchLabels["strimzi.io/cluster"] != "kafka-cluster" {
 		t.Errorf("expected egress peer to target strimzi.io/cluster=kafka-cluster, got %v",
 			np.Spec.Egress[0].To[0].PodSelector.MatchLabels)
+	}
+
+	// The DNS egress rule is required so the Schema Registry can resolve the
+	// Kafka bootstrap service name in default-deny namespaces.
+	dns := np.Spec.Egress[1]
+	if len(dns.Ports) != 2 {
+		t.Fatalf("expected two ports (UDP+TCP 53) on the DNS egress rule, got %v", dns.Ports)
+	}
+	for _, p := range dns.Ports {
+		if p.Port.IntVal != 53 {
+			t.Errorf("expected DNS port 53, got %d", p.Port.IntVal)
+		}
+	}
+	if dns.Ports[0].Protocol == nil || *dns.Ports[0].Protocol != corev1.ProtocolUDP {
+		t.Errorf("expected first DNS port protocol UDP, got %v", dns.Ports[0].Protocol)
+	}
+	if dns.Ports[1].Protocol == nil || *dns.Ports[1].Protocol != corev1.ProtocolTCP {
+		t.Errorf("expected second DNS port protocol TCP, got %v", dns.Ports[1].Protocol)
+	}
+	if len(dns.To) != 1 {
+		t.Fatalf("expected one peer on the DNS egress rule, got %v", dns.To)
+	}
+	if dns.To[0].NamespaceSelector == nil || dns.To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kube-system" {
+		t.Errorf("expected DNS peer namespace selector kube-system, got %v", dns.To[0].NamespaceSelector)
+	}
+	if dns.To[0].PodSelector == nil || dns.To[0].PodSelector.MatchLabels["k8s-app"] != "kube-dns" {
+		t.Errorf("expected DNS peer pod selector k8s-app=kube-dns, got %v", dns.To[0].PodSelector)
 	}
 }
 

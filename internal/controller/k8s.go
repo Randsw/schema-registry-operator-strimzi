@@ -998,8 +998,10 @@ func buildNetworkPolicy(instance *strimziregistryoperatorv1alpha1.StrimziSchemaR
 	}
 
 	tcp := v1.ProtocolTCP
+	udp := v1.ProtocolUDP
 	listenerPortTarget := intstr.IntOrString{Type: intstr.Int, IntVal: listenerPort}
 	kafkaPortTarget := intstr.IntOrString{Type: intstr.Int, IntVal: kafkaPort}
+	dnsPortTarget := intstr.IntOrString{Type: intstr.Int, IntVal: 53}
 
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1041,6 +1043,30 @@ func buildNetworkPolicy(instance *strimziregistryoperatorv1alpha1.StrimziSchemaR
 					},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: &tcp, Port: &kafkaPortTarget},
+					},
+				},
+				{
+					// DNS resolution: the Schema Registry resolves the Kafka
+					// bootstrap service name via kube-dns. Without this rule
+					// the policy breaks name resolution in default-deny
+					// namespaces.
+					To: []networkingv1.NetworkPolicyPeer{
+						{
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"kubernetes.io/metadata.name": "kube-system",
+								},
+							},
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"k8s-app": "kube-dns",
+								},
+							},
+						},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: &udp, Port: &dnsPortTarget},
+						{Protocol: &tcp, Port: &dnsPortTarget},
 					},
 				},
 			},
