@@ -65,6 +65,10 @@ jobs:
       - name: Test
         run: make test
     Lint:
+      # A semantic-release commit ("chore(release): x.y.z") pushed to main or
+      # develop must not re-run this workflow: the tag it creates triggers the
+      # "Build and Push" workflow, which is the only job that should run.
+      if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
       runs-on: ubuntu-latest
       steps:
         - name: set up go ${{env.GO_VERSION}}
@@ -85,6 +89,7 @@ jobs:
     # and pushes/merges to main. Other branch pushes only run lint and tests.
     e2e_gate:
       name: E2E gate
+      if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
       runs-on: ubuntu-latest
       outputs:
         run: ${{ steps.decide.outputs.run }}
