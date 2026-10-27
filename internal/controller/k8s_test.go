@@ -25,6 +25,7 @@ import (
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
+	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -1150,6 +1151,80 @@ func TestComputeSpecHashClientAuth(t *testing.T) {
 		hash2, _ := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different ClientAuth: both %q", hash1)
+		}
+	})
+}
+
+// TestMapStrimziResourceToRequests covers the Kafka/KafkaUser watch mapping:
+// CRs attached to the same Kafka cluster (strimzi.io/cluster label) are
+// enqueued; KafkaUser events additionally require the name to match the CR.
+func TestMapStrimziResourceToRequests(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+
+	srA := newTestInstance()
+	srA.Name = "sr-a"
+	srA.Labels = map[string]string{"strimzi.io/cluster": "kafka-cluster"}
+	srB := newTestInstance()
+	srB.Name = "sr-b"
+	srB.Labels = map[string]string{"strimzi.io/cluster": "other-cluster"}
+	srC := newTestInstance()
+	srC.Name = "sr-c"
+	srC.Namespace = "other-ns"
+	srC.Labels = map[string]string{"strimzi.io/cluster": "kafka-cluster"}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(srA, srB, srC).Build()
+	reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+	ctx := context.Background()
+
+	t.Run("Kafka event enqueues same-cluster CRs in the same namespace", func(t *testing.T) {
+		kafkaObj := &kafka.Kafka{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kafka-cluster",
+				Namespace: "default",
+				Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+			},
+		}
+		requests := reconciler.mapStrimziResourceToRequests(ctx, kafkaObj, false)
+		if len(requests) != 1 {
+			t.Fatalf("expected 1 request, got %v", requests)
+		}
+		if requests[0].Name != "sr-a" || requests[0].Namespace != "default" {
+			t.Errorf("expected request for sr-a in default, got %v", requests[0])
+		}
+	})
+
+	t.Run("KafkaUser event requires name match", func(t *testing.T) {
+		matching := &kafka.KafkaUser{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sr-a",
+				Namespace: "default",
+				Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+			},
+		}
+		requests := reconciler.mapStrimziResourceToRequests(ctx, matching, true)
+		if len(requests) != 1 || requests[0].Name != "sr-a" {
+			t.Fatalf("expected 1 request for sr-a, got %v", requests)
+		}
+
+		nonMatching := &kafka.KafkaUser{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "unrelated-user",
+				Namespace: "default",
+				Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+			},
+		}
+		if requests := reconciler.mapStrimziResourceToRequests(ctx, nonMatching, true); len(requests) != 0 {
+			t.Errorf("expected no requests for an unrelated KafkaUser, got %v", requests)
+		}
+	})
+
+	t.Run("object without the cluster label enqueues nothing", func(t *testing.T) {
+		unlabeled := &kafka.Kafka{
+			ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: "default"},
+		}
+		if requests := reconciler.mapStrimziResourceToRequests(ctx, unlabeled, false); len(requests) != 0 {
+			t.Errorf("expected no requests without the cluster label, got %v", requests)
 		}
 	})
 }
