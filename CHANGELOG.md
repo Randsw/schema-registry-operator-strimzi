@@ -1,3 +1,10 @@
+## [1.11.8](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.7...1.11.8) (2026-10-27)
+
+
+### 🛠 Fixes
+
+* **tls:** update the REST API TLS secret in place instead of delete-then-create ([0ff7fb6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0ff7fb6d7f0fa9b297ffb31b98d55a1d274c7238))
+
 ## [1.11.7](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.6...1.11.7) (2026-10-27)
 
 
