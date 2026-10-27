@@ -26,6 +26,7 @@ import (
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
+	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -693,6 +694,40 @@ func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSASLUserSecret(
 	return dep, nil
 }
 
+// mapStrimziResourceToRequests enqueues reconcile requests for the
+// StrimziSchemaRegistry CRs attached to the same Kafka cluster as the watched
+// object, matched via the strimzi.io/cluster label. It backs the Kafka and
+// KafkaUser watches so listener/bootstrap changes on the Kafka CR and
+// authentication changes on the KafkaUser CR trigger reconciliation.
+// When requireNameMatch is true (KafkaUser), only the CR whose name equals
+// the watched object's name is enqueued, mirroring getKafkaUser.
+func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx context.Context, obj client.Object, requireNameMatch bool) []reconcile.Request {
+	clusterName := obj.GetLabels()[strimziClusterLabel]
+	if clusterName == "" {
+		return nil
+	}
+	list := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+	if err := r.List(ctx, list,
+		client.InNamespace(obj.GetNamespace()),
+		client.MatchingLabels{strimziClusterLabel: clusterName},
+	); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		if requireNameMatch && list.Items[i].Name != obj.GetName() {
+			continue
+		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      list.Items[i].Name,
+				Namespace: list.Items[i].Namespace,
+			},
+		})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -749,6 +784,18 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 					}
 				}
 				return requests
+			}),
+		).
+		Watches(
+			&kafka.Kafka{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				return r.mapStrimziResourceToRequests(ctx, obj, false)
+			}),
+		).
+		Watches(
+			&kafka.KafkaUser{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				return r.mapStrimziResourceToRequests(ctx, obj, true)
 			}),
 		).
 		Owns(&apps.Deployment{}).
