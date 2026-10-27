@@ -154,6 +154,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			Message:            msg,
 			ObservedGeneration: instance.Generation,
 		})
+		instance.Status.Status = "InvalidSpec"
 		if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
 			if err := r.Status().Update(ctx, instance); err != nil {
 				logger.Error(err, "Failed to update CR status")
@@ -241,6 +242,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			Message:            fmt.Sprintf("Schema Registry is ready with %d replicas", found.Status.ReadyReplicas),
 			ObservedGeneration: instance.Generation,
 		})
+		instance.Status.Status = "Ok"
 	} else {
 		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
 			Type:               conditionType,
@@ -249,6 +251,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			Message:            fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready", found.Status.ReadyReplicas, found.Status.Replicas),
 			ObservedGeneration: instance.Generation,
 		})
+		instance.Status.Status = "NotReady"
 	}
 	if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
 		err = r.Status().Update(ctx, instance)
