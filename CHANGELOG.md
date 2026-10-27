@@ -1,3 +1,10 @@
+## [1.11.6](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.5...1.11.6) (2026-10-27)
+
+
+### 🛠 Fixes
+
+* **metrics:** recompute the instance count gauge instead of inc/dec bookkeeping ([42cce33](https://github.com/Randsw/schema-registry-operator-strimzi/commit/42cce330541c816aa10a0192fcdb92a3643efbc4))
+
 ## [1.11.5](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.11.4...1.11.5) (2026-10-27)
 
 
