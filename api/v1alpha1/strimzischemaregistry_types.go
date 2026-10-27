@@ -115,6 +115,26 @@ type StrimziSchemaRegistrySpec struct {
 
 // Service configures the Kubernetes Service created for Schema Registry.
 type Service struct {
+	// Type is the Kubernetes Service type. Defaults to ClusterIP.
+	// +optional
+	// +kubebuilder:default="ClusterIP"
+	// +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
+	Type string `json:"type,omitempty"`
+
+	// Port overrides the Service port. Defaults to 80 for plain HTTP and 443
+	// for TLS REST endpoints.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port *int32 `json:"port,omitempty"`
+
+	// NodePort pins the node port when Type is NodePort or LoadBalancer. When
+	// unset, Kubernetes allocates one automatically.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	NodePort *int32 `json:"nodeport,omitempty"`
+
 	// Annotations are added to the managed Service's metadata.annotations.
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -129,6 +149,13 @@ type NetworkPolicy struct {
 	// Enabled toggles creation of the NetworkPolicy for Schema Registry pods.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled"`
+
+	// AllowCrossNamespaceIngress, when true, allows ingress to the Schema
+	// Registry from all namespaces instead of only the namespace of the
+	// StrimziSchemaRegistry resource.
+	// +optional
+	// +kubebuilder:default=false
+	AllowCrossNamespaceIngress bool `json:"allowcrossnamespaceingress,omitempty"`
 }
 
 // StrimziSchemaRegistryStatus defines the observed state of StrimziSchemaRegistry

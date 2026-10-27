@@ -817,6 +817,79 @@ func TestCreateServicePassthrough(t *testing.T) {
 	}
 }
 
+func TestCreateServiceTypePortPassthrough(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+
+	t.Run("defaults are ClusterIP on 80/443", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		svc, err := reconciler.createService(inst, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if svc.Spec.Type != corev1.ServiceTypeClusterIP {
+			t.Errorf("expected ClusterIP, got %q", svc.Spec.Type)
+		}
+		if svc.Spec.Ports[0].Port != 80 {
+			t.Errorf("expected port 80, got %d", svc.Spec.Ports[0].Port)
+		}
+		if svc.Spec.Ports[0].NodePort != 0 {
+			t.Errorf("expected no nodePort, got %d", svc.Spec.Ports[0].NodePort)
+		}
+	})
+
+	t.Run("type, port and nodeport are rendered", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		port := int32(8443)
+		nodePort := int32(30443)
+		inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+			Type:     "NodePort",
+			Port:     &port,
+			NodePort: &nodePort,
+		}
+		svc, err := reconciler.createService(inst, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if svc.Spec.Type != corev1.ServiceTypeNodePort {
+			t.Errorf("expected NodePort, got %q", svc.Spec.Type)
+		}
+		if svc.Spec.Ports[0].Port != 8443 {
+			t.Errorf("expected port 8443, got %d", svc.Spec.Ports[0].Port)
+		}
+		if svc.Spec.Ports[0].NodePort != 30443 {
+			t.Errorf("expected nodePort 30443, got %d", svc.Spec.Ports[0].NodePort)
+		}
+		if svc.Spec.Ports[0].TargetPort.IntVal != 8085 {
+			t.Errorf("expected targetPort 8085, got %d", svc.Spec.Ports[0].TargetPort.IntVal)
+		}
+	})
+}
+
+func TestBuildNetworkPolicyCrossNamespaceIngress(t *testing.T) {
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = false
+	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{
+		Enabled:                    true,
+		AllowCrossNamespaceIngress: true,
+	}
+
+	np, err := buildNetworkPolicy(inst, "kafka-cluster", "kafka-cluster-kafka-bootstrap.kafka.svc:9093")
+	if err != nil {
+		t.Fatalf("unexpected error building networkpolicy: %v", err)
+	}
+
+	// An empty From list allows ingress from all namespaces.
+	if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].From) != 0 {
+		t.Fatalf("expected a single ingress rule with an empty From list, got %v", np.Spec.Ingress)
+	}
+}
+
 func TestComputeSpecHashServiceNetworkPolicy(t *testing.T) {
 	t.Run("different service annotations produce different hash", func(t *testing.T) {
 		inst1 := newTestInstance()

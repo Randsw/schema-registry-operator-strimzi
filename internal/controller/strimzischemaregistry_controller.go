@@ -312,16 +312,21 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// Compare service ports, labels, and annotations to detect changes.
-	serviceChanged := false
+	// Compare service type, ports, labels, and annotations to detect changes.
+	serviceChanged := foundSvc.Spec.Type != desiredSvc.Spec.Type
 	if len(foundSvc.Spec.Ports) != len(desiredSvc.Spec.Ports) {
 		serviceChanged = true
 	} else {
 		for i, desiredPort := range desiredSvc.Spec.Ports {
 			existingPort := foundSvc.Spec.Ports[i]
+			// NodePort is compared only when the desired spec pins one; when
+			// unset, the API server allocates a node port into the existing
+			// spec and that allocation must not be treated as drift.
+			nodePortChanged := desiredPort.NodePort != 0 && existingPort.NodePort != desiredPort.NodePort
 			if existingPort.Port != desiredPort.Port ||
 				existingPort.TargetPort.IntVal != desiredPort.TargetPort.IntVal ||
-				existingPort.Name != desiredPort.Name {
+				existingPort.Name != desiredPort.Name ||
+				nodePortChanged {
 				serviceChanged = true
 				break
 			}
@@ -337,7 +342,17 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if serviceChanged {
 		logger.Info("Service changed, updating service",
 			"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
-		foundSvc.Spec.Ports = desiredSvc.Spec.Ports
+		// Preserve API-server-allocated node ports when the desired spec does
+		// not pin one, so updating the service does not drop the allocation.
+		newPorts := make([]v1.ServicePort, len(desiredSvc.Spec.Ports))
+		for i, p := range desiredSvc.Spec.Ports {
+			if p.NodePort == 0 && i < len(foundSvc.Spec.Ports) {
+				p.NodePort = foundSvc.Spec.Ports[i].NodePort
+			}
+			newPorts[i] = p
+		}
+		foundSvc.Spec.Ports = newPorts
+		foundSvc.Spec.Type = desiredSvc.Spec.Type
 		foundSvc.Labels = desiredSvc.Labels
 		foundSvc.Annotations = desiredSvc.Annotations
 		err = r.Update(ctx, foundSvc)
