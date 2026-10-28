@@ -37,7 +37,8 @@ One of the instruments that integrates Confluent Schema Registry with a Strimzi 
 - Once you deploy a `StrimziSchemaRegistry` resource, the operator creates a Kubernetes deployment of the Confluent Schema Registry, along with an associated Kubernetes service and secret.
 - Works with Strimzi's TLS authentication and authorization by converting the TLS certificate associated with a KafkaUser into a JKS-formatted keystore and truststore that's used by Confluent Schema Registry.
 - When Strimzi updates either the Kafka cluster's CA certificate or the KafkaUser's client certificates, the operator automatically recreates the JKS truststore/keystore secrets and triggers a rolling restart of the Schema Registry pods.
-- You can add TLS support to the Schema Registry REST API endpoint by providing your own certificate or letting the operator create one for you, signed by the Kafka Cluster CA certificate.
+- Changes to the Strimzi `Kafka` CR (e.g. listener or bootstrap address changes) and to the `KafkaUser` CR (e.g. authentication type changes) are watched and trigger reconciliation automatically.
+- You can add TLS support to the Schema Registry REST API endpoint by providing your own certificate or letting the operator create one for you, signed by the Kafka Cluster CA certificate. Operator-generated REST API certificates are renewed automatically before they expire (see [`tlssecretName`](#tlsecretname)).
 
 ## 3. Deploy operator
 
@@ -242,6 +243,10 @@ spec:
   namespace  with `StrimziSchemaRegistry` CR
   If this field is omitted or an empty string, the SSR operator automatically creates a TLS certificate and private key pair in JKS format, signs them with the Strimzi Kafka cluster CA(stored in the `<kafka-clustername>-cluster-ca` and `<kafka-clustername>-cluster-ca-cert` secrets)
   and mounts the secret to the Schema Registry pod.
+  Operator-generated certificates are valid for one year and are renewed automatically when fewer than 30 days remain
+  before expiry: the secret is updated in place, a `TLSCertificateRenewed` event is emitted and the Schema Registry
+  pods are rolled so the new keystore is loaded. Certificates you provide yourself via `tlssecretName` are never
+  touched by the operator.
   Secret data format:
 
   |Key               |Value            |
@@ -273,6 +278,10 @@ spec:
 
 - `template` is a standart Kubernetes template for pod. you can configure it as you want according to the [pod specification](https://dev-k8sref-io.web.app/docs/workloads/podtemplate-v1/)
 
+- `service.type` is the Kubernetes Service type. Valid values: `ClusterIP` (default), `NodePort`, `LoadBalancer`.
+- `service.port` overrides the Service port. Defaults to `80` for plain HTTP and `443` for TLS REST endpoints.
+- `service.nodeport` pins the node port when `service.type` is `NodePort` or `LoadBalancer`. When unset,
+  Kubernetes allocates one automatically.
 - `service.annotations` and `service.labels` are passed through to the managed Kubernetes Service.
   They are useful for exposing custom metadata such as Prometheus scraping annotations (`prometheus.io/scrape`),
   without editing the Service by hand. The operator always preserves its own `type` annotation and merges
@@ -282,6 +291,8 @@ spec:
   spec:
     # ...
     service:
+      type: LoadBalancer
+      port: 8443
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8081"
@@ -291,14 +302,18 @@ spec:
 
 - `networkpolicy.enabled` (default `false`) creates a `NetworkPolicy` for the Schema Registry pods.
   When enabled, the policy allows ingress on the Schema Registry listener port from within the namespace
-  and egress to the Kafka bootstrap service. Enable it to restrict pod traffic in namespaces that enforce
-  a default-deny policy.
+  and egress to the Kafka bootstrap service (plus DNS resolution via kube-dns). Enable it to restrict pod
+  traffic in namespaces that enforce a default-deny policy.
+- `networkpolicy.allowcrossnamespaceingress` (default `false`) allows ingress to the Schema Registry from
+  all namespaces instead of only the namespace of the `StrimziSchemaRegistry` resource. Only meaningful
+  when `networkpolicy.enabled` is `true`.
 
   ```yaml
   spec:
     # ...
     networkpolicy:
       enabled: true
+      allowcrossnamespaceingress: true
   ```
 
 ### Single replica support
