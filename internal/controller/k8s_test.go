@@ -1440,6 +1440,41 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		}
 	})
 
+	t.Run("renews without a -jks secret (PLAINTEXT + securehttp)", func(t *testing.T) {
+		originalThreshold := tlsCertRenewalThreshold
+		tlsCertRenewalThreshold = 400 * 24 * time.Hour
+		defer func() { tlsCertRenewalThreshold = originalThreshold }()
+
+		// PLAINTEXT without clientauth never produces a -jks secret. The
+		// renewal must still succeed and roll the deployment instead of
+		// error-looping once the certificate enters the renewal window.
+		plaintextInst := inst.DeepCopy()
+		plaintextInst.Spec.SecurityProtocol = "PLAINTEXT"
+		plaintextInst.Spec.Listener = "plaintext"
+
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(plaintextInst, caCertSecret, caKeySecret, tlsSecret.DeepCopy(), deployment.DeepCopy()).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, err := reconciler.handleTLSCertExpiry(context.Background(), plaintextInst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			t.Error("expected a requeue after renewal")
+		}
+
+		dep := &apps.Deployment{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err != nil {
+			t.Fatalf("failed to get deployment after renewal: %v", err)
+		}
+		if dep.Spec.Template.Annotations[tlsVersionKey] == "" {
+			t.Error("expected the tlsVersion pod-template annotation to trigger a rollout")
+		}
+		if got := dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"]; got != "" {
+			t.Errorf("expected no jksVersion annotation when no -jks secret exists, got %q", got)
+		}
+	})
+
 	t.Run("custom TLSSecretName is never touched", func(t *testing.T) {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = true

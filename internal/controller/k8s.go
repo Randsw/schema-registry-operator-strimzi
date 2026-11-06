@@ -1306,6 +1306,15 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 		jksSecret = &v1.Secret{}
 		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, jksSecret)
 		if err != nil {
+			// A missing -jks secret is not an error: PLAINTEXT and
+			// SASL_PLAINTEXT without clientauth never have one. The only
+			// caller passing nil (handleTLSCertExpiry) only needs the
+			// tlsVersion annotation, so skip the jksVersion annotation
+			// instead of failing every renewal reconcile in those modes.
+			if errors.IsNotFound(err) {
+				logger.Info("No jks secret found; skipping the jksVersion annotation", "Secret.Name", instance.Name+jksSecretSuffix)
+				return dep, nil
+			}
 			logger.Error(err, "Failed to get jks secret after user or cluster CA secret changed")
 			return nil, err
 		}
