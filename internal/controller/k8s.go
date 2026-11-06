@@ -199,7 +199,12 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	auth kafkaAuth,
 	logger logr.Logger,
 ) (*apps.Deployment, []string, error) {
-	podSpec := instance.Spec.Template
+	// Deep-copy the pod template: instance comes from the controller-runtime
+	// cache, and a plain struct copy shares the Containers slice backing array
+	// (and resource maps) with the cached CR object. The mutations below (env,
+	// resources, probes) would then corrupt the cached object observed by
+	// subsequent reconciles.
+	podSpec := *instance.Spec.Template.DeepCopy()
 	// Validate that at least one container exists
 	if len(podSpec.Spec.Containers) == 0 {
 		return nil, nil, fmt.Errorf("template must contain at least one container")

@@ -28,6 +28,7 @@ import (
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -782,6 +783,39 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 		assertQuantity(t, res.Limits[corev1.ResourceCPU], "1000m")
 		assertQuantity(t, res.Limits[corev1.ResourceMemory], "1Gi")
 	})
+}
+
+// TestBuildDeploymentSpecDoesNotMutateInput asserts that buildDeploymentSpec
+// leaves the given CR untouched: the instance comes from the informer cache,
+// and a shallow pod-template copy would share the Containers slice backing
+// array (and resource maps) with the cached object, letting the env, resource
+// and probe mutations below corrupt it for subsequent reconciles.
+func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+
+	inst := newTestInstance()
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.5"},
+			},
+		},
+	}
+
+	before := inst.Spec.Template.DeepCopy()
+
+	_, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "", kafkaAuth{}, logr.Logger{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !equality.Semantic.DeepEqual(*before, inst.Spec.Template) {
+		t.Errorf("buildDeploymentSpec mutated the input instance.Spec.Template:\nbefore: %+v\nafter:  %+v", *before, inst.Spec.Template)
+	}
 }
 
 func TestCreateServicePassthrough(t *testing.T) {
