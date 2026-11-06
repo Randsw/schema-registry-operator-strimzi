@@ -818,6 +818,43 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+// TestReadyCondition is a table-driven test for the Ready condition helper: a
+// Deployment with zero replicas (as observed immediately after creation) must
+// not be reported as Ready, and partial readiness must report NotReady.
+func TestReadyCondition(t *testing.T) {
+	tests := []struct {
+		name          string
+		replicas      int32
+		readyReplicas int32
+		wantStatus    metav1.ConditionStatus
+		wantReason    string
+	}{
+		{name: "0/0 replicas (fresh Deployment) is NotReady", replicas: 0, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "1/2 replicas is NotReady", replicas: 2, readyReplicas: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "2/2 replicas is Ready", replicas: 2, readyReplicas: 2, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
+		{name: "1/1 replica is Ready", replicas: 1, readyReplicas: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
+		{name: "0 ready of 1 replica is NotReady", replicas: 1, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cond := readyCondition(tt.replicas, tt.readyReplicas, 7)
+			if cond.Type != "Ready" {
+				t.Errorf("expected condition type Ready, got %q", cond.Type)
+			}
+			if cond.Status != tt.wantStatus {
+				t.Errorf("replicas=%d readyReplicas=%d: expected status %v, got %v", tt.replicas, tt.readyReplicas, tt.wantStatus, cond.Status)
+			}
+			if cond.Reason != tt.wantReason {
+				t.Errorf("replicas=%d readyReplicas=%d: expected reason %q, got %q", tt.replicas, tt.readyReplicas, tt.wantReason, cond.Reason)
+			}
+			if cond.ObservedGeneration != 7 {
+				t.Errorf("expected ObservedGeneration 7, got %d", cond.ObservedGeneration)
+			}
+		})
+	}
+}
+
 func TestCreateServicePassthrough(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
