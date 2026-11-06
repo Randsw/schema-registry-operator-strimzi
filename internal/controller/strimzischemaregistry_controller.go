@@ -329,24 +329,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	conditionType := "Ready"
-	if found.Status.ReadyReplicas == found.Status.Replicas {
-		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-			Type:               conditionType,
-			Status:             metav1.ConditionTrue,
-			Reason:             "Ready",
-			Message:            fmt.Sprintf("Schema Registry is ready with %d replicas", found.Status.ReadyReplicas),
-			ObservedGeneration: instance.Generation,
-		})
+	condition := readyCondition(found.Status.Replicas, found.Status.ReadyReplicas, instance.Generation)
+	meta.SetStatusCondition(&instance.Status.Conditions, condition)
+	if condition.Status == metav1.ConditionTrue {
 		instance.Status.Status = "Ok"
 	} else {
-		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-			Type:               conditionType,
-			Status:             metav1.ConditionFalse,
-			Reason:             "NotReady",
-			Message:            fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready", found.Status.ReadyReplicas, found.Status.Replicas),
-			ObservedGeneration: instance.Generation,
-		})
 		instance.Status.Status = "NotReady"
 	}
 	if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
@@ -421,15 +408,9 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Info("Service changed, updating service",
 			"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
 		// Preserve API-server-allocated node ports when the desired spec does
-		// not pin one, so updating the service does not drop the allocation.
-		newPorts := make([]v1.ServicePort, len(desiredSvc.Spec.Ports))
-		for i, p := range desiredSvc.Spec.Ports {
-			if p.NodePort == 0 && i < len(foundSvc.Spec.Ports) {
-				p.NodePort = foundSvc.Spec.Ports[i].NodePort
-			}
-			newPorts[i] = p
-		}
-		foundSvc.Spec.Ports = newPorts
+		// not pin one and the target type still uses node ports, so updating
+		// the service does not drop the allocation.
+		foundSvc.Spec.Ports = mergeServicePorts(desiredSvc.Spec.Type, desiredSvc.Spec.Ports, foundSvc.Spec.Ports)
 		foundSvc.Spec.Type = desiredSvc.Spec.Type
 		foundSvc.Labels = desiredSvc.Labels
 		foundSvc.Annotations = desiredSvc.Annotations
@@ -452,6 +433,29 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 
 	r.updateInstanceCountMetric(ctx)
 	return ctrl.Result{}, nil
+}
+
+// readyCondition builds the Ready status condition for the Schema Registry
+// Deployment. The Deployment is only Ready when it has at least one replica
+// and all of them are ready: immediately after creation Replicas and
+// ReadyReplicas are both 0, which must not be reported as Ready.
+func readyCondition(replicas, readyReplicas int32, generation int64) metav1.Condition {
+	if replicas > 0 && readyReplicas == replicas {
+		return metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionTrue,
+			Reason:             "Ready",
+			Message:            fmt.Sprintf("Schema Registry is ready with %d replicas", readyReplicas),
+			ObservedGeneration: generation,
+		}
+	}
+	return metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "NotReady",
+		Message:            fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready", readyReplicas, replicas),
+		ObservedGeneration: generation,
+	}
 }
 
 // handleSecretRotation detects changes to the user secret or cluster CA secret,
@@ -536,8 +540,35 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 		logger.Error(err, "Failed to get StrimziSchemaRegistry user jks secret.")
 		return ctrl.Result{}, err
 	} else if errors.IsNotFound(err) {
-		logger.Error(err, "Jks secret not found. Maybe first reconcile")
-		return ctrl.Result{}, nil
+		// handleSecretRotation only dispatches here once the Deployment
+		// exists, so a missing -jks secret means it was deleted manually:
+		// the next pod restart would fail to mount it. Rebuild it the same
+		// way a rotation does (createSecret fetches the user and cluster CA
+		// secrets itself) and roll the deployment.
+		logger.Info("Jks secret not found but the Deployment exists; recreating it", "Secret.Name", instance.Name+jksSecretSuffix)
+		newSecret, created, err := r.createSecret(instance, ctx, logger, strimziClusterName, nil, nil, auth)
+		if err != nil {
+			logger.Error(err, "Failed to rebuild missing jks secret")
+			return ctrl.Result{}, err
+		}
+		if created && newSecret != nil {
+			if err := r.Create(ctx, newSecret); err != nil {
+				logger.Error(err, "Failed to create rebuilt jks secret")
+				return ctrl.Result{}, err
+			}
+		}
+		monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
+		dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
+		if err != nil {
+			logger.Error(err, "Failed to get deployment for missing jks secret recreation")
+			return ctrl.Result{}, err
+		}
+		if err := r.Update(ctx, dep); err != nil {
+			logger.Error(err, "Failed to update deployment after jks secret recreation")
+			return ctrl.Result{}, err
+		}
+		logger.Info("Deployment updated after jks secret recreation", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	// Get user secret
@@ -1002,12 +1033,15 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 	tlsSecret := &v1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + tlsSecretSuffix, Namespace: instance.Namespace}, tlsSecret)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			// createDeployment bootstraps the TLS secret on first reconcile.
-			return ctrl.Result{}, nil
+		if !errors.IsNotFound(err) {
+			logger.Error(err, "Failed to get REST API TLS secret for expiry check")
+			return ctrl.Result{}, err
 		}
-		logger.Error(err, "Failed to get REST API TLS secret for expiry check")
-		return ctrl.Result{}, err
+		// createDeployment bootstraps the TLS secret on first reconcile, but
+		// it never runs again once the Deployment exists. Recreate a manually
+		// deleted secret (and roll the deployment) or the next pod restart
+		// fails to mount it.
+		return r.recreateMissingTLSSecret(ctx, instance, logger, strimziClusterName)
 	}
 	keystore := tlsSecret.Data["tls-keystore.jks"]
 	password, ok := tlsSecret.Data["keystore_password"]
@@ -1067,6 +1101,63 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 		return ctrl.Result{}, err
 	}
 	logger.Info("Deployment updated after TLS certificate renewal", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+	return ctrl.Result{RequeueAfter: time.Second}, nil
+}
+
+// recreateMissingTLSSecret rebuilds a deleted operator-managed REST API TLS
+// secret and rolls the deployment so the JVM reloads the recreated keystore.
+// It is a no-op before the Deployment exists: createDeployment bootstraps the
+// secret on first reconcile.
+func (r *StrimziSchemaRegistryReconciler) recreateMissingTLSSecret(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+	strimziClusterName string,
+) (ctrl.Result, error) {
+	dep := &apps.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, dep); err != nil {
+		if errors.IsNotFound(err) {
+			// createDeployment bootstraps the TLS secret on first reconcile.
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "Failed to get deployment for TLS secret recreation")
+		return ctrl.Result{}, err
+	}
+	logger.Info("REST API TLS secret not found but the Deployment exists; recreating it", "Secret.Name", instance.Name+tlsSecretSuffix)
+	newSecret, exists, err := r.createTLSSecret(instance, ctx, logger, strimziClusterName)
+	if err != nil {
+		logger.Error(err, "Failed to build replacement REST API TLS secret")
+		return ctrl.Result{}, err
+	}
+	if exists {
+		err = r.Update(ctx, newSecret)
+	} else {
+		err = r.Create(ctx, newSecret)
+	}
+	if err != nil {
+		logger.Error(err, "Failed to persist replacement REST API TLS secret")
+		return ctrl.Result{}, err
+	}
+	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
+	if r.Recorder != nil {
+		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "TLSSecretRecreated", "",
+			"REST API TLS secret %s was deleted; recreated it and rolling the deployment", instance.Name+tlsSecretSuffix)
+	}
+	// Roll the deployment so the JVM reloads the recreated keystore.
+	dep, err = r.updateDeployment(instance, ctx, logger, nil)
+	if err != nil {
+		logger.Error(err, "Failed to get deployment for TLS secret recreation rollout")
+		return ctrl.Result{}, err
+	}
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations[tlsVersionKey] = newSecret.ResourceVersion
+	if err := r.Update(ctx, dep); err != nil {
+		logger.Error(err, "Failed to update deployment after TLS secret recreation")
+		return ctrl.Result{}, err
+	}
+	logger.Info("Deployment updated after TLS secret recreation", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 

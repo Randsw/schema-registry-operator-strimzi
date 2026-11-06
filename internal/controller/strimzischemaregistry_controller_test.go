@@ -325,6 +325,21 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, found)
 			}, time.Minute, time.Second).Should(Succeed())
 
+			// envtest has no kubelet or deployment controller, so the Deployment
+			// status stays 0/0 forever. The operator now requires at least one
+			// ready replica before reporting Ready=True, so simulate a ready
+			// Deployment the way a real cluster would report it.
+			By("Marking the Deployment as ready (envtest has no kubelet)")
+			Eventually(func() error {
+				deployment := &appsv1.Deployment{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment); err != nil {
+					return err
+				}
+				deployment.Status.Replicas = 1
+				deployment.Status.ReadyReplicas = 1
+				return k8sClient.Status().Update(ctx, deployment)
+			}, time.Minute, time.Second).Should(Succeed())
+
 			By("Checking if Secret was successfully created in the reconciliation")
 			Eventually(func() error {
 				found := &corev1.Secret{}

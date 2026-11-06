@@ -199,7 +199,12 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	auth kafkaAuth,
 	logger logr.Logger,
 ) (*apps.Deployment, []string, error) {
-	podSpec := instance.Spec.Template
+	// Deep-copy the pod template: instance comes from the controller-runtime
+	// cache, and a plain struct copy shares the Containers slice backing array
+	// (and resource maps) with the cached CR object. The mutations below (env,
+	// resources, probes) would then corrupt the cached object observed by
+	// subsequent reconciles.
+	podSpec := *instance.Spec.Template.DeepCopy()
 	// Validate that at least one container exists
 	if len(podSpec.Spec.Containers) == 0 {
 		return nil, nil, fmt.Errorf("template must contain at least one container")
@@ -1017,6 +1022,23 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 	return svc, nil
 }
 
+// mergeServicePorts returns the desired service ports with API-server-allocated
+// node ports preserved from the existing service. The allocation is carried
+// over only when the target service type still uses node ports (NodePort or
+// LoadBalancer): copying it into e.g. a ClusterIP service makes the API server
+// reject the update ("nodePort: Forbidden"), deadlocking reconciliation.
+func mergeServicePorts(desiredType v1.ServiceType, desiredPorts, existingPorts []v1.ServicePort) []v1.ServicePort {
+	ports := make([]v1.ServicePort, len(desiredPorts))
+	for i, p := range desiredPorts {
+		if p.NodePort == 0 && i < len(existingPorts) &&
+			(desiredType == v1.ServiceTypeNodePort || desiredType == v1.ServiceTypeLoadBalancer) {
+			p.NodePort = existingPorts[i].NodePort
+		}
+		ports[i] = p
+	}
+	return ports
+}
+
 // mergeStringMaps returns a new map containing base overlaid with override.
 // The result is never nil, which keeps hashing and diffing deterministic.
 func mergeStringMaps(base, override map[string]string) map[string]string {
@@ -1301,6 +1323,15 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 		jksSecret = &v1.Secret{}
 		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, jksSecret)
 		if err != nil {
+			// A missing -jks secret is not an error: PLAINTEXT and
+			// SASL_PLAINTEXT without clientauth never have one. The only
+			// caller passing nil (handleTLSCertExpiry) only needs the
+			// tlsVersion annotation, so skip the jksVersion annotation
+			// instead of failing every renewal reconcile in those modes.
+			if errors.IsNotFound(err) {
+				logger.Info("No jks secret found; skipping the jksVersion annotation", "Secret.Name", instance.Name+jksSecretSuffix)
+				return dep, nil
+			}
 			logger.Error(err, "Failed to get jks secret after user or cluster CA secret changed")
 			return nil, err
 		}
