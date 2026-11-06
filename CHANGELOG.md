@@ -1,3 +1,29 @@
+## [1.15.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.14.0...1.15.0) (2026-11-06)
+
+
+### 📔 Docs
+
+* document the user-provided TLS secret contract ([ecfedd7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ecfedd7be8f833473492ad1f4cca142738fc6e8a))
+* **readme:** document the new spec fields and behaviors ([ae450b2](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ae450b2ff6b69e107d25c1b94ee34591beda3cd5))
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump helm/chart-releaser-action from 1.7.0 to 1.8.0 ([3de7d5c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3de7d5c998719e0f08adacd458024700c2c46461))
+* **deps:** Bump helm/chart-releaser-action from 1.8.0 to 1.9.0 ([bd2ebae](https://github.com/Randsw/schema-registry-operator-strimzi/commit/bd2ebae6b401a2ff1afa2fb19a193033fea074c1))
+* **deps:** Bump k8s.io/apiextensions-apiserver from 0.37.1 to 0.37.2 ([5a9c32e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5a9c32eb8c01549a7f92b4fdc00420d6f14872a6))
+* skip test/release workflow on semantic-release commits ([952f922](https://github.com/Randsw/schema-registry-operator-strimzi/commit/952f922d29b9ae175ddb0b6476a79a60f285a8f8))
+
+
+### 🧪 Tests
+
+* cover user TLS secret validation, rotation and watch mapping ([8e88a68](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8e88a68ab5813ffee206c92557a6b85da415a4c3))
+
+
+### 🚀 Features
+
+* validate and roll user-provided TLS secrets ([d78a01b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d78a01beb2bc144d4c987066e8b9097173d51e28))
+
 ## [1.14.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.13.0...1.14.0) (2026-10-27)
 
 
