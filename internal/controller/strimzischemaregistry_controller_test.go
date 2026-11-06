@@ -3237,4 +3237,198 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(instance.Status.Status).To(Equal("InvalidSpec"))
 		})
 	})
+
+	// Phase 1: user-provided TLS secret validation. A missing or incomplete
+	// user TLS secret must surface as Ready=False/InvalidTLSSecret and block
+	// Deployment creation; fixing the secret lets reconciliation proceed.
+	Context("When using an invalid user-provided TLS secret", func() {
+		const SchemaRegistryName = "test-invalid-user-tls"
+		const UserTLSSecretName = "user-tls-secret"
+
+		ctx := context.Background()
+
+		// envtest never fully deletes namespaces (no namespace controller), so
+		// each spec gets its own uniquely named namespace.
+		specNamespace := ""
+		namespaceCounter := 0
+		var typeNamespacedName types.NamespacedName
+		var deploymentNamespacedName types.NamespacedName
+
+		BeforeEach(func() {
+			specNamespace = SchemaRegistryName + "-" + strconv.Itoa(namespaceCounter)
+			namespaceCounter++
+			typeNamespacedName = types.NamespacedName{Name: SchemaRegistryName, Namespace: specNamespace}
+			deploymentNamespacedName = types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: specNamespace}
+
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: specNamespace}}
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			By("Creating strimzi kafka cluster")
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "kafka-cluster",
+					Namespace: namespace.Name,
+				},
+				Spec: &kafka.KafkaSpec{
+					EntityOperator: &kafka.EntityOperatorSpec{
+						TopicOperator: &kafka.EntityTopicOperatorSpec{},
+						UserOperator:  &kafka.EntityUserOperatorSpec{},
+					},
+					Kafka: &kafka.KafkaClusterSpec{
+						Authorization: &kafka.KafkaAuthorization{
+							SuperUsers: []string{"CN=root"},
+							Type:       kafka.KafkaAuthorizationType(kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE),
+						},
+						Config: kafka.MapStringObject{
+							"apple":   5,
+							"lettuce": 7,
+						},
+						Listeners: []kafka.GenericKafkaListener{
+							{
+								Name: "plain",
+								Port: 9092,
+								Tls:  false,
+								Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+							},
+							{
+								Name: "tls",
+								Port: 9093,
+								Tls:  true,
+								Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+								Authentication: &kafka.KafkaListenerAuthentication{
+									Type: kafka.TLS_KAFKALISTENERAUTHENTICATIONTYPE,
+								},
+							},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{
+				ClusterId: "Ypb68J1GSu-jqq0N0ama0w",
+				Listeners: []kafka.ListenerStatus{
+					{
+						Addresses: []kafka.ListenerAddress{
+							{
+								Host: "kafka-cluster-kafka-bootstrap.kafka.svc",
+								Port: ptr.To(int32(9092)),
+							},
+						},
+						BootstrapServers: "kafka-cluster-kafka-bootstrap.kafka.svc:9092",
+						Name:             "plain",
+					},
+					{
+						Addresses: []kafka.ListenerAddress{
+							{
+								Host: "kafka-cluster-kafka-bootstrap.kafka.svc",
+								Port: ptr.To(int32(9093)),
+							},
+						},
+						BootstrapServers: "kafka-cluster-kafka-bootstrap.kafka.svc:9093",
+						Name:             "TLS",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updatedCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: specNamespace}, updatedCluster)).To(Succeed())
+			updatedCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updatedCluster)).To(Succeed())
+
+			By("Creating a StrimziSchemaRegistry referencing a missing user TLS secret")
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      SchemaRegistryName,
+					Namespace: specNamespace,
+					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+				},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         true,
+					TLSSecretName:      UserTLSSecretName,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: specNamespace}})
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should set Ready=False with the InvalidTLSSecret reason and not create the Deployment", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+
+			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("InvalidTLSSecret"))
+			Expect(cond.Message).To(ContainSubstring(UserTLSSecretName))
+			Expect(instance.Status.Status).To(Equal("InvalidTLSSecret"))
+
+			By("Verifying no Deployment was created")
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deploymentNamespacedName, deployment)).NotTo(Succeed())
+		})
+
+		It("should proceed with reconciliation once the secret is fixed", func() {
+			By("Reconciling with the missing secret first")
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Creating a valid user TLS secret")
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: UserTLSSecretName, Namespace: specNamespace},
+				Data: map[string][]byte{
+					"tls-keystore.jks":  []byte("keystore-bytes"),
+					"keystore_password": []byte("store-password"),
+					"key_password":      []byte("key-password"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			secretVersion := secret.ResourceVersion
+			Expect(secretVersion).NotTo(BeEmpty())
+
+			By("Reconciling again — the Deployment must now be created")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deploymentNamespacedName, deployment)).To(Succeed())
+
+			By("Verifying the deployment records the user TLS secret version for rotation")
+			Expect(deployment.Spec.Template.Annotations[tlsVersionKey]).To(Equal(secretVersion))
+
+			// The post-create reconcile returns early with a requeue, so the
+			// Ready condition is refreshed on the following reconcile.
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the Ready condition is no longer InvalidTLSSecret")
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).NotTo(Equal("InvalidTLSSecret"))
+			Expect(instance.Status.Status).NotTo(Equal("InvalidTLSSecret"))
+		})
+	})
 })

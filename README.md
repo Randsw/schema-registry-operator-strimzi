@@ -239,22 +239,53 @@ spec:
   `SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION` and `SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD`. For
   `PLAINTEXT`/`SASL_PLAINTEXT` security protocols (which do not otherwise need a truststore), the operator
   builds a truststore-only secret from the cluster CA certificate for this purpose.
-- `tlssecretName` is name of secret that contain TLS certificate and private key pair in JKS format. Must be in same
-  namespace  with `StrimziSchemaRegistry` CR
+- `tlssecretName` is name of secret that contains the TLS certificate and private key pair in JKS format. Must be in the same
+  namespace as the `StrimziSchemaRegistry` CR.
   If this field is omitted or an empty string, the SSR operator automatically creates a TLS certificate and private key pair in JKS format, signs them with the Strimzi Kafka cluster CA(stored in the `<kafka-clustername>-cluster-ca` and `<kafka-clustername>-cluster-ca-cert` secrets)
   and mounts the secret to the Schema Registry pod.
   Operator-generated certificates are valid for one year and are renewed automatically when fewer than 30 days remain
   before expiry: the secret is updated in place, a `TLSCertificateRenewed` event is emitted and the Schema Registry
   pods are rolled so the new keystore is loaded. Certificates you provide yourself via `tlssecretName` are never
   touched by the operator.
-  Secret data format:
+  The secret must contain exactly the following keys with non-empty values:
 
-  |Key               |Value            |
-  |------------------|-----------------|
-  |tls-keystore.jks  |Keystore         |
-  |keystore_password |Keystore password|
-  |key_password      |Key password     |
-  
+  |Key               |Value                                            |
+  |------------------|-------------------------------------------------|
+  |tls-keystore.jks  |JKS keystore with the certificate and private key|
+  |keystore_password |Keystore password                                |
+  |key_password      |Private key password                             |
+
+  The operator validates the secret before rendering the Deployment. A missing secret, or missing/empty keys, set
+  `Ready=False` with reason `InvalidTLSSecret` on the CR status and emit a `Warning` event; no Deployment is created
+  until the secret is fixed, and reconciliation resumes automatically once the secret is valid.
+  Rotating the secret (any update that changes its `resourceVersion`) is detected by the operator and the Schema
+  Registry pods are rolled automatically so the JVM reloads the keystore.
+
+  Create the secret with `kubectl`:
+
+  ```bash
+  kubectl create secret generic schema-registry-tls \
+    --from-file=tls-keystore.jks=/path/to/tls-keystore.jks \
+    --from-literal=keystore_password='<keystore-password>' \
+    --from-literal=key_password='<key-password>'
+  ```
+
+  cert-manager issues `tls.crt`/`tls.key` (PEM) and cannot emit a JKS keystore through `additionalOutputFormats`,
+  so re-pack its output into the required format:
+
+  ```bash
+  kubectl get secret <cert-manager-secret> -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/tls.crt
+  kubectl get secret <cert-manager-secret> -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/tls.key
+  openssl pkcs12 -export -in /tmp/tls.crt -inkey /tmp/tls.key -name schema-registry \
+    -passout pass:<keystore-password> -out /tmp/keystore.p12
+  keytool -importkeystore -srckeystore /tmp/keystore.p12 -srcstoretype PKCS12 -srcstorepass <keystore-password> \
+    -destkeystore /tmp/tls-keystore.jks -deststoretype JKS -deststorepass <keystore-password> -noprompt
+  kubectl create secret generic schema-registry-tls \
+    --from-file=tls-keystore.jks=/tmp/tls-keystore.jks \
+    --from-literal=keystore_password='<keystore-password>' \
+    --from-literal=key_password='<keystore-password>'
+  ```
+
   [Java Generate Keys Tutorial](https://docs.oracle.com/javase/tutorial/security/toolsign/step3.html)
 
   See also: Schema Registry [Configuring the REST API for HTTP or HTTPS](https://docs.confluent.io/platform/current/schema-registry/security/index.html#configuring-the-rest-api-for-http-or-https)

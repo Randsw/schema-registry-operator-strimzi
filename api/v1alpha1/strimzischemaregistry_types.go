@@ -58,8 +58,26 @@ type StrimziSchemaRegistrySpec struct {
 	// +kubebuilder:default=false
 	ClientAuth bool `json:"clientauth,omitempty"`
 
-	// TLSSecretName is the name of the Kubernetes secret containing TLS certificates.
-	// Must be a valid Kubernetes resource name (DNS subdomain) or empty.
+	// TLSSecretName is the name of the Kubernetes secret containing the TLS
+	// certificate and private key for the Schema Registry REST API, in JKS
+	// format. Must be a valid Kubernetes resource name (DNS subdomain) or
+	// empty, and the secret must live in the same namespace as this CR.
+	//
+	// When set (together with securehttp=true), the secret must contain
+	// exactly the following keys with non-empty values:
+	//   - tls-keystore.jks: the JKS keystore with the certificate and key
+	//   - keystore_password: the keystore password
+	//   - key_password: the private key password
+	//
+	// The operator validates the secret before rendering the Deployment: a
+	// missing secret or missing/empty keys set Ready=False with reason
+	// InvalidTLSSecret (plus a Warning event) and reconciliation is skipped
+	// until the secret is fixed. Rotating the secret (any change that bumps
+	// its resourceVersion) automatically rolls the Schema Registry pods so
+	// the JVM reloads the keystore.
+	//
+	// When empty, the operator creates and renews a managed <name>-tls secret
+	// signed by the Kafka cluster CA instead.
 	// +kubebuilder:default=""
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
