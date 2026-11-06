@@ -1,3 +1,19 @@
+## [1.15.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.15.0...1.15.1) (2026-11-06)
+
+
+### 📔 Docs
+
+* document secret self-healing and the Ready condition ([45e22c5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/45e22c556d1333bc2146b7cc0c808bd00d1496b8))
+
+
+### 🛠 Fixes
+
+* deep-copy the pod template in buildDeploymentSpec ([83b3f43](https://github.com/Randsw/schema-registry-operator-strimzi/commit/83b3f435d3c619338cf50f3c1d7a74dfac7ff08d))
+* preserve node ports only for NodePort/LoadBalancer services ([5083020](https://github.com/Randsw/schema-registry-operator-strimzi/commit/508302097b6257b5c04feb66a63572d471e890c5))
+* recreate deleted operator-managed -jks and -tls secrets ([5ea1365](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5ea136553f9066f4377b750b4cd6c6a2d19371b9))
+* require at least one replica before reporting Ready ([0c6c9b8](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0c6c9b837bc69cae357373d4167b525bbca3a1c7))
+* tolerate a missing -jks secret in updateDeployment ([902a3af](https://github.com/Randsw/schema-registry-operator-strimzi/commit/902a3af59ab4db16581a7ee0a659d55ab2d9394b))
+
 ## [1.15.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.14.0...1.15.0) (2026-11-06)
 
 
