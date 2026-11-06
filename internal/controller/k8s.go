@@ -162,7 +162,20 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 		}
 	}
 
-	dep, configOverridden, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
+	// Track the user-provided REST API TLS secret version so rotating the
+	// secret (e.g. a cert-manager reissue) triggers a rollout: the Schema
+	// Registry JVM reads the JKS keystore once at startup.
+	tlsResourceVersion := ""
+	if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName != "" {
+		userTLSSecret := &v1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: TLSSecretName, Namespace: instance.Namespace}, userTLSSecret); err != nil {
+			logger.Error(err, "Failed to get user-provided TLS secret", "Secret.Name", TLSSecretName)
+			return nil, err
+		}
+		tlsResourceVersion = userTLSSecret.ResourceVersion
+	}
+
+	dep, configOverridden, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, tlsResourceVersion, TLSSecretName, auth, logger)
 	if err != nil {
 		logger.Error(err, "Failed to build deployment spec")
 		return nil, err
@@ -181,6 +194,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	kafkaClusterName string,
 	jksResourceVersion string,
 	saslUserResourceVersion string,
+	tlsResourceVersion string,
 	TLSSecretName string,
 	auth kafkaAuth,
 	logger logr.Logger,
@@ -231,6 +245,14 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	// trigger a rollout without rebuilding any JKS material.
 	if auth.NeedsSASL {
 		podSpec.Annotations[saslUserVersionKey] = saslUserResourceVersion
+	}
+
+	// Track the user-provided REST API TLS secret version so rotating the
+	// secret triggers a rollout. Only set for user-provided secrets; the
+	// operator-managed TLS secret records its version on renewal instead
+	// (handleTLSCertExpiry), preserving its existing semantics.
+	if tlsResourceVersion != "" {
+		podSpec.Annotations[tlsVersionKey] = tlsResourceVersion
 	}
 
 	// Compute spec hash and store it in annotation to detect spec changes on subsequent reconciliations.
@@ -1461,16 +1483,25 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 
 	// Determine TLSSecretName without creating any secrets
 	TLSSecretName := ""
+	tlsResourceVersion := ""
 	if instance.Spec.SecureHTTP {
 		if instance.Spec.TLSSecretName != "" {
 			TLSSecretName = instance.Spec.TLSSecretName
+			// Track the user-provided REST API TLS secret version so rotating
+			// the secret triggers a rollout. Reconcile validates the secret
+			// before this point, so it must exist here.
+			userTLSSecret := &v1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{Name: TLSSecretName, Namespace: instance.Namespace}, userTLSSecret); err != nil {
+				return nil, false, fmt.Errorf("failed to get user-provided TLS secret: %w", err)
+			}
+			tlsResourceVersion = userTLSSecret.ResourceVersion
 		} else {
 			TLSSecretName = instance.Name + tlsSecretSuffix
 		}
 	}
 
 	// Generate desired deployment spec — NO side effects (no secret creation/deletion)
-	desired, configOverridden, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, TLSSecretName, auth, logger)
+	desired, configOverridden, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, tlsResourceVersion, TLSSecretName, auth, logger)
 	if err != nil {
 		return nil, false, err
 	}

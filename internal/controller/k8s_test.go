@@ -718,7 +718,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 			},
 		}
 
-		dep, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
+		dep, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "", kafkaAuth{}, logr.Logger{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -749,7 +749,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 			},
 		}
 
-		dep, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
+		dep, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "", kafkaAuth{}, logr.Logger{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -771,7 +771,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 			},
 		}
 
-		dep, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", kafkaAuth{}, logr.Logger{})
+		dep, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "", kafkaAuth{}, logr.Logger{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

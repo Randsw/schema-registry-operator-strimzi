@@ -93,6 +93,28 @@ func clientAuthValidationError(instance *strimziregistryoperatorv1alpha1.Strimzi
 	return ""
 }
 
+// userTLSSecretValidationError returns a non-empty message describing why the
+// user-provided REST API TLS secret (spec.tlssecretname) cannot be used, or an
+// empty string when it is valid. A nil secret means the secret does not exist.
+// The secret must carry a JKS keystore plus both passwords with non-empty
+// values; the Schema Registry container references these exact keys.
+func userTLSSecretValidationError(secretName string, secret *v1.Secret) string {
+	if secret == nil {
+		return fmt.Sprintf("user-provided TLS secret %q not found", secretName)
+	}
+	var missing []string
+	for _, key := range []string{"tls-keystore.jks", "keystore_password", "key_password"} {
+		if len(secret.Data[key]) == 0 {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Sprintf("user-provided TLS secret %q is missing required key(s) or has empty values: %s",
+			secretName, strings.Join(missing, ", "))
+	}
+	return ""
+}
+
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/finalizers,verbs=update
@@ -178,6 +200,51 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
+	// Validate the user-provided REST API TLS secret before building or
+	// updating the Deployment. A missing secret or missing/empty required keys
+	// would render a Deployment whose pods can never start (stuck in
+	// CreateContainerConfigError or a Schema Registry crash loop) with no
+	// operator-visible signal. Surface the failure on the CR status and via a
+	// Warning event, and skip reconciliation until the secret is fixed: the
+	// Secret watch re-triggers reconciliation when the user updates it.
+	if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName != "" {
+		userTLSSecret := &v1.Secret{}
+		err = r.Get(ctx, types.NamespacedName{Name: instance.Spec.TLSSecretName, Namespace: instance.Namespace}, userTLSSecret)
+		if err != nil && !errors.IsNotFound(err) {
+			logger.Error(err, "Failed to get user-provided TLS secret", "Secret.Name", instance.Spec.TLSSecretName)
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			return ctrl.Result{}, err
+		}
+		var userTLSSecretObj *v1.Secret
+		if err == nil {
+			userTLSSecretObj = userTLSSecret
+		}
+		if msg := userTLSSecretValidationError(instance.Spec.TLSSecretName, userTLSSecretObj); msg != "" {
+			logger.Info("Invalid user-provided TLS secret; skipping reconciliation", "Secret.Name", instance.Spec.TLSSecretName, "Reason", msg)
+			meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				Reason:             "InvalidTLSSecret",
+				Message:            msg,
+				ObservedGeneration: instance.Generation,
+			})
+			instance.Status.Status = "InvalidTLSSecret"
+			if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
+				if err := r.Status().Update(ctx, instance); err != nil {
+					logger.Error(err, "Failed to update CR status")
+					monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+					return ctrl.Result{}, err
+				}
+			}
+			if r.Recorder != nil {
+				r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "InvalidTLSSecret", "", "%s", msg)
+			}
+			// The Secret watch re-enqueues when the user fixes the secret;
+			// the requeue is only a safety net.
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+	}
+
 	// Get the strimzi cluster name from the CR labels
 	strimziClusterName, err := getStrimziClusterName(instance)
 	if err != nil {
@@ -199,6 +266,17 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	// Renew the operator-managed REST API TLS certificate when it is close to
 	// expiry, so the Schema Registry never serves an expired certificate.
 	result, err = r.handleTLSCertExpiry(ctx, instance, logger, strimziClusterName)
+	if err != nil {
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		return result, err
+	}
+	if result.RequeueAfter > 0 {
+		return result, nil
+	}
+
+	// Roll the Deployment when the user-provided REST API TLS secret was
+	// rotated, so the Schema Registry JVM reloads the JKS keystore.
+	result, err = r.handleUserTLSSecretRotation(ctx, instance, logger)
 	if err != nil {
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		return result, err
@@ -743,63 +821,81 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 	return requests
 }
 
+// mapSecretToRequests enqueues reconcile requests for the StrimziSchemaRegistry
+// CRs affected by a Secret event. Two matching paths:
+//  1. Label fast-path (unchanged): secrets carrying the strimzi.io/cluster
+//     label are matched against CRs of the same Kafka cluster — the CR-named
+//     user secret and the cluster CA cert secret.
+//  2. Name path: CRs whose spec.tlssecretname equals the secret's name.
+//     User-provided REST API TLS secrets (created with kubectl or cert-manager)
+//     typically carry no Strimzi label, so they are matched by name instead.
+//
+// A CR matching both paths is enqueued once.
+func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Context, obj client.Object) []reconcile.Request {
+	requests := make([]reconcile.Request, 0, 1)
+	seen := make(map[types.NamespacedName]struct{}, 1)
+	add := func(name, namespace string) {
+		nn := types.NamespacedName{Name: name, Namespace: namespace}
+		if _, ok := seen[nn]; ok {
+			return
+		}
+		seen[nn] = struct{}{}
+		requests = append(requests, reconcile.Request{NamespacedName: nn})
+	}
+
+	// Label fast-path: all Strimzi secrets we care about (user secrets, cluster
+	// CA cert secrets) carry the strimzi.io/cluster label. List only CRs that
+	// belong to the same Kafka cluster, using a label selector to minimize the
+	// List scope (typically 1 CR per cluster).
+	secretClusterName := obj.GetLabels()[strimziClusterLabel]
+	if secretClusterName != "" {
+		attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+		if err := r.List(ctx, attachedStrimziRegistryOperators,
+			client.InNamespace(obj.GetNamespace()),
+			client.MatchingLabels{strimziClusterLabel: secretClusterName},
+		); err == nil {
+			for i := range attachedStrimziRegistryOperators.Items {
+				item := &attachedStrimziRegistryOperators.Items[i]
+				// User secret: the secret name matches the CR name (both are the
+				// KafkaUser name).
+				if obj.GetName() == item.Name {
+					add(item.Name, item.Namespace)
+					continue
+				}
+				// Cluster CA cert secret: name ends with -cluster-ca-cert.
+				if strings.HasSuffix(obj.GetName(), clusterCASuffix) {
+					add(item.Name, item.Namespace)
+				}
+			}
+		}
+	}
+
+	// Name path: user-provided REST API TLS secrets referenced via
+	// spec.tlssecretname. Namespace-scoped so unrelated secrets only pay the
+	// cost of listing the (typically few) CRs in their own namespace.
+	tlsReferencing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+	if err := r.List(ctx, tlsReferencing, client.InNamespace(obj.GetNamespace())); err == nil {
+		for i := range tlsReferencing.Items {
+			item := &tlsReferencing.Items[i]
+			if item.Spec.TLSSecretName != "" && item.Spec.TLSSecretName == obj.GetName() {
+				add(item.Name, item.Namespace)
+			}
+		}
+	}
+
+	if len(requests) == 0 {
+		return nil
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
 		Watches(
 			&v1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// Fast path: all secrets we care about (user secrets, cluster CA cert
-				// secrets) carry the strimzi.io/cluster label. If the secret lacks this
-				// label, it cannot be relevant — return immediately without listing CRs.
-				// This avoids O(N²) fan-out where every Secret change triggered a List
-				// of every StrimziSchemaRegistry CR in the namespace.
-				secretLabels := obj.GetLabels()
-				if secretLabels == nil {
-					return nil
-				}
-				secretClusterName := secretLabels[strimziClusterLabel]
-				if secretClusterName == "" {
-					return nil
-				}
-
-				// List only CRs that belong to the same Kafka cluster, using label
-				// selector to minimize the List scope (typically 1 CR per cluster).
-				attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
-				err := r.List(ctx, attachedStrimziRegistryOperators,
-					client.InNamespace(obj.GetNamespace()),
-					client.MatchingLabels{strimziClusterLabel: secretClusterName},
-				)
-				if err != nil {
-					return nil
-				}
-
-				requests := make([]reconcile.Request, 0, len(attachedStrimziRegistryOperators.Items))
-				for _, item := range attachedStrimziRegistryOperators.Items {
-					// User secret: the secret name matches the CR name (both are the
-					// KafkaUser name).
-					if obj.GetName() == item.GetName() {
-						requests = append(requests, reconcile.Request{
-							NamespacedName: types.NamespacedName{
-								Name:      item.GetName(),
-								Namespace: item.GetNamespace(),
-							},
-						})
-						continue
-					}
-					// Cluster CA cert secret: name ends with -cluster-ca-cert.
-					if strings.HasSuffix(obj.GetName(), clusterCASuffix) {
-						requests = append(requests, reconcile.Request{
-							NamespacedName: types.NamespacedName{
-								Name:      item.GetName(),
-								Namespace: item.GetNamespace(),
-							},
-						})
-					}
-				}
-				return requests
-			}),
+			handler.EnqueueRequestsFromMapFunc(r.mapSecretToRequests),
 		).
 		Watches(
 			&kafka.Kafka{},
@@ -971,6 +1067,63 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 		return ctrl.Result{}, err
 	}
 	logger.Info("Deployment updated after TLS certificate renewal", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+	return ctrl.Result{RequeueAfter: time.Second}, nil
+}
+
+// handleUserTLSSecretRotation rolls the Deployment when the user-provided REST
+// API TLS secret (spec.tlssecretname) has been rotated. The Schema Registry JVM
+// reads the JKS keystore once at startup, so a rotated secret must trigger a
+// pod rollout: the secret's resourceVersion is recorded in the tlsVersion
+// pod-template annotation at deployment create/update time and compared here.
+// The handler is idempotent — once the annotation matches the current secret
+// version, subsequent reconciles are no-ops. It is a no-op when the secret or
+// the Deployment does not exist (the validation step reports a missing secret;
+// createDeployment records the version at creation time).
+func (r *StrimziSchemaRegistryReconciler) handleUserTLSSecretRotation(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	if !instance.Spec.SecureHTTP || instance.Spec.TLSSecretName == "" {
+		return ctrl.Result{}, nil
+	}
+	userSecret := &v1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.TLSSecretName, Namespace: instance.Namespace}, userSecret)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "Failed to get user-provided TLS secret for rotation check")
+		return ctrl.Result{}, err
+	}
+	dep := &apps.Deployment{}
+	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, dep)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "Failed to get deployment for user TLS secret rotation")
+		return ctrl.Result{}, err
+	}
+	current := ""
+	if dep.Spec.Template.Annotations != nil {
+		current = dep.Spec.Template.Annotations[tlsVersionKey]
+	}
+	if current == userSecret.ResourceVersion {
+		return ctrl.Result{}, nil
+	}
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations[tlsVersionKey] = userSecret.ResourceVersion
+	if err := r.Update(ctx, dep); err != nil {
+		logger.Error(err, "Failed to roll deployment after user TLS secret rotation")
+		return ctrl.Result{}, err
+	}
+	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
+	logger.Info("Deployment rolled after user-provided TLS secret rotation",
+		"Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace,
+		"Secret.Name", instance.Spec.TLSSecretName)
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
