@@ -247,6 +247,9 @@ spec:
   before expiry: the secret is updated in place, a `TLSCertificateRenewed` event is emitted and the Schema Registry
   pods are rolled so the new keystore is loaded. Certificates you provide yourself via `tlssecretName` are never
   touched by the operator.
+  If the operator-generated `<name>-tls` secret or the operator-managed `<name>-jks` secret is deleted manually,
+  the operator recreates it automatically on the next reconciliation and rolls the Schema Registry pods, so a
+  deleted secret no longer breaks the next pod restart.
   The secret must contain exactly the following keys with non-empty values:
 
   |Key               |Value                                            |
@@ -346,6 +349,12 @@ spec:
       enabled: true
       allowcrossnamespaceingress: true
   ```
+
+### CR status
+
+The operator reports the CR as `Ready=True` (`status.status: "Ok"`) only once the Schema Registry Deployment
+has at least one ready replica. While the Deployment is starting or unavailable, the CR shows `Ready=False`
+with reason `NotReady`.
 
 ### Single replica support
 
