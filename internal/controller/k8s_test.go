@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -853,6 +854,57 @@ func TestReadyCondition(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMergeServicePorts covers the node-port preservation logic used when
+// updating an existing Service: the API-server-allocated nodePort is carried
+// over only when the target service type still uses node ports. Copying it
+// into a ClusterIP service would make the update fail with
+// "nodePort: Forbidden", deadlocking reconciliation.
+func TestMergeServicePorts(t *testing.T) {
+	newPort := func(nodePort int32) corev1.ServicePort {
+		return corev1.ServicePort{Name: "http", Port: 80, TargetPort: intstr.FromInt32(8081), NodePort: nodePort}
+	}
+
+	tests := []struct {
+		name             string
+		desiredType      corev1.ServiceType
+		desiredNodePort  int32
+		existingNodePort int32
+		wantNodePort     int32
+	}{
+		{name: "NodePort to ClusterIP drops the allocated nodePort", desiredType: corev1.ServiceTypeClusterIP, existingNodePort: 31234, wantNodePort: 0},
+		{name: "NodePort to NodePort preserves the allocated nodePort", desiredType: corev1.ServiceTypeNodePort, existingNodePort: 31234, wantNodePort: 31234},
+		{name: "NodePort to LoadBalancer preserves the allocated nodePort", desiredType: corev1.ServiceTypeLoadBalancer, existingNodePort: 31234, wantNodePort: 31234},
+		{name: "ClusterIP to NodePort picks up the allocated nodePort", desiredType: corev1.ServiceTypeNodePort, existingNodePort: 31234, wantNodePort: 31234},
+		{name: "explicitly pinned nodePort is kept as-is", desiredType: corev1.ServiceTypeNodePort, desiredNodePort: 30123, existingNodePort: 31234, wantNodePort: 30123},
+		{name: "ClusterIP to ClusterIP stays nodePort-free", desiredType: corev1.ServiceTypeClusterIP, wantNodePort: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			desired := []corev1.ServicePort{newPort(tt.desiredNodePort)}
+			existing := []corev1.ServicePort{newPort(tt.existingNodePort)}
+
+			got := mergeServicePorts(tt.desiredType, desired, existing)
+			if len(got) != 1 {
+				t.Fatalf("expected one port, got %d", len(got))
+			}
+			if got[0].NodePort != tt.wantNodePort {
+				t.Errorf("expected nodePort %d, got %d", tt.wantNodePort, got[0].NodePort)
+			}
+			if got[0].Port != 80 || got[0].TargetPort.IntVal != 8081 || got[0].Name != "http" {
+				t.Errorf("unexpected port mutation: %+v", got[0])
+			}
+		})
+	}
+
+	t.Run("missing existing ports leaves the desired spec untouched", func(t *testing.T) {
+		got := mergeServicePorts(corev1.ServiceTypeNodePort, []corev1.ServicePort{newPort(0)}, nil)
+		if got[0].NodePort != 0 {
+			t.Errorf("expected nodePort 0 with no existing ports, got %d", got[0].NodePort)
+		}
+	})
 }
 
 func TestCreateServicePassthrough(t *testing.T) {

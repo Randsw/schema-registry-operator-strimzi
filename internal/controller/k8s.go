@@ -1022,6 +1022,23 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 	return svc, nil
 }
 
+// mergeServicePorts returns the desired service ports with API-server-allocated
+// node ports preserved from the existing service. The allocation is carried
+// over only when the target service type still uses node ports (NodePort or
+// LoadBalancer): copying it into e.g. a ClusterIP service makes the API server
+// reject the update ("nodePort: Forbidden"), deadlocking reconciliation.
+func mergeServicePorts(desiredType v1.ServiceType, desiredPorts, existingPorts []v1.ServicePort) []v1.ServicePort {
+	ports := make([]v1.ServicePort, len(desiredPorts))
+	for i, p := range desiredPorts {
+		if p.NodePort == 0 && i < len(existingPorts) &&
+			(desiredType == v1.ServiceTypeNodePort || desiredType == v1.ServiceTypeLoadBalancer) {
+			p.NodePort = existingPorts[i].NodePort
+		}
+		ports[i] = p
+	}
+	return ports
+}
+
 // mergeStringMaps returns a new map containing base overlaid with override.
 // The result is never nil, which keeps hashing and diffing deterministic.
 func mergeStringMaps(base, override map[string]string) map[string]string {

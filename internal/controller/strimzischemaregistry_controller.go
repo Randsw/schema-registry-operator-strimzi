@@ -408,15 +408,9 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Info("Service changed, updating service",
 			"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
 		// Preserve API-server-allocated node ports when the desired spec does
-		// not pin one, so updating the service does not drop the allocation.
-		newPorts := make([]v1.ServicePort, len(desiredSvc.Spec.Ports))
-		for i, p := range desiredSvc.Spec.Ports {
-			if p.NodePort == 0 && i < len(foundSvc.Spec.Ports) {
-				p.NodePort = foundSvc.Spec.Ports[i].NodePort
-			}
-			newPorts[i] = p
-		}
-		foundSvc.Spec.Ports = newPorts
+		// not pin one and the target type still uses node ports, so updating
+		// the service does not drop the allocation.
+		foundSvc.Spec.Ports = mergeServicePorts(desiredSvc.Spec.Type, desiredSvc.Spec.Ports, foundSvc.Spec.Ports)
 		foundSvc.Spec.Type = desiredSvc.Spec.Type
 		foundSvc.Labels = desiredSvc.Labels
 		foundSvc.Annotations = desiredSvc.Annotations
