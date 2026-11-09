@@ -884,6 +884,24 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 	}
 	userPassword := string(userPasswordData)
 
+	// Validate the certificate material the keystore pipeline dereferences.
+	// A pre-built user.p12 is used directly and makes the PEM fields
+	// unnecessary; otherwise the openssl pkcs12 export requires all three
+	// PEM fields (ca.crt for -CAfile/-chain, user.crt for -in, user.key for
+	// -inkey), and a missing key would only surface as a cryptic openssl
+	// failure.
+	if clientp12 == "" {
+		var missing []string
+		for _, key := range []string{"ca.crt", "user.crt", "user.key"} {
+			if len(userSecret.Data[key]) == 0 {
+				missing = append(missing, key)
+			}
+		}
+		if len(missing) > 0 {
+			return nil, false, fmt.Errorf("%s field(s) missing from KafkaUser secret; this field is required for keystore creation", strings.Join(missing, ", "))
+		}
+	}
+
 	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
 		return annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
 			annotations[userVersionKey] == userSecret.ResourceVersion
