@@ -72,6 +72,72 @@ func writeTempFileIn(dir, name, content string) (string, error) {
 	return path, nil
 }
 
+// passwordEnvVar is the name of the environment variable through which
+// keystore passwords are fed to the keytool and openssl child processes.
+// Passing passwords via the process environment (instead of command-line
+// arguments) keeps them out of /proc/<pid>/cmdline, which is readable by any
+// process on the node while the tool runs.
+const passwordEnvVar = "SSR_KEYSTORE_PASSWORD"
+
+// withPasswordEnv returns cmd with passwordEnvVar=password appended to its
+// environment (inheriting the operator process environment). Any occurrence
+// of the variable already present in the parent environment is dropped first
+// so the value set here always wins. The operator process environment itself
+// is never modified (no os.Setenv).
+func withPasswordEnv(cmd *exec.Cmd, password string) *exec.Cmd {
+	prefix := passwordEnvVar + "="
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, prefix) {
+			env = append(env, entry)
+		}
+	}
+	cmd.Env = append(env, prefix+password)
+	return cmd
+}
+
+// keytoolImportCertCmd builds the keytool invocation that imports a CA
+// certificate into a JKS truststore. The store password is fed through the
+// environment (passwordEnvVar), never as a command-line argument.
+func keytoolImportCertCmd(keystorePath, alias, certPath, password string) *exec.Cmd {
+	cmd := exec.Command("keytool", "-importcert", "-keystore", keystorePath, "-alias", alias, "-file",
+		certPath, "-storepass:env", passwordEnvVar, "-storetype", "jks", "-trustcacerts", "-noprompt")
+	return withPasswordEnv(cmd, password)
+}
+
+// keytoolImportKeystoreCmd builds the keytool invocation that converts a
+// PKCS12 bundle into a JKS keystore. Source and destination store passwords
+// are fed through the environment (passwordEnvVar), never as command-line
+// arguments.
+func keytoolImportKeystoreCmd(destKeystorePath, srcKeystorePath, password string) *exec.Cmd {
+	cmd := exec.Command("keytool", "-importkeystore", "-deststorepass:env", passwordEnvVar, "-destkeystore", destKeystorePath,
+		"-deststoretype", "jks", "-srckeystore", srcKeystorePath, "-srcstoretype", "PKCS12", "-srcstorepass:env", passwordEnvVar, "-noprompt")
+	return withPasswordEnv(cmd, password)
+}
+
+// keytoolListCmd builds the keytool invocation that lists keystore entries in
+// RFC 1421 (PEM) form. The store password is fed through the environment
+// (passwordEnvVar), never as a command-line argument.
+func keytoolListCmd(keystorePath, password string) *exec.Cmd {
+	cmd := exec.Command("keytool", "-list", "-rfc", "-keystore", keystorePath, "-storepass:env", passwordEnvVar, "-noprompt")
+	return withPasswordEnv(cmd, password)
+}
+
+// opensslExportPKCS12Cmd builds the openssl invocation that bundles a
+// certificate and private key into a PKCS12 file. When caCertPath is
+// non-empty the certificate chain is included (-chain -CAfile). The export
+// password is fed through the environment (passwordEnvVar), never as a
+// command-line argument.
+func opensslExportPKCS12Cmd(certPath, keyPath, caCertPath, name, outPath, password string) *exec.Cmd {
+	args := []string{"pkcs12", "-export", "-in", certPath, "-inkey", keyPath}
+	if caCertPath != "" {
+		args = append(args, "-chain", "-CAfile", caCertPath)
+	}
+	args = append(args, "-name", name, "-passout", "env:"+passwordEnvVar, "-out", outPath)
+	cmd := exec.Command("openssl", args...)
+	return withPasswordEnv(cmd, password)
+}
+
 // Create a JKS-formatted truststore using the cluster's CA certificate.
 // Parameters
 //     ----------
@@ -96,7 +162,8 @@ func writeTempFileIn(dir, name, content string) (string, error) {
 // directory with 0700 permissions that is removed when the function returns.
 // Per-call directories also guarantee that concurrent reconciles (e.g. two
 // StrimziSchemaRegistry CRs in the same operator pod) never share or overwrite
-// each other's files.
+// each other's files. The keystore password is passed to keytool through the
+// process environment (see passwordEnvVar), never as a command-line argument.
 func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte, string, error) {
 	if password == "" {
 		var err error
@@ -123,8 +190,7 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 	outputPath := filepath.Join(tempDir, "client.truststore.jks")
 
 	// Generate truststore
-	cmd := exec.Command("keytool", "-importcert", "-keystore", outputPath, "-alias", "CARoot", "-file",
-		caCertPath, "-storepass", password, "-storetype", "jks", "-trustcacerts", "-noprompt")
+	cmd := keytoolImportCertCmd(outputPath, "CARoot", caCertPath, password)
 	out, err := cmd.Output()
 	if err != nil {
 		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
@@ -181,7 +247,9 @@ func (cp *CertProcessor) CreateTruststore(cert string, password string) ([]byte,
 // keystore) are written into a per-call temporary directory with 0700
 // permissions that is removed when the function returns. Per-call directories
 // also guarantee that concurrent reconciles never share or overwrite each
-// other's files.
+// other's files. The keystore password is passed to openssl and keytool
+// through the process environment (see passwordEnvVar), never as a
+// command-line argument.
 func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, userKey string, userp12 string, password string) ([]byte, string, error) {
 	var err error
 
@@ -222,8 +290,7 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 		}
 
 		// Generate p12 format bundle
-		cmd := exec.Command("openssl", "pkcs12", "-export", "-in", userCertPath, "-inkey", userKeyPath, "-chain", "-CAfile",
-			userCAPath, "-name", "confluent-schema-registry", "-passout", "pass:"+password, "-out", p12Path)
+		cmd := opensslExportPKCS12Cmd(userCertPath, userKeyPath, userCAPath, "confluent-schema-registry", p12Path, password)
 		out, err := cmd.Output()
 		if err != nil {
 			cp.log.Error(err, "Error while exec command", "cmdout", string(out))
@@ -249,8 +316,7 @@ func (cp *CertProcessor) CreateKeystore(userCACert string, userCert string, user
 
 	// Generate client keystore
 	cp.log.V(1).Info("Generate keystore")
-	cmd := exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystorePath,
-		"-deststoretype", "jks", "-srckeystore", p12Path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
+	cmd := keytoolImportKeystoreCmd(keystorePath, p12Path, password)
 	out, err := cmd.Output()
 	if err != nil {
 		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
@@ -333,8 +399,7 @@ func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, passwor
 
 	p12Path := filepath.Join(tempDir, "tls.p12")
 	// Generate p12 format bundle
-	cmd := exec.Command("openssl", "pkcs12", "-export", "-in", certPath, "-inkey", keyPath, "-chain", "-CAfile",
-		caCertPath, "-name", "confluent-schema-registry-tls", "-passout", "pass:"+password, "-out", p12Path)
+	cmd := opensslExportPKCS12Cmd(certPath, keyPath, caCertPath, "confluent-schema-registry-tls", p12Path, password)
 	out, err := cmd.Output()
 	if err != nil {
 		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
@@ -351,8 +416,7 @@ func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, passwor
 
 	// Generate keystore
 	cp.log.V(1).Info("Generate tls keystore")
-	cmd = exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystorePath,
-		"-deststoretype", "jks", "-srckeystore", p12Path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
+	cmd = keytoolImportKeystoreCmd(keystorePath, p12Path, password)
 	out, err = cmd.Output()
 	if err != nil {
 		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
@@ -399,6 +463,8 @@ func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, passwor
 //
 // Security: all intermediate files are written into a per-call temporary
 // directory with 0700 permissions that is removed when the function returns.
+// The keystore password is passed to openssl and keytool through the process
+// environment (see passwordEnvVar), never as a command-line argument.
 func (cp *CertProcessor) ConvertPEMToJKS(certPEM string, keyPEM string, password string) ([]byte, string, error) {
 	if password == "" {
 		var err error
@@ -430,8 +496,7 @@ func (cp *CertProcessor) ConvertPEMToJKS(certPEM string, keyPEM string, password
 	p12Path := filepath.Join(tempDir, "tls.p12")
 	// Generate p12 format bundle. No -chain/-CAfile: the issuing CA is
 	// optional in a kubernetes.io/tls secret (ca.crt).
-	cmd := exec.Command("openssl", "pkcs12", "-export", "-in", certPath, "-inkey", keyPath,
-		"-name", "confluent-schema-registry", "-passout", "pass:"+password, "-out", p12Path)
+	cmd := opensslExportPKCS12Cmd(certPath, keyPath, "", "confluent-schema-registry", p12Path, password)
 	out, err := cmd.Output()
 	if err != nil {
 		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
@@ -448,8 +513,7 @@ func (cp *CertProcessor) ConvertPEMToJKS(certPEM string, keyPEM string, password
 
 	// Generate keystore
 	cp.log.V(1).Info("Generate JKS keystore from PEM certificate")
-	cmd = exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystorePath,
-		"-deststoretype", "jks", "-srckeystore", p12Path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
+	cmd = keytoolImportKeystoreCmd(keystorePath, p12Path, password)
 	out, err = cmd.Output()
 	if err != nil {
 		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
@@ -492,7 +556,7 @@ func (cp *CertProcessor) KeystoreCertExpiry(keystore []byte, password string) (t
 		return time.Time{}, fmt.Errorf("failed to write keystore temp file: %w", err)
 	}
 
-	cmd := exec.Command("keytool", "-list", "-rfc", "-keystore", ksPath, "-storepass", password, "-noprompt")
+	cmd := keytoolListCmd(ksPath, password)
 	out, err := cmd.Output()
 	if err != nil {
 		return time.Time{}, fmt.Errorf("keytool failed to list keystore entries: %w", err)
