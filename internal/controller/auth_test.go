@@ -565,3 +565,86 @@ func TestHandleSecretRotation(t *testing.T) {
 		}
 	})
 }
+
+// TestGetKafkaUser verifies the direct Get-by-name lookup of the KafkaUser
+// matching the StrimziSchemaRegistry instance: an existing user is returned,
+// a missing user is reported as (nil, nil) — NotFound is handled as "no
+// KafkaUser" exactly as before — and users in other namespaces or with other
+// names are not matched.
+func TestGetKafkaUser(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	t.Run("existing KafkaUser is found", func(t *testing.T) {
+		user := newTestKafkaUser(kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE)
+		r := &StrimziSchemaRegistryReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(user).Build(),
+			Scheme: scheme,
+		}
+		inst := newTestInstance()
+
+		got, err := r.getKafkaUser(inst, context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil {
+			t.Fatal("expected the KafkaUser to be found, got nil")
+		}
+		if got.Name != inst.Name || got.Namespace != inst.Namespace {
+			t.Errorf("expected KafkaUser %s/%s, got %s/%s", inst.Name, inst.Namespace, got.Name, got.Namespace)
+		}
+	})
+
+	t.Run("missing KafkaUser returns nil without error", func(t *testing.T) {
+		r := &StrimziSchemaRegistryReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+			Scheme: scheme,
+		}
+		inst := newTestInstance()
+
+		got, err := r.getKafkaUser(inst, context.Background())
+		if err != nil {
+			t.Fatalf("expected NotFound to be handled as nil user, got error: %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil KafkaUser, got %s/%s", got.Name, got.Namespace)
+		}
+	})
+
+	t.Run("KafkaUser with a different name is not matched", func(t *testing.T) {
+		other := newTestKafkaUser(kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE)
+		other.Name = "other-user"
+		r := &StrimziSchemaRegistryReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(other).Build(),
+			Scheme: scheme,
+		}
+		inst := newTestInstance()
+
+		got, err := r.getKafkaUser(inst, context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil KafkaUser for a differently named user, got %s/%s", got.Name, got.Namespace)
+		}
+	})
+
+	t.Run("KafkaUser in another namespace is not matched", func(t *testing.T) {
+		user := newTestKafkaUser(kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE)
+		user.Namespace = "other-namespace"
+		r := &StrimziSchemaRegistryReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(user).Build(),
+			Scheme: scheme,
+		}
+		inst := newTestInstance()
+
+		got, err := r.getKafkaUser(inst, context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil KafkaUser for a user in another namespace, got %s/%s", got.Name, got.Namespace)
+		}
+	})
+}

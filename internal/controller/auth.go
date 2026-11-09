@@ -22,7 +22,8 @@ import (
 
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 type kafkaAuthMode int
@@ -103,17 +104,17 @@ func resolveKafkaAuth(instance *strimziregistryoperatorv1alpha1.StrimziSchemaReg
 }
 
 // getKafkaUser returns the KafkaUser CR whose name matches the SchemaRegistry
-// instance, or nil when no such KafkaUser exists.
+// instance, or nil when no such KafkaUser exists. The lookup is a direct Get
+// by name (the KafkaUser is conventionally named after the CR) instead of
+// listing every KafkaUser in the namespace.
 func (r *StrimziSchemaRegistryReconciler) getKafkaUser(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context) (*kafka.KafkaUser, error) {
-	kafkaUsers := &kafka.KafkaUserList{}
-	err := r.List(ctx, kafkaUsers, client.InNamespace(instance.Namespace))
+	kafkaUser := &kafka.KafkaUser{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, kafkaUser)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	for i := range kafkaUsers.Items {
-		if kafkaUsers.Items[i].Name == instance.Name {
-			return &kafkaUsers.Items[i], nil
-		}
-	}
-	return nil, nil
+	return kafkaUser, nil
 }
