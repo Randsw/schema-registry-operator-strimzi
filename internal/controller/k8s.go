@@ -41,6 +41,16 @@ const (
 	restAPITLSVolumeName   = "rest-api-tls"
 	sslKeystorePasswordEnv = "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD"
 	sslKeyPasswordEnv      = "SCHEMA_REGISTRY_SSL_KEY_PASSWORD"
+
+	// DNS egress peer assumed by the rendered NetworkPolicy: the standard
+	// kube-dns pods in the kube-system namespace. Clusters running a custom
+	// DNS service (different namespace or pod labels, e.g. some CoreDNS
+	// deployments) need the policy adjusted — this assumption is documented
+	// in the README NetworkPolicy section.
+	dnsNamespaceLabel = "kubernetes.io/metadata.name"
+	dnsNamespaceName  = "kube-system"
+	dnsPodLabel       = "k8s-app"
+	dnsPodValue       = "kube-dns"
 )
 
 // labelsForStrimziSchemaRegistryOperator returns the standard set of labels
@@ -1221,12 +1231,12 @@ func buildNetworkPolicy(instance *strimziregistryoperatorv1alpha1.StrimziSchemaR
 						{
 							NamespaceSelector: &metav1.LabelSelector{
 								MatchLabels: map[string]string{
-									"kubernetes.io/metadata.name": "kube-system",
+									dnsNamespaceLabel: dnsNamespaceName,
 								},
 							},
 							PodSelector: &metav1.LabelSelector{
 								MatchLabels: map[string]string{
-									"k8s-app": "kube-dns",
+									dnsPodLabel: dnsPodValue,
 								},
 							},
 						},

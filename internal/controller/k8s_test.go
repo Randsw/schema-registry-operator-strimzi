@@ -1177,6 +1177,20 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	if dns.To[0].PodSelector == nil || dns.To[0].PodSelector.MatchLabels["k8s-app"] != "kube-dns" {
 		t.Errorf("expected DNS peer pod selector k8s-app=kube-dns, got %v", dns.To[0].PodSelector)
 	}
+
+	// The DNS egress rule must be rendered from the documented constants, and
+	// the constants must keep matching the documented assumption (standard
+	// kube-dns in kube-system) — see the README NetworkPolicy section.
+	if dns.To[0].NamespaceSelector.MatchLabels[dnsNamespaceLabel] != dnsNamespaceName {
+		t.Errorf("expected DNS namespace selector from constants %s=%s, got %v", dnsNamespaceLabel, dnsNamespaceName, dns.To[0].NamespaceSelector.MatchLabels)
+	}
+	if dns.To[0].PodSelector.MatchLabels[dnsPodLabel] != dnsPodValue {
+		t.Errorf("expected DNS pod selector from constants %s=%s, got %v", dnsPodLabel, dnsPodValue, dns.To[0].PodSelector.MatchLabels)
+	}
+	if dnsNamespaceLabel != "kubernetes.io/metadata.name" || dnsNamespaceName != "kube-system" || dnsPodLabel != "k8s-app" || dnsPodValue != "kube-dns" {
+		t.Errorf("DNS egress constants changed; update the README NetworkPolicy section to match the new assumption: %s=%s in namespace %s (label %s)",
+			dnsPodLabel, dnsPodValue, dnsNamespaceName, dnsNamespaceLabel)
+	}
 }
 
 func TestPortFromBootstrapServer(t *testing.T) {
