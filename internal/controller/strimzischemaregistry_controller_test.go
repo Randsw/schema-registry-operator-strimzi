@@ -3169,9 +3169,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).To(Succeed())
 			envVars := deployment.Spec.Template.Spec.Containers[0].Env
 
-			clientAuth, ok := envByName(envVars, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
+			clientAuth, ok := envByName(envVars, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION")
 			Expect(ok).To(BeTrue())
-			Expect(clientAuth.Value).To(Equal("true"))
+			Expect(clientAuth.Value).To(Equal("REQUIRED"))
 
 			truststoreLocation, ok := envByName(envVars, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION")
 			Expect(ok).To(BeTrue())

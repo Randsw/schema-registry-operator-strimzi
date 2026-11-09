@@ -312,6 +312,11 @@ var confluentPropertyEnvReplacer = strings.NewReplacer(".", "_", "-", "_")
 
 // reservedConfigurationKeys are Confluent Schema Registry properties managed by
 // the operator and therefore not settable through spec.configuration.
+//
+// The deprecated spellings (schema.registry.inter.instance.protocol) stay
+// reserved until a release note announces their removal; the modern
+// equivalents (ssl.client.authentication, inter.instance.protocol) are
+// operator-managed from the start.
 var reservedConfigurationKeys = map[string]struct{}{
 	"kafkastore.bootstrap.servers":            {},
 	"kafkastore.security.protocol":            {},
@@ -323,6 +328,8 @@ var reservedConfigurationKeys = map[string]struct{}{
 	"schema.compatibility.level":              {},
 	"heap.opts":                               {},
 	"schema.registry.inter.instance.protocol": {},
+	"inter.instance.protocol":                 {},
+	"ssl.client.authentication":               {},
 	"ssl.key.password":                        {},
 }
 
@@ -495,7 +502,9 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 	if instance.Spec.SecureHTTP {
 		podEnv = append(podEnv,
 			v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "https://0.0.0.0:8085"},
-			v1.EnvVar{Name: "SCHEMA_REGISTRY_SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", Value: "https"},
+			// inter.instance.protocol replaces the deprecated
+			// schema.registry.inter.instance.protocol spelling.
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", Value: "https"},
 			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", Value: "/var/rest-api-tls/tls-keystore.jks"},
 			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 				SecretKeyRef: &v1.SecretKeySelector{
@@ -519,9 +528,11 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 	}
 
 	// REST API mutual TLS: require client certificates signed by the cluster CA.
+	// ssl.client.authentication replaces the deprecated ssl.client.auth=true
+	// spelling (NONE/REQUESTED/REQUIRED).
 	if instance.Spec.ClientAuth && instance.Spec.SecureHTTP {
 		podEnv = append(podEnv,
-			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_CLIENT_AUTH", Value: "true"},
+			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", Value: "REQUIRED"},
 			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", Value: "/var/schemaregistry/truststore.jks"},
 			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 				SecretKeyRef: &v1.SecretKeySelector{

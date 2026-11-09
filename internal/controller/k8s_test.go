@@ -628,6 +628,39 @@ func TestBuildPodEnvConfigurationReserved(t *testing.T) {
 		}
 	})
 
+	t.Run("modern Confluent keys are reserved and cannot be overridden", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.ClientAuth = true
+		inst.Spec.Configuration = map[string]string{
+			"ssl.client.authentication":               "NONE",
+			"inter.instance.protocol":                 "http",
+			"schema.registry.inter.instance.protocol": "http",
+		}
+
+		env, overridden := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		// The operator-managed values win; user-supplied values are ignored.
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", "REQUIRED")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", "https")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL")
+
+		wantOverridden := []string{
+			"inter.instance.protocol",
+			"schema.registry.inter.instance.protocol",
+			"ssl.client.authentication",
+		}
+		if len(overridden) != len(wantOverridden) {
+			t.Fatalf("expected %d overridden keys, got %d: %v", len(wantOverridden), len(overridden), overridden)
+		}
+		for i := range wantOverridden {
+			if overridden[i] != wantOverridden[i] {
+				t.Errorf("overridden[%d] = %q, want %q", i, overridden[i], wantOverridden[i])
+			}
+		}
+	})
+
 	t.Run("non-reserved key colliding with managed env is skipped", func(t *testing.T) {
 		inst := newTestInstance()
 		rf := int32(1)
@@ -1291,7 +1324,7 @@ func TestBuildPodEnvClientAuth(t *testing.T) {
 
 		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
 
-		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH", "true")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", "REQUIRED")
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION", "/var/schemaregistry/truststore.jks")
 		truststorePassword, ok := envByName(env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD")
 		if !ok {
@@ -1307,9 +1340,50 @@ func TestBuildPodEnvClientAuth(t *testing.T) {
 
 		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
 
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD")
+	})
+}
+
+// TestBuildPodEnvNonDeprecatedProperties verifies that the operator emits the
+// modern Confluent property spellings: ssl.client.authentication=REQUIRED for
+// REST API mutual TLS and inter.instance.protocol=https for secure listeners,
+// and never the deprecated ssl.client.auth /
+// schema.registry.inter.instance.protocol names.
+func TestBuildPodEnvNonDeprecatedProperties(t *testing.T) {
+	auth := kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}
+
+	t.Run("secure listener emits inter.instance.protocol=https", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", "https")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL")
+	})
+
+	t.Run("insecure listener emits no inter-instance property", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL")
+	})
+
+	t.Run("client auth emits ssl.client.authentication=REQUIRED", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.ClientAuth = true
+
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", "REQUIRED")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
 	})
 }
 
