@@ -168,6 +168,74 @@ func TestCreateTLSKeystore(t *testing.T) {
 	t.Log("Keystore is created")
 }
 
+// TestConvertPEMToJKS verifies the PEM → JKS conversion used for standard
+// kubernetes.io/tls user secrets: the produced JKS is parseable with keytool
+// (via KeystoreCertExpiry, which shells out to keytool -list) and the
+// returned password unlocks it, while a wrong password does not.
+func TestConvertPEMToJKS(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+
+	t.Run("converts PEM cert and key into a parseable JKS", func(t *testing.T) {
+		keystore, password, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keystore) == 0 {
+			t.Fatal("empty keystore")
+		}
+		if password != "test1234" {
+			t.Errorf("expected the provided password to be returned, got %q", password)
+		}
+		// keytool -list must parse the JKS with the password and expose the
+		// certificate; this proves both the format and the password.
+		notAfter, err := cp.KeystoreCertExpiry(keystore, password)
+		if err != nil {
+			t.Fatalf("keytool failed to parse the converted JKS with the password: %v", err)
+		}
+		if !notAfter.After(time.Now()) {
+			t.Errorf("expected a future certificate expiry, got %v", notAfter)
+		}
+	})
+
+	t.Run("wrong password cannot open the keystore", func(t *testing.T) {
+		keystore, _, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, err := cp.KeystoreCertExpiry(keystore, "wrong-password"); err == nil {
+			t.Error("expected keytool to fail with a wrong password, got nil")
+		}
+	})
+
+	t.Run("empty password is auto-generated", func(t *testing.T) {
+		keystore, password, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(password) != 24 {
+			t.Errorf("expected a generated 24-character password, got %d characters", len(password))
+		}
+		if _, err := cp.KeystoreCertExpiry(keystore, password); err != nil {
+			t.Fatalf("keytool failed to parse the converted JKS with the generated password: %v", err)
+		}
+	})
+
+	t.Run("invalid PEM certificate fails", func(t *testing.T) {
+		if _, _, err := cp.ConvertPEMToJKS("not a valid PEM certificate", uc.UserKeyPEM, "test1234"); err == nil {
+			t.Error("expected error when converting invalid PEM data, got nil")
+		}
+	})
+}
+
 // M7: Edge Case Tests for Certificate Processing
 
 // TestCreateTruststore_InvalidPEM verifies that CreateTruststore returns an error
