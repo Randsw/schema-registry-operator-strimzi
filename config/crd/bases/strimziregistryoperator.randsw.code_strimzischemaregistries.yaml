@@ -59,6 +59,12 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              keystoretype:
+                default: JKS
+                enum:
+                - JKS
+                - PKCS12
+                type: string
               listener:
                 default: tls
                 maxLength: 255

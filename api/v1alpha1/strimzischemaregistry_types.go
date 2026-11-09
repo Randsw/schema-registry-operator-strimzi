@@ -59,22 +59,27 @@ type StrimziSchemaRegistrySpec struct {
 	ClientAuth bool `json:"clientauth,omitempty"`
 
 	// TLSSecretName is the name of the Kubernetes secret containing the TLS
-	// certificate and private key for the Schema Registry REST API, in JKS
-	// format. Must be a valid Kubernetes resource name (DNS subdomain) or
-	// empty, and the secret must live in the same namespace as this CR.
+	// certificate and private key for the Schema Registry REST API. Must be a
+	// valid Kubernetes resource name (DNS subdomain) or empty, and the secret
+	// must live in the same namespace as this CR.
 	//
-	// When set (together with securehttp=true), the secret must contain
-	// exactly the following keys with non-empty values:
-	//   - tls-keystore.jks: the JKS keystore with the certificate and key
-	//   - keystore_password: the keystore password
-	//   - key_password: the private key password
+	// When set (together with securehttp=true), the secret must match one of
+	// the accepted shapes (see the README for the full contract):
 	//
-	// The operator validates the secret before rendering the Deployment: a
-	// missing secret or missing/empty keys set Ready=False with reason
-	// InvalidTLSSecret (plus a Warning event) and reconciliation is skipped
-	// until the secret is fixed. Rotating the secret (any change that bumps
-	// its resourceVersion) automatically rolls the Schema Registry pods so
-	// the JVM reloads the keystore.
+	//   - a pre-built keystore (JKS by default, or PKCS12 when keystoretype is
+	//     PKCS12) plus both passwords:
+	//     JKS:  tls-keystore.jks, keystore_password, key_password
+	//     PKCS12: tls-keystore.p12, keystore_password, key_password
+	//   - a standard kubernetes.io/tls secret (tls.crt + tls.key PEM, ca.crt
+	//     optional): the operator converts it to a JKS keystore and mounts the
+	//     derived <tlssecretname>-jks secret instead.
+	//
+	// The operator validates the secret before rendering the Deployment: an
+	// invalid secret sets Ready=False with reason InvalidTLSSecret (plus a
+	// Warning event) and reconciliation is skipped until the secret is fixed.
+	// Rotating the secret (any change that bumps its resourceVersion)
+	// automatically rolls the Schema Registry pods so the JVM reloads the
+	// keystore.
 	//
 	// When empty, the operator creates and renews a managed <name>-tls secret
 	// signed by the Kafka cluster CA instead.
@@ -83,6 +88,18 @@ type StrimziSchemaRegistrySpec struct {
 	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
 	// +optional
 	TLSSecretName string `json:"tlssecretname,omitempty"`
+
+	// KeystoreType selects the keystore format of the user-provided TLS secret
+	// (spec.tlssecretname). Valid values: JKS (the default, including when
+	// unset) and PKCS12. With PKCS12 the secret must carry the keystore under
+	// the tls-keystore.p12 key; with JKS under tls-keystore.jks. The field has
+	// no effect for standard kubernetes.io/tls (PEM) secrets, which are always
+	// converted to JKS, and no effect when tlssecretname is empty (the
+	// operator-managed secret is always JKS).
+	// +optional
+	// +kubebuilder:default="JKS"
+	// +kubebuilder:validation:Enum=JKS;PKCS12
+	KeystoreType string `json:"keystoretype,omitempty"`
 
 	// HeapOpts sets the JVM heap options for Schema Registry (defaults to "-Xms512M -Xmx512M")
 	// +kubebuilder:validation:Pattern="^(-Xms[a-fA-F0-9]+(m|M|g|G) -Xmx[a-fA-F0-9]+(m|M|g|G))?$"

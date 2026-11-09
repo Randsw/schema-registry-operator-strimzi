@@ -375,6 +375,103 @@ func (cp *CertProcessor) GenerateTLSforHTTP(caCert string, caKey string, passwor
 	return b, password, nil
 }
 
+// ConvertPEMToJKS builds a JKS keystore from a PEM-encoded certificate and
+// private key — the shape of a standard kubernetes.io/tls secret (tls.crt /
+// tls.key, as issued by cert-manager). The issuing CA certificate is not
+// required: the PKCS12 bundle is created without -chain so a leaf certificate
+// alone converts fine.
+//
+// Returns
+// -------
+// keystore_content : `bytes`
+//
+//	The content of a JKS keystore holding the certificate and key.
+//
+// password : `str`
+//
+//	Password protecting the output keystore (generated when empty).
+//
+// Notes
+// -----
+// Internally this function calls out to the "openssl" and "keytool"
+// command-line tools (PEM → PKCS12 via openssl, then keytool -importkeystore
+// to JKS), mirroring the CreateKeystore pipeline.
+//
+// Security: all intermediate files are written into a per-call temporary
+// directory with 0700 permissions that is removed when the function returns.
+func (cp *CertProcessor) ConvertPEMToJKS(certPEM string, keyPEM string, password string) ([]byte, string, error) {
+	if password == "" {
+		var err error
+		password, err = GeneratePassword(24, true, false)
+		if err != nil {
+			cp.log.Error(err, "Failed to generate cryptographically secure random number")
+			return nil, "", err
+		}
+	}
+
+	tempDir, err := os.MkdirTemp("", "ssr-pem2jks-*")
+	if err != nil {
+		cp.log.Error(err, "Failed to create temp dir")
+		return nil, "", err
+	}
+	defer cp.removeTempDir(tempDir)
+
+	certPath, err := writeTempFileIn(tempDir, "tls.crt", certPEM)
+	if err != nil {
+		cp.log.Error(err, "Failed to write temp file", "File", "tls.crt")
+		return nil, "", err
+	}
+	keyPath, err := writeTempFileIn(tempDir, "tls.key", keyPEM)
+	if err != nil {
+		cp.log.Error(err, "Failed to write temp file", "File", "tls.key")
+		return nil, "", err
+	}
+
+	p12Path := filepath.Join(tempDir, "tls.p12")
+	// Generate p12 format bundle. No -chain/-CAfile: the issuing CA is
+	// optional in a kubernetes.io/tls secret (ca.crt).
+	cmd := exec.Command("openssl", "pkcs12", "-export", "-in", certPath, "-inkey", keyPath,
+		"-name", "confluent-schema-registry", "-passout", "pass:"+password, "-out", p12Path)
+	out, err := cmd.Output()
+	if err != nil {
+		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
+		return nil, "", err
+	}
+
+	// Check if p12 format bundle exists
+	if _, err := os.Stat(p12Path); os.IsNotExist(err) {
+		cp.log.Error(err, "File not exist", "File", p12Path)
+		return nil, "", err
+	}
+
+	keystorePath := filepath.Join(tempDir, "tls-keystore.jks")
+
+	// Generate keystore
+	cp.log.V(1).Info("Generate JKS keystore from PEM certificate")
+	cmd = exec.Command("keytool", "-importkeystore", "-deststorepass", password, "-destkeystore", keystorePath,
+		"-deststoretype", "jks", "-srckeystore", p12Path, "-srcstoretype", "PKCS12", "-srcstorepass", password, "-noprompt")
+	out, err = cmd.Output()
+	if err != nil {
+		cp.log.Error(err, "Error while exec command", "cmdout", string(out))
+		return nil, "", err
+	}
+
+	// Check if keystore exists
+	if _, err := os.Stat(keystorePath); os.IsNotExist(err) {
+		cp.log.Error(err, "File not exist", "File", keystorePath)
+		return nil, "", err
+	}
+
+	// Read keystore from file to save in kubernetes secret
+	b, err := os.ReadFile(keystorePath)
+	if err != nil {
+		cp.log.Error(err, "File read fail", "File", keystorePath)
+		return nil, "", err
+	}
+
+	return b, password, nil
+}
+
 // KeystoreCertExpiry returns the NotAfter timestamp of the first certificate
 // entry in the given JKS keystore. It shells out to keytool to export the
 // certificate chain in PEM form and parses it. This works for keystore
