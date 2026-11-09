@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-logr/logr"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -484,5 +485,465 @@ func TestMapSecretToRequests(t *testing.T) {
 			Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
 		}}
 		expectRequests(t, reconciler.mapSecretToRequests(ctx, secret), "sr-name")
+	})
+}
+
+// realPEMSecretData generates a real certificate and key with the shared
+// testutil helpers so the PEM → JKS conversion under test actually runs the
+// openssl/keytool pipeline.
+func realPEMSecretData(t *testing.T) map[string][]byte {
+	t.Helper()
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+	return map[string][]byte{
+		"tls.crt": []byte(uc.UserCertPEM),
+		"tls.key": []byte(uc.UserKeyPEM),
+	}
+}
+
+// TestValidateUserTLSSecret covers the shape-dispatching validation wrapper:
+// standard kubernetes.io/tls (PEM) secrets, pre-built keystores following
+// spec.keystoretype, and the derived-secret name collision guard.
+func TestValidateUserTLSSecret(t *testing.T) {
+	newInstance := func(tlsSecretName string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = tlsSecretName
+		return inst
+	}
+
+	tests := []struct {
+		name         string
+		instance     *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
+		secret       *corev1.Secret
+		wantInvalid  bool
+		wantMentions []string
+	}{
+		{
+			name:         "nil secret (not found) is invalid",
+			instance:     newInstance("user-tls"),
+			secret:       nil,
+			wantInvalid:  true,
+			wantMentions: []string{"user-tls", "not found"},
+		},
+		{
+			name:     "valid PEM secret (with optional ca.crt) passes",
+			instance: newInstance("user-tls"),
+			secret: &corev1.Secret{Data: map[string][]byte{
+				"tls.crt": []byte("pem-cert"),
+				"tls.key": []byte("pem-key"),
+				"ca.crt":  []byte("ca-pem"),
+			}},
+		},
+		{
+			name:         "PEM secret with empty tls.key is invalid",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": {}}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.key"},
+		},
+		{
+			name:         "PEM secret with empty tls.crt is invalid",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": {}, "tls.key": []byte("pem-key")}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.crt"},
+		},
+		{
+			name:         "secret with only tls.crt falls back to the keystore contract",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert")}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls-keystore.jks"},
+		},
+		{
+			name: "derived secret name colliding with the operator-managed -jks secret is invalid",
+			// tlssecretname == CR name makes <tlssecretname>-jks equal the
+			// operator-managed KafkaStore secret <name>-jks.
+			instance:     newInstance("test-sr"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": []byte("pem-key")}},
+			wantInvalid:  true,
+			wantMentions: []string{"test-sr-jks", "collides"},
+		},
+		{
+			name:     "JKS keystore contract still passes",
+			instance: newInstance("user-tls"),
+			secret:   &corev1.Secret{Data: validUserTLSSecretData()},
+		},
+		{
+			name:         "PKCS12 keystore contract is validated per keystoretype",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: validUserTLSSecretData()},
+			wantInvalid:  true,
+			wantMentions: []string{"tls-keystore.p12"},
+		},
+	}
+
+	// The PKCS12 case needs spec.keystoretype set on its instance.
+	for i := range tests {
+		if tests[i].name == "PKCS12 keystore contract is validated per keystoretype" {
+			tests[i].instance.Spec.KeystoreType = keystoreTypePKCS12
+		}
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := validateUserTLSSecret(tt.instance, tt.secret)
+			if tt.wantInvalid && msg == "" {
+				t.Fatalf("expected a validation error message, got empty")
+			}
+			if !tt.wantInvalid && msg != "" {
+				t.Fatalf("expected no validation error message, got %q", msg)
+			}
+			for _, want := range tt.wantMentions {
+				if !strings.Contains(msg, want) {
+					t.Errorf("expected message %q to contain %q", msg, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDerivedSecretNameCollision unit-tests the collision guard for the
+// derived <tlssecretname>-jks secret name.
+func TestDerivedSecretNameCollision(t *testing.T) {
+	t.Run("tlssecretname equal to the CR name collides with <name>-jks", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.TLSSecretName = inst.Name
+		if msg := derivedSecretNameCollision(inst); msg == "" {
+			t.Error("expected a collision message, got empty")
+		}
+	})
+
+	t.Run("distinct tlssecretname does not collide", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.TLSSecretName = "user-tls"
+		if msg := derivedSecretNameCollision(inst); msg != "" {
+			t.Errorf("expected no collision, got %q", msg)
+		}
+	})
+}
+
+// TestEnsureDerivedJKSSecret covers the derived-secret lifecycle with a fake
+// client: created when missing, idempotent when up-to-date, and regenerated
+// only when the user secret's resourceVersion changes.
+func TestEnsureDerivedJKSSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = "user-tls"
+		return inst
+	}
+	derivedName := types.NamespacedName{Name: "user-tls-jks", Namespace: "default"}
+
+	t.Run("creates the derived secret with the JKS contract", func(t *testing.T) {
+		inst := newInstance()
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+			Data:       realPEMSecretData(t),
+		}
+
+		if err := reconciler.ensureDerivedJKSSecret(context.Background(), inst, userSecret, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		derived := &corev1.Secret{}
+		if err := client.Get(context.Background(), derivedName, derived); err != nil {
+			t.Fatalf("derived secret not created: %v", err)
+		}
+		for _, key := range []string{"tls-keystore.jks", "keystore_password", "key_password"} {
+			if len(derived.Data[key]) == 0 {
+				t.Errorf("derived secret missing non-empty %q", key)
+			}
+		}
+		if derived.Annotations[userSecretVersionKey] != "100" {
+			t.Errorf("expected user-secret-resourceVersion annotation %q, got %q", "100", derived.Annotations[userSecretVersionKey])
+		}
+		if len(derived.OwnerReferences) == 0 {
+			t.Error("expected the derived secret to be owned by the CR")
+		}
+	})
+
+	t.Run("is idempotent when up-to-date", func(t *testing.T) {
+		inst := newInstance()
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+			Data:       realPEMSecretData(t),
+		}
+		if err := reconciler.ensureDerivedJKSSecret(context.Background(), inst, userSecret, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		before := &corev1.Secret{}
+		if err := client.Get(context.Background(), derivedName, before); err != nil {
+			t.Fatalf("derived secret not created: %v", err)
+		}
+
+		if err := reconciler.ensureDerivedJKSSecret(context.Background(), inst, userSecret, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error on second ensure: %v", err)
+		}
+		after := &corev1.Secret{}
+		if err := client.Get(context.Background(), derivedName, after); err != nil {
+			t.Fatalf("derived secret disappeared: %v", err)
+		}
+		if before.ResourceVersion != after.ResourceVersion {
+			t.Errorf("expected the derived secret to be untouched when up-to-date, RV %q -> %q", before.ResourceVersion, after.ResourceVersion)
+		}
+	})
+
+	t.Run("regenerates when the user secret resourceVersion changes", func(t *testing.T) {
+		inst := newInstance()
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+			Data:       realPEMSecretData(t),
+		}
+		if err := reconciler.ensureDerivedJKSSecret(context.Background(), inst, userSecret, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		before := &corev1.Secret{}
+		if err := client.Get(context.Background(), derivedName, before); err != nil {
+			t.Fatalf("derived secret not created: %v", err)
+		}
+
+		rotated := userSecret.DeepCopy()
+		rotated.ResourceVersion = "200"
+		if err := reconciler.ensureDerivedJKSSecret(context.Background(), inst, rotated, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error after rotation: %v", err)
+		}
+		after := &corev1.Secret{}
+		if err := client.Get(context.Background(), derivedName, after); err != nil {
+			t.Fatalf("derived secret disappeared: %v", err)
+		}
+		if after.Annotations[userSecretVersionKey] != "200" {
+			t.Errorf("expected the annotation to track the new user secret version %q, got %q", "200", after.Annotations[userSecretVersionKey])
+		}
+		if after.ResourceVersion == before.ResourceVersion {
+			t.Error("expected the derived secret to be regenerated (resourceVersion bump)")
+		}
+	})
+}
+
+// newRestAPITLSDeployment builds a Deployment whose rest-api-tls volume and
+// keystore/key password env refs point at the given secret, mirroring what
+// buildDeploymentSpec renders for a user TLS secret.
+func newRestAPITLSDeployment(mountSecretName string) *apps.Deployment {
+	secretRef := func(key string) *corev1.EnvVarSource {
+		return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: mountSecretName},
+			Key:                  key,
+		}}
+	}
+	return &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sr-deploy", Namespace: "default"},
+		Spec: apps.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "test",
+						Image: "image:tag",
+						Env: []corev1.EnvVar{
+							{Name: sslKeystorePasswordEnv, ValueFrom: secretRef("keystore_password")},
+							{Name: sslKeyPasswordEnv, ValueFrom: secretRef("key_password")},
+						},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: restAPITLSVolumeName,
+						VolumeSource: corev1.VolumeSource{
+							Secret: &corev1.SecretVolumeSource{SecretName: mountSecretName},
+						},
+					}},
+				},
+			},
+		},
+	}
+}
+
+// TestHandleUserTLSSecretRotationPEM covers the rotation handler for
+// kubernetes.io/tls user secrets: the derived secret is created and
+// regenerated on user-secret change, the deployment rolls once via the
+// tlsVersion annotation (which tracks the USER secret version) and then
+// stays stable, and a stale mount is repointed at the derived secret.
+func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = "user-tls"
+		return inst
+	}
+	derivedName := types.NamespacedName{Name: "user-tls-jks", Namespace: "default"}
+	depName := types.NamespacedName{Name: "test-sr-deploy", Namespace: "default"}
+
+	t.Run("creates the derived secret and rolls once, then stays stable", func(t *testing.T) {
+		inst := newInstance()
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+			Data:       realPEMSecretData(t),
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, userSecret, newRestAPITLSDeployment("user-tls")).
+			Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		ctx := context.Background()
+
+		result, err := reconciler.handleUserTLSSecretRotation(ctx, inst, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != time.Second {
+			t.Errorf("expected requeue after 1s, got %v", result.RequeueAfter)
+		}
+
+		derived := &corev1.Secret{}
+		if err := client.Get(ctx, derivedName, derived); err != nil {
+			t.Fatalf("derived secret not created: %v", err)
+		}
+		if derived.Annotations[userSecretVersionKey] != "100" {
+			t.Errorf("expected derived annotation %q, got %q", "100", derived.Annotations[userSecretVersionKey])
+		}
+		dep := &apps.Deployment{}
+		if err := client.Get(ctx, depName, dep); err != nil {
+			t.Fatalf("failed to get deployment: %v", err)
+		}
+		if got := dep.Spec.Template.Annotations[tlsVersionKey]; got != "100" {
+			t.Errorf("expected tlsVersion annotation %q (USER secret version), got %q", "100", got)
+		}
+
+		// Second reconcile: stable, no requeue, derived secret untouched.
+		derivedBefore := derived.DeepCopy()
+		result, err = reconciler.handleUserTLSSecretRotation(ctx, inst, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error on second reconcile: %v", err)
+		}
+		if result.RequeueAfter != 0 {
+			t.Errorf("expected no requeue once stable, got %v", result.RequeueAfter)
+		}
+		derivedAfter := &corev1.Secret{}
+		if err := client.Get(ctx, derivedName, derivedAfter); err != nil {
+			t.Fatalf("derived secret disappeared: %v", err)
+		}
+		if derivedBefore.ResourceVersion != derivedAfter.ResourceVersion {
+			t.Error("expected the derived secret to be untouched once stable")
+		}
+	})
+
+	t.Run("regenerates the derived secret when the user secret rotates", func(t *testing.T) {
+		inst := newInstance()
+		// The user secret was rotated (cert-manager reissue) to version 200;
+		// the derived secret and the deployment still record version 100.
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "200"},
+			Data:       realPEMSecretData(t),
+		}
+		staleDerived := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "user-tls-jks",
+				Namespace:   "default",
+				Annotations: map[string]string{userSecretVersionKey: "100"},
+			},
+			Data: map[string][]byte{
+				"tls-keystore.jks":  []byte("stale-keystore"),
+				"keystore_password": []byte("stale-password"),
+				"key_password":      []byte("stale-password"),
+			},
+		}
+		dep := newRestAPITLSDeployment("user-tls-jks")
+		dep.Spec.Template.Annotations = map[string]string{tlsVersionKey: "100"}
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, userSecret, staleDerived, dep).
+			Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		ctx := context.Background()
+
+		result, err := reconciler.handleUserTLSSecretRotation(ctx, inst, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error after rotation: %v", err)
+		}
+		if result.RequeueAfter != time.Second {
+			t.Errorf("expected requeue after 1s, got %v", result.RequeueAfter)
+		}
+		derived := &corev1.Secret{}
+		if err := client.Get(ctx, derivedName, derived); err != nil {
+			t.Fatalf("derived secret disappeared: %v", err)
+		}
+		if derived.Annotations[userSecretVersionKey] != "200" {
+			t.Errorf("expected derived annotation %q after regeneration, got %q", "200", derived.Annotations[userSecretVersionKey])
+		}
+		if string(derived.Data["tls-keystore.jks"]) == "stale-keystore" {
+			t.Error("expected the derived keystore to be regenerated from the rotated user secret")
+		}
+		deployment := &apps.Deployment{}
+		if err := client.Get(ctx, depName, deployment); err != nil {
+			t.Fatalf("failed to get deployment: %v", err)
+		}
+		if got := deployment.Spec.Template.Annotations[tlsVersionKey]; got != "200" {
+			t.Errorf("expected tlsVersion annotation %q, got %q", "200", got)
+		}
+	})
+
+	t.Run("repoints stale mounts at the derived secret on a shape swap", func(t *testing.T) {
+		// The deployment was built when the user secret held a pre-built JKS
+		// keystore (mounted directly); the user then replaced its content
+		// with a kubernetes.io/tls shape. The rotation must repoint the
+		// volume and env refs at the derived secret in the same update that
+		// rolls the pods.
+		inst := newInstance()
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "300"},
+			Data:       realPEMSecretData(t),
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, userSecret, newRestAPITLSDeployment("user-tls")).
+			Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		ctx := context.Background()
+
+		if _, err := reconciler.handleUserTLSSecretRotation(ctx, inst, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		dep := &apps.Deployment{}
+		if err := client.Get(ctx, depName, dep); err != nil {
+			t.Fatalf("failed to get deployment: %v", err)
+		}
+		if got := restAPITLSVolumeSecretName(dep); got != "user-tls-jks" {
+			t.Errorf("expected the rest-api-tls volume to mount the derived secret, got %q", got)
+		}
+		for _, envName := range []string{sslKeystorePasswordEnv, sslKeyPasswordEnv} {
+			found := false
+			for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+				if e.Name == envName {
+					found = true
+					if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil || e.ValueFrom.SecretKeyRef.Name != "user-tls-jks" {
+						t.Errorf("expected %s to reference the derived secret, got %+v", envName, e.ValueFrom)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("expected env var %s to be present", envName)
+			}
+		}
+		if got := dep.Spec.Template.Annotations[tlsVersionKey]; got != "300" {
+			t.Errorf("expected tlsVersion annotation %q, got %q", "300", got)
+		}
 	})
 }
