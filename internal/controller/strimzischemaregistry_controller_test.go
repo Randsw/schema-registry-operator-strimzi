@@ -3194,6 +3194,151 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 	})
 
+	// Phase 3: standard kubernetes.io/tls user secrets are accepted and
+	// converted to a JKS keystore in an operator-managed derived secret
+	// (<tlssecretname>-jks), which is what the Deployment mounts.
+	Context("When using a kubernetes.io/tls user TLS secret", func() {
+		const SchemaRegistryName = "test-pem-user-tls"
+		const UserTLSSecretName = "cert-manager-tls"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		var userTLSSecret *corev1.Secret
+
+		BeforeEach(func() {
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{
+				ClusterId: "pem-user-tls-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap." + SchemaRegistryName + ".svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			// A real certificate and key so the PEM → JKS conversion runs the
+			// actual openssl/keytool pipeline.
+			ca, err := testutil.GenerateTestCA()
+			Expect(err).NotTo(HaveOccurred())
+			uc, err := testutil.GenerateTestUserCert(ca, "")
+			Expect(err).NotTo(HaveOccurred())
+
+			userTLSSecret = &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      UserTLSSecretName,
+					Namespace: SchemaRegistryName,
+				},
+				// The type cert-manager issues by default.
+				Type: corev1.SecretTypeTLS,
+				Data: map[string][]byte{
+					"tls.crt": []byte(uc.UserCertPEM),
+					"tls.key": []byte(uc.UserKeyPEM),
+				},
+			}
+			Expect(k8sClient.Create(ctx, userTLSSecret)).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         true,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					TLSSecretName:      UserTLSSecretName,
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should convert the PEM secret and mount the derived JKS secret", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking the derived JKS secret was created with the JKS contract")
+			derived := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, derived)
+			}, time.Minute, time.Second).Should(Succeed())
+			Expect(derived.Data).To(HaveKey("tls-keystore.jks"))
+			Expect(derived.Data).To(HaveKey("keystore_password"))
+			Expect(derived.Data).To(HaveKey("key_password"))
+			Expect(derived.Annotations[userSecretVersionKey]).NotTo(BeEmpty())
+
+			By("Checking the user secret resourceVersion is tracked for the rollout")
+			userSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: UserTLSSecretName, Namespace: SchemaRegistryName}, userSecret)).To(Succeed())
+
+			deployment := &appsv1.Deployment{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			By("Checking the Deployment mounts the derived secret")
+			volumeMounted := false
+			for _, vol := range deployment.Spec.Template.Spec.Volumes {
+				if vol.Name == restAPITLSVolumeName && vol.Secret != nil {
+					volumeMounted = true
+					Expect(vol.Secret.SecretName).To(Equal(UserTLSSecretName + "-jks"))
+				}
+			}
+			Expect(volumeMounted).To(BeTrue())
+			for _, envName := range []string{sslKeystorePasswordEnv, sslKeyPasswordEnv} {
+				found := false
+				for _, e := range deployment.Spec.Template.Spec.Containers[0].Env {
+					if e.Name == envName {
+						found = true
+						Expect(e.ValueFrom).NotTo(BeNil())
+						Expect(e.ValueFrom.SecretKeyRef.Name).To(Equal(UserTLSSecretName + "-jks"))
+					}
+				}
+				Expect(found).To(BeTrue())
+			}
+			Expect(deployment.Spec.Template.Annotations[tlsVersionKey]).To(Equal(userSecret.ResourceVersion))
+
+			By("Checking a second reconcile is stable (no derived-secret churn)")
+			derivedVersion := derived.ResourceVersion
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			stable := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, stable)).To(Succeed())
+			Expect(stable.ResourceVersion).To(Equal(derivedVersion))
+		})
+	})
+
 	// Phase 3: clientauth validation.
 	Context("When clientauth is enabled without securehttp", func() {
 		const SchemaRegistryName = "test-clientauth-invalid"
