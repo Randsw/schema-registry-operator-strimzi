@@ -372,7 +372,9 @@ spec:
 - `networkpolicy.enabled` (default `false`) creates a `NetworkPolicy` for the Schema Registry pods.
   When enabled, the policy allows ingress on the Schema Registry listener port from within the namespace
   and egress to the Kafka bootstrap service (plus DNS resolution via kube-dns). Enable it to restrict pod
-  traffic in namespaces that enforce a default-deny policy.
+  traffic in namespaces that enforce a default-deny policy. The DNS egress rule targets the standard
+  kube-dns pods (`k8s-app=kube-dns`) in the `kube-system` namespace; clusters running a custom DNS service
+  (different namespace or pod labels) need the policy adjusted manually.
 - `networkpolicy.allowcrossnamespaceingress` (default `false`) allows ingress to the Schema Registry from
   all namespaces instead of only the namespace of the `StrimziSchemaRegistry` resource. Only meaningful
   when `networkpolicy.enabled` is `true`.
