@@ -1093,6 +1093,20 @@ func TestComputeSpecHashServiceNetworkPolicy(t *testing.T) {
 			t.Errorf("expected different hashes when networkpolicy is enabled: both %q", hash1)
 		}
 	})
+
+	// Known-answer test pinning the FNV-64a algorithm: the digest of the
+	// default test instance must not change unless the hashing scheme is
+	// deliberately replaced. The value exceeds math.MaxUint32, which also
+	// proves the former FNV-32 digest is gone.
+	t.Run("known FNV-64a digest for the default test instance", func(t *testing.T) {
+		hash, err := computeSpecHash(newTestInstance())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if hash != "8252382037386917762" {
+			t.Errorf("expected the FNV-64a digest 8252382037386917762, got %q", hash)
+		}
+	})
 }
 
 func TestBuildNetworkPolicy(t *testing.T) {

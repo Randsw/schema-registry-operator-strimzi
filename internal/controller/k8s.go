@@ -1427,8 +1427,13 @@ func writeStringMapToHash(h io.Writer, m map[string]string) error {
 // SecurityProtocol, TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor,
 // SchemaRegistryGroupID, MasterEligibility, Configuration, and the full PodTemplateSpec —
 // all fields that affect the deployment spec or service ports.
+//
+// FNV-64a is used instead of the former FNV-32 to reduce the collision
+// probability across spec versions (64-bit vs 32-bit digest). Changing the
+// algorithm rewrites every stored hash value once, which triggers a one-time
+// rollout of existing Schema Registry deployments on operator upgrade.
 func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
-	h := fnv.New32a()
+	h := fnv.New64a()
 
 	if _, err := io.WriteString(h, string(instance.Spec.CompatibilityLevel)); err != nil {
 		return "", fmt.Errorf("failed to write CompatibilityLevel to hash: %w", err)
@@ -1531,7 +1536,7 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 		return "", fmt.Errorf("failed to write Template to hash: %w", err)
 	}
 
-	return fmt.Sprintf("%d", h.Sum32()), nil
+	return fmt.Sprintf("%d", h.Sum64()), nil
 }
 
 // updateExistingDeployment updates an existing deployment when the spec has changed.
