@@ -1,3 +1,39 @@
+## [1.16.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.15.1...1.16.0) (2026-11-09)
+
+
+### 📔 Docs
+
+* document keystoretype, PEM secret auto-conversion and new TLS properties ([6c77c63](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6c77c63f140b550d9f56cd1e5ef6503db27c1a23))
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump github.com/onsi/ginkgo/v2 from 2.33.1 to 2.34.0 ([ff15544](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ff15544b2369f5c74fed72fed837b006ebc1f1dd))
+
+
+### 🧪 Tests
+
+* cover PEM user TLS validation, derived-secret lifecycle and rotation ([1588464](https://github.com/Randsw/schema-registry-operator-strimzi/commit/158846462a186a1ec822f29846bd41a005d4afda))
+* envtest for kubernetes.io/tls user secret conversion ([9a07280](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9a07280f2a1040e34e56f6f0c65ae6721813bc99))
+
+
+### 🚀 Features
+
+* accept kubernetes.io/tls user secrets via derived JKS secrets ([d2cfde6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d2cfde6ffa4ff6555eb9e5f7124329a1474a5990))
+* convert PEM certificates to JKS keystores in certProcessor ([bebe7df](https://github.com/Randsw/schema-registry-operator-strimzi/commit/bebe7dfad0cbf9f7e35af5d03fd249113030d1f3))
+* emit non-deprecated Confluent SSL and inter-instance properties ([c6e5b6b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c6e5b6bac43cf25f18eb0516c9d639ae4d925b72))
+* support PKCS12 keystores for user TLS secrets ([2b90ead](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2b90ead4d984c676c1f71c4eda1f53ba2623b257))
+
+
+### 🛠 Fixes
+
+* align e2e assertions with the non-deprecated SSL client authentication env ([b8590d3](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b8590d3b8d8233222c306979b6f5b7c0039b4f0a))
+
+
+### Other
+
+* sync helm chart CRD with the regenerated manifests ([4887606](https://github.com/Randsw/schema-registry-operator-strimzi/commit/488760609c8b2910ff467489de9169a7c98b4de4))
+
 ## [1.15.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.15.0...1.15.1) (2026-11-06)
 
 
