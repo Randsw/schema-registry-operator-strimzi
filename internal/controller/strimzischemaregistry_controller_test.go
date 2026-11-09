@@ -3591,4 +3591,47 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(instance.Status.Status).NotTo(Equal("InvalidTLSSecret"))
 		})
 	})
+
+	// Phase 4 (plan §2.10 L5): the HeapOpts pattern must accept plain digits
+	// only — hex letters like "12a" are rejected by CRD validation at the API
+	// server.
+	Context("When validating the HeapOpts pattern at the API server", func() {
+		ctx := context.Background()
+
+		It("rejects hex-letter heap sizes and accepts plain digits", func() {
+			namespaceName := "heapopts-validation"
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}}
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, namespace)
+			})
+
+			newCR := func(name, heapOpts string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+				return &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespaceName},
+					Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+						SecureHTTP: false,
+						HeapOpts:   heapOpts,
+						Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					},
+				}
+			}
+
+			By("Rejecting heap sizes with hex letters (e.g. 12a)")
+			err := k8sClient.Create(ctx, newCR("sr-hex-heap", "-Xms12aM -Xmx12aM"))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("heapopts"))
+
+			By("Rejecting non-numeric heap sizes (abc)")
+			err = k8sClient.Create(ctx, newCR("sr-abc-heap", "-XmsabcM -XmxabcM"))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("heapopts"))
+
+			By("Accepting plain digit heap sizes")
+			Expect(k8sClient.Create(ctx, newCR("sr-digit-heap", "-Xms1024M -Xmx1024M"))).To(Succeed())
+
+			By("Accepting the empty HeapOpts (operator default applies)")
+			Expect(k8sClient.Create(ctx, newCR("sr-empty-heap", ""))).To(Succeed())
+		})
+	})
 })
