@@ -87,7 +87,7 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 		applyRegistryCR(ctx, true, true)
 
 		By("waiting for the deployment to pick up the clientauth configuration")
-		waitForDeploymentEnv(ctx, readyTimeout, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH", "true")
+		waitForDeploymentEnv(ctx, readyTimeout, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", "REQUIRED")
 		waitForReadyCondition(ctx, readyTimeout)
 		waitForDeploymentRollout(ctx, readyTimeout)
 
