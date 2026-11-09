@@ -1,3 +1,35 @@
+## [1.16.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.16.0...1.16.1) (2026-11-09)
+
+
+### :scissors: Refactor
+
+* extract NetworkPolicy DNS egress peers into named constants ([2dbfd7d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2dbfd7dee18505e21b9364ca4b99ce2819c37dc6))
+
+
+### 📔 Docs
+
+* document NetworkPolicy DNS assumption ([a932196](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a93219667fd21390f656e561a8d694adbc61d022))
+* note env-fed tool passwords, FNV-64a rollout, HeapOpts digits, single-replica enforcement ([f0485fe](https://github.com/Randsw/schema-registry-operator-strimzi/commit/f0485fe98aa08eaba10452e100f31979c366e54c))
+
+
+### 🦊 CI/CD
+
+* **deps:** Bump docker/login-action from 4.7.0 to 4.8.0 ([87bf096](https://github.com/Randsw/schema-registry-operator-strimzi/commit/87bf096b1a35a0dc152d43f886cd9802f69ee2e9))
+
+
+### 🛠 Fixes
+
+* feed keytool and openssl passwords via the environment ([62b90a6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/62b90a6ebb8b85916d7d016b57f932575ddcba00))
+* look up KafkaUser by name instead of listing the namespace ([efa5ad6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/efa5ad6478cc508422445f441aafee0c13d73665))
+* restrict HeapOpts to digits only ([9fd4dc2](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9fd4dc2e06d5a6ac9282bd5d67505e5fb5355edb))
+* upgrade spec hash to FNV-64a ([1c6c9e3](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1c6c9e34def4e5053b9851a3b06939c1c9745e70))
+* validate KafkaUser secret fields in createMTLSSecret ([64f4e6e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/64f4e6ef1efad3f98bd5858e1f6cc5a0f01c0ed4))
+
+
+### Other
+
+* sync helm chart CRD with the regenerated HeapOpts pattern ([714a5e1](https://github.com/Randsw/schema-registry-operator-strimzi/commit/714a5e106d1fac11e39fca8f34cca088dd49557c))
+
 ## [1.16.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.15.1...1.16.0) (2026-11-09)
 
 
