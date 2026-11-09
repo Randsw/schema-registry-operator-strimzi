@@ -225,7 +225,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err == nil {
 			userTLSSecretObj = userTLSSecret
 		}
-		if msg := userTLSSecretValidationError(instance.Spec.TLSSecretName, userTLSSecretObj, effectiveKeystoreType(instance)); msg != "" {
+		if msg := validateUserTLSSecret(instance, userTLSSecretObj); msg != "" {
 			logger.Info("Invalid user-provided TLS secret; skipping reconciliation", "Secret.Name", instance.Spec.TLSSecretName, "Reason", msg)
 			meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
 				Type:               "Ready",
@@ -1202,12 +1202,29 @@ func (r *StrimziSchemaRegistryReconciler) handleUserTLSSecretRotation(
 		logger.Error(err, "Failed to get deployment for user TLS secret rotation")
 		return ctrl.Result{}, err
 	}
+	// Regenerate the derived JKS secret when the user secret is a PEM
+	// (kubernetes.io/tls) secret so the mounted material matches; the
+	// tlsVersion rollout annotation continues to track the USER secret's
+	// resourceVersion (roll once, then stable).
+	if isPEMTLSSecret(userSecret) {
+		if err := r.ensureDerivedJKSSecret(ctx, instance, userSecret, logger); err != nil {
+			logger.Error(err, "Failed to regenerate derived JKS secret after user TLS secret rotation")
+			return ctrl.Result{}, err
+		}
+	}
 	current := ""
 	if dep.Spec.Template.Annotations != nil {
 		current = dep.Spec.Template.Annotations[tlsVersionKey]
 	}
 	if current == userSecret.ResourceVersion {
 		return ctrl.Result{}, nil
+	}
+	// When the user secret shape changed (pre-built keystore ↔
+	// kubernetes.io/tls) the Deployment mounts the wrong secret; repoint the
+	// mounts and env refs at the expected one in the same update that rolls
+	// the pods, so the rollout never runs with stale mounts.
+	if expectedMount := restAPITLSMountSecretName(instance, userSecret); restAPITLSVolumeSecretName(dep) != expectedMount {
+		fixRestAPITLSMount(dep, expectedMount)
 	}
 	if dep.Spec.Template.Annotations == nil {
 		dep.Spec.Template.Annotations = make(map[string]string)

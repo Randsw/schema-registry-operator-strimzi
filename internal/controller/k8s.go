@@ -27,7 +27,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// Resource name suffixes used throughout the operator.
+// Resource name suffixes and fixed names used throughout the operator.
 const (
 	jksSecretSuffix     = "-jks"
 	tlsSecretSuffix     = "-tls"
@@ -35,6 +35,12 @@ const (
 	clusterCASuffix     = "-cluster-ca-cert"
 	clusterCAKeySuffix  = "-cluster-ca"
 	networkPolicySuffix = "-network-policy"
+
+	// REST API TLS volume and env names, shared by the deployment builders
+	// and the user TLS secret mount fixup.
+	restAPITLSVolumeName   = "rest-api-tls"
+	sslKeystorePasswordEnv = "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD"
+	sslKeyPasswordEnv      = "SCHEMA_REGISTRY_SSL_KEY_PASSWORD"
 )
 
 // labelsForStrimziSchemaRegistryOperator returns the standard set of labels
@@ -173,6 +179,17 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			return nil, err
 		}
 		tlsResourceVersion = userTLSSecret.ResourceVersion
+		// A standard kubernetes.io/tls (PEM) secret is converted to a JKS
+		// keystore in an operator-managed derived secret, which is what the
+		// pod mounts and references. The tlsVersion rollout annotation keeps
+		// tracking the USER secret's resourceVersion.
+		if isPEMTLSSecret(userTLSSecret) {
+			if err := r.ensureDerivedJKSSecret(ctx, instance, userTLSSecret, logger); err != nil {
+				logger.Error(err, "Failed to ensure derived JKS secret for PEM user TLS secret", "Secret.Name", TLSSecretName)
+				return nil, err
+			}
+			TLSSecretName = derivedJKSSecretName(instance.Spec.TLSSecretName)
+		}
 	}
 
 	dep, configOverridden, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, tlsResourceVersion, TLSSecretName, auth, logger)
@@ -535,7 +552,7 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 			// schema.registry.inter.instance.protocol spelling.
 			{Name: "SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", Value: "https"},
 			{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", Value: restAPIKeystoreLocation(keystoreType)},
-			{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+			{Name: sslKeystorePasswordEnv, ValueFrom: &v1.EnvVarSource{
 				SecretKeyRef: &v1.SecretKeySelector{
 					LocalObjectReference: v1.LocalObjectReference{
 						Name: TLSSecretName,
@@ -543,7 +560,7 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 					Key: "keystore_password",
 				},
 			}},
-			{Name: "SCHEMA_REGISTRY_SSL_KEY_PASSWORD", ValueFrom: &v1.EnvVarSource{
+			{Name: sslKeyPasswordEnv, ValueFrom: &v1.EnvVarSource{
 				SecretKeyRef: &v1.SecretKeySelector{
 					LocalObjectReference: v1.LocalObjectReference{
 						Name: TLSSecretName,
@@ -613,12 +630,12 @@ func buildPodVolumes(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 	// REST API TLS secret volume
 	if instance.Spec.SecureHTTP {
 		containerVolumeMount = append(containerVolumeMount, v1.VolumeMount{
-			Name:      "rest-api-tls",
+			Name:      restAPITLSVolumeName,
 			MountPath: "/var/rest-api-tls",
 			ReadOnly:  true,
 		})
 		podVolume = append(podVolume, v1.Volume{
-			Name: "rest-api-tls",
+			Name: restAPITLSVolumeName,
 			VolumeSource: v1.VolumeSource{
 				Secret: &v1.SecretVolumeSource{
 					SecretName:  TLSSecretName,
@@ -1579,6 +1596,16 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 				return nil, false, fmt.Errorf("failed to get user-provided TLS secret: %w", err)
 			}
 			tlsResourceVersion = userTLSSecret.ResourceVersion
+			// A standard kubernetes.io/tls (PEM) secret is converted to a JKS
+			// keystore in an operator-managed derived secret, which is what
+			// the pod mounts and references. This also self-heals a deleted
+			// or stale derived secret during normal reconciles.
+			if isPEMTLSSecret(userTLSSecret) {
+				if err := r.ensureDerivedJKSSecret(ctx, instance, userTLSSecret, logger); err != nil {
+					return nil, false, fmt.Errorf("failed to ensure derived JKS secret: %w", err)
+				}
+				TLSSecretName = derivedJKSSecretName(instance.Spec.TLSSecretName)
+			}
 		} else {
 			TLSSecretName = instance.Name + tlsSecretSuffix
 		}
