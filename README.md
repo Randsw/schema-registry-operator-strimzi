@@ -212,6 +212,12 @@ spec:
 
   See also: Schema Registry [kafkastore.security.protocol](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#kafkastore-security-protocol) docs.
 
+  > **Note**
+  > When building keystores and truststores, the operator passes the generated
+  > passwords to the `keytool`/`openssl` child processes through the process
+  > environment, never as command-line arguments, so they are not readable from
+  > `/proc/<pid>/cmdline` while the tools run.
+
 - `compatibilityLevel` is the default schema compatibility level. Possible values:
 
   - `none`
@@ -393,11 +399,17 @@ The operator reports the CR as `Ready=True` (`status.status: "Ok"`) only once th
 has at least one ready replica. While the Deployment is starting or unavailable, the CR shows `Ready=False`
 with reason `NotReady`.
 
+Upgrading the operator may trigger a one-time rollout of existing Schema Registry deployments even when the
+spec is unchanged: the spec hash recorded in the `strimziregistryoperator.randsw.code/specHash` annotation
+was upgraded from a 32-bit to a 64-bit FNV digest, rewriting every stored value once.
+
 ### Single replica support
 
 Only a **single replica** is supported. Running multiple replicas with `securehttp: true` is not supported
 because the generated REST TLS certificate SANs are DNS-only (the Service DNS name) while the Schema Registry
 `host.name` is set to the pod IP, so inter-instance HTTPS forwarding between replicas breaks.
+This limit is structurally enforced: the CRD exposes no `replicas` field and the operator always renders a
+single-replica Deployment.
 
 ### Arbitrary Schema Registry configuration
 
@@ -454,6 +466,9 @@ still succeeds.
 | `kafkastore.sasl.*`                        | KafkaStore SASL (SCRAM) credentials                         |
 | `ssl.keystore.*` (incl. `ssl.keystore.type`)| REST API TLS keystore (type follows `spec.keystoretype`)    |
 | `ssl.key.password`                         | REST API TLS key password                                   |
+
+`spec.heapopts` accepts only plain digit heap sizes (e.g. `-Xms512M -Xmx512M`); hex-letter sizes such as
+`12a` are rejected by CRD validation.
 
 ### BASIC/RBAC authentication on the REST API
 
