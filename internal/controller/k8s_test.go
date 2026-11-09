@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -1093,6 +1094,20 @@ func TestComputeSpecHashServiceNetworkPolicy(t *testing.T) {
 			t.Errorf("expected different hashes when networkpolicy is enabled: both %q", hash1)
 		}
 	})
+
+	// Known-answer test pinning the FNV-64a algorithm: the digest of the
+	// default test instance must not change unless the hashing scheme is
+	// deliberately replaced. The value exceeds math.MaxUint32, which also
+	// proves the former FNV-32 digest is gone.
+	t.Run("known FNV-64a digest for the default test instance", func(t *testing.T) {
+		hash, err := computeSpecHash(newTestInstance())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if hash != "8252382037386917762" {
+			t.Errorf("expected the FNV-64a digest 8252382037386917762, got %q", hash)
+		}
+	})
 }
 
 func TestBuildNetworkPolicy(t *testing.T) {
@@ -1161,6 +1176,20 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	}
 	if dns.To[0].PodSelector == nil || dns.To[0].PodSelector.MatchLabels["k8s-app"] != "kube-dns" {
 		t.Errorf("expected DNS peer pod selector k8s-app=kube-dns, got %v", dns.To[0].PodSelector)
+	}
+
+	// The DNS egress rule must be rendered from the documented constants, and
+	// the constants must keep matching the documented assumption (standard
+	// kube-dns in kube-system) — see the README NetworkPolicy section.
+	if dns.To[0].NamespaceSelector.MatchLabels[dnsNamespaceLabel] != dnsNamespaceName {
+		t.Errorf("expected DNS namespace selector from constants %s=%s, got %v", dnsNamespaceLabel, dnsNamespaceName, dns.To[0].NamespaceSelector.MatchLabels)
+	}
+	if dns.To[0].PodSelector.MatchLabels[dnsPodLabel] != dnsPodValue {
+		t.Errorf("expected DNS pod selector from constants %s=%s, got %v", dnsPodLabel, dnsPodValue, dns.To[0].PodSelector.MatchLabels)
+	}
+	if dnsNamespaceLabel != "kubernetes.io/metadata.name" || dnsNamespaceName != "kube-system" || dnsPodLabel != "k8s-app" || dnsPodValue != "kube-dns" {
+		t.Errorf("DNS egress constants changed; update the README NetworkPolicy section to match the new assumption: %s=%s in namespace %s (label %s)",
+			dnsPodLabel, dnsPodValue, dnsNamespaceName, dnsNamespaceLabel)
 	}
 }
 
@@ -1746,4 +1775,105 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 			t.Errorf("expected no requeue for a custom TLS secret, got %v", result.RequeueAfter)
 		}
 	})
+}
+
+// TestCreateMTLSSecretFieldValidation verifies the explicit presence checks
+// for the KafkaUser secret fields consumed by the mTLS keystore pipeline:
+// each missing key produces a clear error naming it, a pre-built user.p12
+// makes the PEM fields unnecessary (they are only dereferenced on the PEM
+// path), and a complete secret proceeds to build the JKS secret.
+func TestCreateMTLSSecretFieldValidation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+
+	clusterCASecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-cluster-ca-cert", Namespace: "default"},
+		Data:       map[string][]byte{"ca.crt": []byte(ca.CACertPEM)},
+	}
+
+	fullPEMData := map[string][]byte{
+		"ca.crt":        []byte(ca.CACertPEM),
+		"user.crt":      []byte(uc.UserCertPEM),
+		"user.key":      []byte(uc.UserKeyPEM),
+		"user.password": []byte("test1234"),
+	}
+
+	tests := []struct {
+		name       string
+		userData   map[string][]byte
+		wantErrKey string // empty means no validation error is expected
+	}{
+		{name: "missing ca.crt", userData: dropKey(fullPEMData, "ca.crt"), wantErrKey: "ca.crt"},
+		{name: "missing user.crt", userData: dropKey(fullPEMData, "user.crt"), wantErrKey: "user.crt"},
+		{name: "missing user.key", userData: dropKey(fullPEMData, "user.key"), wantErrKey: "user.key"},
+		{name: "missing user.password", userData: dropKey(fullPEMData, "user.password"), wantErrKey: "user.password"},
+		{name: "all PEM fields present proceeds", userData: fullPEMData, wantErrKey: ""},
+		{name: "user.p12 present without PEM fields proceeds", userData: map[string][]byte{
+			"user.p12":      uc.PKCS12Data,
+			"user.password": []byte("test1234"),
+		}, wantErrKey: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			userSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sr", Namespace: "default"},
+				Data:       tt.userData,
+			}
+			r := &StrimziSchemaRegistryReconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(clusterCASecret, userSecret).Build(),
+				Scheme: scheme,
+			}
+			inst := newTestInstance()
+
+			secret, created, err := r.createMTLSSecret(inst, context.Background(), logr.Logger{}, "test-cluster", clusterCASecret, userSecret)
+			if tt.wantErrKey != "" {
+				if err == nil {
+					t.Fatalf("expected an error naming %q, got nil", tt.wantErrKey)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrKey) {
+					t.Errorf("expected the error to name the missing key %q, got: %v", tt.wantErrKey, err)
+				}
+				if secret != nil || created {
+					t.Errorf("expected nil secret and created=false on validation failure, got secret!=nil=%v created=%v", secret != nil, created)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if secret == nil {
+				t.Fatal("expected a JKS secret to be produced")
+			}
+			if !created {
+				t.Error("expected created=true for a freshly built JKS secret")
+			}
+			for _, key := range []string{"truststore.jks", "keystore.jks", "truststore_password", "keystore_password"} {
+				if len(secret.Data[key]) == 0 {
+					t.Errorf("expected non-empty %q in the produced secret", key)
+				}
+			}
+		})
+	}
+}
+
+// dropKey returns a copy of the map without the given key.
+func dropKey(m map[string][]byte, key string) map[string][]byte {
+	out := make(map[string][]byte, len(m))
+	for k, v := range m {
+		if k != key {
+			out[k] = v
+		}
+	}
+	return out
 }

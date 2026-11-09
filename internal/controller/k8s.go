@@ -41,6 +41,16 @@ const (
 	restAPITLSVolumeName   = "rest-api-tls"
 	sslKeystorePasswordEnv = "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD"
 	sslKeyPasswordEnv      = "SCHEMA_REGISTRY_SSL_KEY_PASSWORD"
+
+	// DNS egress peer assumed by the rendered NetworkPolicy: the standard
+	// kube-dns pods in the kube-system namespace. Clusters running a custom
+	// DNS service (different namespace or pod labels, e.g. some CoreDNS
+	// deployments) need the policy adjusted — this assumption is documented
+	// in the README NetworkPolicy section.
+	dnsNamespaceLabel = "kubernetes.io/metadata.name"
+	dnsNamespaceName  = "kube-system"
+	dnsPodLabel       = "k8s-app"
+	dnsPodValue       = "kube-dns"
 )
 
 // labelsForStrimziSchemaRegistryOperator returns the standard set of labels
@@ -884,6 +894,24 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 	}
 	userPassword := string(userPasswordData)
 
+	// Validate the certificate material the keystore pipeline dereferences.
+	// A pre-built user.p12 is used directly and makes the PEM fields
+	// unnecessary; otherwise the openssl pkcs12 export requires all three
+	// PEM fields (ca.crt for -CAfile/-chain, user.crt for -in, user.key for
+	// -inkey), and a missing key would only surface as a cryptic openssl
+	// failure.
+	if clientp12 == "" {
+		var missing []string
+		for _, key := range []string{"ca.crt", "user.crt", "user.key"} {
+			if len(userSecret.Data[key]) == 0 {
+				missing = append(missing, key)
+			}
+		}
+		if len(missing) > 0 {
+			return nil, false, fmt.Errorf("%s field(s) missing from KafkaUser secret; this field is required for keystore creation", strings.Join(missing, ", "))
+		}
+	}
+
 	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
 		return annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
 			annotations[userVersionKey] == userSecret.ResourceVersion
@@ -1203,12 +1231,12 @@ func buildNetworkPolicy(instance *strimziregistryoperatorv1alpha1.StrimziSchemaR
 						{
 							NamespaceSelector: &metav1.LabelSelector{
 								MatchLabels: map[string]string{
-									"kubernetes.io/metadata.name": "kube-system",
+									dnsNamespaceLabel: dnsNamespaceName,
 								},
 							},
 							PodSelector: &metav1.LabelSelector{
 								MatchLabels: map[string]string{
-									"k8s-app": "kube-dns",
+									dnsPodLabel: dnsPodValue,
 								},
 							},
 						},
@@ -1427,8 +1455,13 @@ func writeStringMapToHash(h io.Writer, m map[string]string) error {
 // SecurityProtocol, TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor,
 // SchemaRegistryGroupID, MasterEligibility, Configuration, and the full PodTemplateSpec —
 // all fields that affect the deployment spec or service ports.
+//
+// FNV-64a is used instead of the former FNV-32 to reduce the collision
+// probability across spec versions (64-bit vs 32-bit digest). Changing the
+// algorithm rewrites every stored hash value once, which triggers a one-time
+// rollout of existing Schema Registry deployments on operator upgrade.
 func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
-	h := fnv.New32a()
+	h := fnv.New64a()
 
 	if _, err := io.WriteString(h, string(instance.Spec.CompatibilityLevel)); err != nil {
 		return "", fmt.Errorf("failed to write CompatibilityLevel to hash: %w", err)
@@ -1531,7 +1564,7 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 		return "", fmt.Errorf("failed to write Template to hash: %w", err)
 	}
 
-	return fmt.Sprintf("%d", h.Sum32()), nil
+	return fmt.Sprintf("%d", h.Sum64()), nil
 }
 
 // updateExistingDeployment updates an existing deployment when the spec has changed.
