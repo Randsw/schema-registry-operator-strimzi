@@ -636,6 +636,7 @@ func TestBuildPodEnvConfigurationReserved(t *testing.T) {
 			"ssl.client.authentication":               "NONE",
 			"inter.instance.protocol":                 "http",
 			"schema.registry.inter.instance.protocol": "http",
+			"ssl.keystore.type":                       "PKCS12",
 		}
 
 		env, overridden := buildPodEnv(inst, "kafka:9092", "", auth)
@@ -643,6 +644,9 @@ func TestBuildPodEnvConfigurationReserved(t *testing.T) {
 		// The operator-managed values win; user-supplied values are ignored.
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", "REQUIRED")
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", "https")
+		// ssl.keystore.type follows spec.keystoretype (JKS here), not the
+		// user-supplied configuration value.
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL")
 
@@ -650,6 +654,7 @@ func TestBuildPodEnvConfigurationReserved(t *testing.T) {
 			"inter.instance.protocol",
 			"schema.registry.inter.instance.protocol",
 			"ssl.client.authentication",
+			"ssl.keystore.type",
 		}
 		if len(overridden) != len(wantOverridden) {
 			t.Fatalf("expected %d overridden keys, got %d: %v", len(wantOverridden), len(overridden), overridden)
@@ -1384,6 +1389,92 @@ func TestBuildPodEnvNonDeprecatedProperties(t *testing.T) {
 
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", "REQUIRED")
 		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
+	})
+}
+
+// TestBuildPodEnvKeystoreType verifies the REST API TLS keystore env vars for
+// both keystore types: JKS (the default, including unset) keeps the current
+// behavior (tls-keystore.jks, no ssl.keystore.type property), while PKCS12
+// points at tls-keystore.p12 and emits SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE.
+func TestBuildPodEnvKeystoreType(t *testing.T) {
+	auth := kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}
+
+	t.Run("JKS default keeps the current keystore location and no type property", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.KeystoreType = ""
+
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", "/var/rest-api-tls/tls-keystore.jks")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE")
+	})
+
+	t.Run("explicit JKS behaves like the default", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.KeystoreType = "JKS"
+
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", "/var/rest-api-tls/tls-keystore.jks")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE")
+	})
+
+	t.Run("PKCS12 emits the p12 location and keystore type", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.KeystoreType = "PKCS12"
+
+		env, _ := buildPodEnv(inst, "kafka:9092", inst.Spec.TLSSecretName, auth)
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", "/var/rest-api-tls/tls-keystore.p12")
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE", "PKCS12")
+		keystorePassword, ok := envByName(env, "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD")
+		if !ok {
+			t.Fatal("expected SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD to be present")
+		}
+		requireSecretRef(t, keystorePassword, inst.Spec.TLSSecretName, "keystore_password")
+	})
+
+	t.Run("keystore type is not emitted without securehttp", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.KeystoreType = "PKCS12"
+
+		env, _ := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE")
+	})
+}
+
+// TestComputeSpecHashKeystoreType verifies that spec.keystoretype participates
+// in the spec hash so switching the keystore type triggers a deployment
+// rollout.
+func TestComputeSpecHashKeystoreType(t *testing.T) {
+	t.Run("different KeystoreType produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.KeystoreType = "PKCS12"
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different KeystoreType: both %q", hash1)
+		}
+	})
+
+	t.Run("unset and explicit JKS produce the same hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.KeystoreType = "JKS"
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
+		if hash1 != hash2 {
+			t.Errorf("expected same hash for unset and explicit JKS: %q vs %q", hash1, hash2)
+		}
 	})
 }
 

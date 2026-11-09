@@ -310,13 +310,40 @@ func confluentPropertyToEnvName(key string) string {
 
 var confluentPropertyEnvReplacer = strings.NewReplacer(".", "_", "-", "_")
 
+// Keystore types supported for user-provided REST API TLS secrets.
+const (
+	keystoreTypeJKS    = "JKS"
+	keystoreTypePKCS12 = "PKCS12"
+)
+
+// effectiveKeystoreType returns the keystore format of the user-provided REST
+// API TLS secret (spec.tlssecretname). An unset value defaults to JKS
+// (Confluent's built-in default), so CRs created before the keystoretype
+// field existed keep working unchanged.
+func effectiveKeystoreType(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+	if instance.Spec.KeystoreType == keystoreTypePKCS12 {
+		return keystoreTypePKCS12
+	}
+	return keystoreTypeJKS
+}
+
+// restAPIKeystoreLocation returns the in-pod path of the REST API TLS
+// keystore for the given keystore type.
+func restAPIKeystoreLocation(keystoreType string) string {
+	if keystoreType == keystoreTypePKCS12 {
+		return "/var/rest-api-tls/tls-keystore.p12"
+	}
+	return "/var/rest-api-tls/tls-keystore.jks"
+}
+
 // reservedConfigurationKeys are Confluent Schema Registry properties managed by
 // the operator and therefore not settable through spec.configuration.
 //
 // The deprecated spellings (schema.registry.inter.instance.protocol) stay
 // reserved until a release note announces their removal; the modern
 // equivalents (ssl.client.authentication, inter.instance.protocol) are
-// operator-managed from the start.
+// operator-managed from the start. ssl.keystore.type is operator-managed
+// because it follows spec.keystoretype.
 var reservedConfigurationKeys = map[string]struct{}{
 	"kafkastore.bootstrap.servers":            {},
 	"kafkastore.security.protocol":            {},
@@ -330,6 +357,7 @@ var reservedConfigurationKeys = map[string]struct{}{
 	"schema.registry.inter.instance.protocol": {},
 	"inter.instance.protocol":                 {},
 	"ssl.client.authentication":               {},
+	"ssl.keystore.type":                       {},
 	"ssl.key.password":                        {},
 }
 
@@ -500,13 +528,14 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 
 	// REST API TLS configuration
 	if instance.Spec.SecureHTTP {
-		podEnv = append(podEnv,
-			v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "https://0.0.0.0:8085"},
+		keystoreType := effectiveKeystoreType(instance)
+		restAPIEnv := []v1.EnvVar{
+			{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "https://0.0.0.0:8085"},
 			// inter.instance.protocol replaces the deprecated
 			// schema.registry.inter.instance.protocol spelling.
-			v1.EnvVar{Name: "SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", Value: "https"},
-			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", Value: "/var/rest-api-tls/tls-keystore.jks"},
-			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
+			{Name: "SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL", Value: "https"},
+			{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", Value: restAPIKeystoreLocation(keystoreType)},
+			{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD", ValueFrom: &v1.EnvVarSource{
 				SecretKeyRef: &v1.SecretKeySelector{
 					LocalObjectReference: v1.LocalObjectReference{
 						Name: TLSSecretName,
@@ -514,7 +543,7 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 					Key: "keystore_password",
 				},
 			}},
-			v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEY_PASSWORD", ValueFrom: &v1.EnvVarSource{
+			{Name: "SCHEMA_REGISTRY_SSL_KEY_PASSWORD", ValueFrom: &v1.EnvVarSource{
 				SecretKeyRef: &v1.SecretKeySelector{
 					LocalObjectReference: v1.LocalObjectReference{
 						Name: TLSSecretName,
@@ -522,7 +551,13 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 					Key: "key_password",
 				},
 			}},
-		)
+		}
+		// Confluent defaults ssl.keystore.type to JKS, so the property is only
+		// emitted for the non-default PKCS12 keystore type.
+		if keystoreType == keystoreTypePKCS12 {
+			restAPIEnv = append(restAPIEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE", Value: keystoreType})
+		}
+		podEnv = append(podEnv, restAPIEnv...)
 	} else {
 		podEnv = append(podEnv, v1.EnvVar{Name: "SCHEMA_REGISTRY_LISTENERS", Value: "http://0.0.0.0:8081"})
 	}
@@ -1404,6 +1439,13 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 
 	if _, err := io.WriteString(h, instance.Spec.TLSSecretName); err != nil {
 		return "", fmt.Errorf("failed to write TLSSecretName to hash: %w", err)
+	}
+
+	// The keystore type changes the rendered keystore location and the
+	// SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE env var, so it participates in the
+	// hash using the same effective value buildPodEnv emits.
+	if _, err := io.WriteString(h, effectiveKeystoreType(instance)); err != nil {
+		return "", fmt.Errorf("failed to write KeystoreType to hash: %w", err)
 	}
 
 	// Storage and identity fields are hashed using the same effective/defaulted

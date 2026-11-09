@@ -45,12 +45,14 @@ func validUserTLSSecretData() map[string][]byte {
 
 // TestUserTLSSecretValidationError is a table-driven test for the pure
 // validation helper: a missing secret, a missing each required key, empty
-// values, and the valid case.
+// values, and the valid case — for both the JKS (default) and PKCS12
+// keystore contracts.
 func TestUserTLSSecretValidationError(t *testing.T) {
 	tests := []struct {
 		name          string
 		secretName    string
 		secret        *corev1.Secret
+		keystoreType  string
 		wantInvalid   bool
 		wantMentions  []string // substrings the message must contain
 		wantForbidden []string // substrings the message must not contain
@@ -109,11 +111,62 @@ func TestUserTLSSecretValidationError(t *testing.T) {
 			secretName: "user-tls",
 			secret:     &corev1.Secret{Data: validUserTLSSecretData()},
 		},
+		// PKCS12 keystore contract (spec.keystoretype: PKCS12).
+		{
+			name:         "PKCS12: missing p12 keystore key",
+			secretName:   "user-tls",
+			keystoreType: keystoreTypePKCS12,
+			secret:       &corev1.Secret{Data: map[string][]byte{"keystore_password": []byte("pw"), "key_password": []byte("pw")}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls-keystore.p12"},
+		},
+		{
+			name:         "PKCS12: empty p12 keystore value",
+			secretName:   "user-tls",
+			keystoreType: keystoreTypePKCS12,
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls-keystore.p12": {}, "keystore_password": []byte("pw"), "key_password": []byte("pw")}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls-keystore.p12"},
+		},
+		{
+			name:         "PKCS12: missing passwords",
+			secretName:   "user-tls",
+			keystoreType: keystoreTypePKCS12,
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls-keystore.p12": []byte("p12")}},
+			wantInvalid:  true,
+			wantMentions: []string{"keystore_password", "key_password"},
+		},
+		{
+			name:         "PKCS12: jks-only secret is invalid",
+			secretName:   "user-tls",
+			keystoreType: keystoreTypePKCS12,
+			secret:       &corev1.Secret{Data: validUserTLSSecretData()},
+			wantInvalid:  true,
+			wantMentions: []string{"tls-keystore.p12"},
+		},
+		{
+			name:         "PKCS12: valid p12 secret passes",
+			secretName:   "user-tls",
+			keystoreType: keystoreTypePKCS12,
+			secret: &corev1.Secret{Data: map[string][]byte{
+				"tls-keystore.p12":  []byte("p12-bytes"),
+				"keystore_password": []byte("store-password"),
+				"key_password":      []byte("key-password"),
+			}},
+		},
+		{
+			name:         "PKCS12: nil secret is invalid",
+			secretName:   "user-tls",
+			keystoreType: keystoreTypePKCS12,
+			secret:       nil,
+			wantInvalid:  true,
+			wantMentions: []string{"user-tls", "not found"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := userTLSSecretValidationError(tt.secretName, tt.secret)
+			msg := userTLSSecretValidationError(tt.secretName, tt.secret, tt.keystoreType)
 			if tt.wantInvalid && msg == "" {
 				t.Fatalf("expected a validation error message, got empty")
 			}
