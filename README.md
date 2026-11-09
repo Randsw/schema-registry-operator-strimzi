@@ -235,12 +235,13 @@ spec:
   It is only valid when `securehttp` is `true`: setting it without `securehttp` marks the CR
   `Ready=False` with reason `ClientAuthRequiresSecureHTTP` and emits a `Warning` event, while reconciliation
   still succeeds. When enabled, clients must present a certificate signed by the Kafka cluster CA. The operator
-  reuses the cluster-CA truststore and sets `SCHEMA_REGISTRY_SSL_CLIENT_AUTH=true` together with
+  reuses the cluster-CA truststore and sets `SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION=REQUIRED` (the
+  non-deprecated `ssl.client.authentication` property) together with
   `SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION` and `SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD`. For
   `PLAINTEXT`/`SASL_PLAINTEXT` security protocols (which do not otherwise need a truststore), the operator
   builds a truststore-only secret from the cluster CA certificate for this purpose.
-- `tlssecretName` is name of secret that contains the TLS certificate and private key pair in JKS format. Must be in the same
-  namespace as the `StrimziSchemaRegistry` CR.
+- `tlssecretName` is name of secret that contains the TLS certificate and private key pair for the Schema Registry
+  REST API. Must be in the same namespace as the `StrimziSchemaRegistry` CR.
   If this field is omitted or an empty string, the SSR operator automatically creates a TLS certificate and private key pair in JKS format, signs them with the Strimzi Kafka cluster CA(stored in the `<kafka-clustername>-cluster-ca` and `<kafka-clustername>-cluster-ca-cert` secrets)
   and mounts the secret to the Schema Registry pod.
   Operator-generated certificates are valid for one year and are renewed automatically when fewer than 30 days remain
@@ -250,21 +251,40 @@ spec:
   If the operator-generated `<name>-tls` secret or the operator-managed `<name>-jks` secret is deleted manually,
   the operator recreates it automatically on the next reconciliation and rolls the Schema Registry pods, so a
   deleted secret no longer breaks the next pod restart.
-  The secret must contain exactly the following keys with non-empty values:
 
-  |Key               |Value                                            |
-  |------------------|-------------------------------------------------|
-  |tls-keystore.jks  |JKS keystore with the certificate and private key|
-  |keystore_password |Keystore password                                |
-  |key_password      |Private key password                             |
+  The secret must match one of the following three shapes (all keys with non-empty values):
 
-  The operator validates the secret before rendering the Deployment. A missing secret, or missing/empty keys, set
-  `Ready=False` with reason `InvalidTLSSecret` on the CR status and emit a `Warning` event; no Deployment is created
-  until the secret is fixed, and reconciliation resumes automatically once the secret is valid.
-  Rotating the secret (any update that changes its `resourceVersion`) is detected by the operator and the Schema
-  Registry pods are rolled automatically so the JVM reloads the keystore.
+  1. **JKS keystore** (the default contract, used when `keystoretype` is `JKS` or unset):
 
-  Create the secret with `kubectl`:
+     |Key               |Value                                            |
+     |------------------|-------------------------------------------------|
+     |tls-keystore.jks  |JKS keystore with the certificate and private key|
+     |keystore_password |Keystore password                                |
+     |key_password      |Private key password                             |
+
+  2. **PKCS12 keystore** (when `keystoretype` is `PKCS12`):
+
+     |Key               |Value                                            |
+     |------------------|-------------------------------------------------|
+     |tls-keystore.p12  |PKCS12 keystore with the certificate and key     |
+     |keystore_password |Keystore password                                |
+     |key_password      |Private key password                             |
+
+  3. **Standard `kubernetes.io/tls` secret** (PEM, as issued by cert-manager):
+
+     |Key    |Value                                                        |
+     |-------|-------------------------------------------------------------|
+     |tls.crt|PEM-encoded certificate (required)                           |
+     |tls.key|PEM-encoded private key (required)                           |
+     |ca.crt |PEM-encoded issuing CA (optional)                            |
+
+  The operator validates the secret before rendering the Deployment. A missing secret, a shape mismatch, or
+  missing/empty keys set `Ready=False` with reason `InvalidTLSSecret` on the CR status and emit a `Warning` event;
+  no Deployment is created until the secret is fixed, and reconciliation resumes automatically once the secret is
+  valid. Rotating the secret (any update that changes its `resourceVersion`) is detected by the operator and the
+  Schema Registry pods are rolled automatically so the JVM reloads the keystore.
+
+  Create a JKS-keystore secret with `kubectl`:
 
   ```bash
   kubectl create secret generic schema-registry-tls \
@@ -273,8 +293,15 @@ spec:
     --from-literal=key_password='<key-password>'
   ```
 
-  cert-manager issues `tls.crt`/`tls.key` (PEM) and cannot emit a JKS keystore through `additionalOutputFormats`,
-  so re-pack its output into the required format:
+  **cert-manager note:** a plain `kubernetes.io/tls` secret (shape 3) now works without re-packing. The operator
+  converts the PEM certificate and key into a JKS keystore itself and stores the result in an operator-managed
+  **derived secret** named `<tlssecretname>-jks`, which is what the Schema Registry pod mounts. The derived secret
+  is regenerated automatically whenever the user secret changes (tracked via the user secret's `resourceVersion`),
+  and the pod rollout keeps following the *user* secret's `resourceVersion`, so a cert-manager renewal rolls the
+  pods exactly once. The name `<tlssecretname>-jks` must not collide with the operator-managed `<name>-jks` or
+  `<name>-tls` secrets (i.e. `tlssecretname` must differ from the CR name); otherwise validation fails with
+  `InvalidTLSSecret`. If you prefer to manage the keystore yourself, re-pack cert-manager's output into the JKS
+  contract instead:
 
   ```bash
   kubectl get secret <cert-manager-secret> -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/tls.crt
@@ -290,6 +317,14 @@ spec:
   ```
 
   [Java Generate Keys Tutorial](https://docs.oracle.com/javase/tutorial/security/toolsign/step3.html)
+
+- `keystoretype` selects the keystore format of the user-provided TLS secret (`tlssecretName`). Valid values:
+  `JKS` (the default, including when unset) and `PKCS12`. With `PKCS12` the secret must carry the keystore under
+  the `tls-keystore.p12` key (shape 2 above) and the operator sets `SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE=PKCS12` with
+  `ssl.keystore.location=/var/rest-api-tls/tls-keystore.p12`; with `JKS` the current behavior is unchanged
+  (`tls-keystore.jks`, Confluent's built-in default type). The field has no effect for standard
+  `kubernetes.io/tls` (PEM) secrets, which are always converted to JKS, and no effect when `tlssecretName` is
+  empty (the operator-managed secret is always JKS).
 
   See also: Schema Registry [Configuring the REST API for HTTP or HTTPS](https://docs.confluent.io/platform/current/schema-registry/security/index.html#configuring-the-rest-api-for-http-or-https)
 
@@ -410,10 +445,12 @@ still succeeds.
 | `master.eligibility`                       | `spec.mastereligibility`                                    |
 | `schema.compatibility.level`               | `spec.compatibilitylevel`                                   |
 | `heap.opts`                                | `spec.heapopts`                                             |
-| `schema.registry.inter.instance.protocol`  | Derived from `spec.securehttp`                              |
+| `inter.instance.protocol`                  | Derived from `spec.securehttp` (`https` when enabled)       |
+| `schema.registry.inter.instance.protocol`  | Deprecated spelling, kept reserved until a release note     |
+| `ssl.client.authentication`                | `REQUIRED` when `spec.clientauth` is enabled                |
 | `kafkastore.ssl.*`                         | KafkaStore TLS keystore/truststore                          |
 | `kafkastore.sasl.*`                        | KafkaStore SASL (SCRAM) credentials                         |
-| `ssl.keystore.*`                           | REST API TLS keystore                                       |
+| `ssl.keystore.*` (incl. `ssl.keystore.type`)| REST API TLS keystore (type follows `spec.keystoretype`)    |
 | `ssl.key.password`                         | REST API TLS key password                                   |
 
 ### BASIC/RBAC authentication on the REST API
