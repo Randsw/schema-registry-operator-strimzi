@@ -35,8 +35,153 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	eventsfake "k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+// newTestKafkaCR returns a Kafka CR whose status exposes a "tls" listener so
+// getKafkaBootstrapServers resolves against the fake client.
+func newTestKafkaCR(name, namespace string) *kafka.Kafka {
+	return &kafka.Kafka{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Status: &kafka.KafkaStatus{
+			Listeners: []kafka.ListenerStatus{
+				{Name: "tls", BootstrapServers: name + "-kafka-bootstrap:9093"},
+			},
+		},
+	}
+}
+
+// TestUpdateExistingDeploymentConfigOverriddenEventSpam covers B2: the
+// ConfigKeyOverridden Warning events must be emitted only when the
+// deployment spec actually changed, not on every reconcile. A CR with
+// reserved spec.configuration keys is reconciled repeatedly against a
+// Deployment whose spec hash is current: steady-state reconciles must
+// produce zero events, while a real spec change must produce exactly one
+// event per overridden key.
+func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	recorder := eventsfake.NewFakeRecorder(64)
+	events := recorder.Events
+
+	inst := newTestInstance()
+	// PLAINTEXT avoids any JKS/user-secret requirements; only the Kafka CR
+	// with status listeners is needed.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Configuration = map[string]string{
+		// Reserved keys: both are operator-managed and must be reported
+		// as overridden (sorted order: heap.opts before schema.registry.group.id?
+		// sorted: "heap.opts" < "schema.registry.group.id").
+		"schema.registry.group.id": "custom-group",
+		"heap.opts":                "-Xmx1g",
+	}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+		},
+	}
+
+	desiredHash, err := computeSpecHash(inst)
+	if err != nil {
+		t.Fatalf("failed to compute spec hash: %v", err)
+	}
+
+	newDeployment := func(hash string) *apps.Deployment {
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+				},
+			},
+		}
+	}
+
+	newReconciler := func(dep *apps.Deployment) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), dep).
+			Build()
+		stored := &apps.Deployment{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace}, stored); err != nil {
+			t.Fatalf("failed to get the seeded deployment: %v", err)
+		}
+		return &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}, stored
+	}
+
+	drainEvents := func() []string {
+		var got []string
+		for {
+			select {
+			case e := <-events:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+
+	t.Run("zero events when the spec hash is unchanged", func(t *testing.T) {
+		r, dep := newReconciler(newDeployment(desiredHash))
+		// Several steady-state reconciles: this is exactly the spam pattern
+		// B2 removes — every reconcile rebuilds the desired spec and used to
+		// emit one Warning per reserved key.
+		for i := 0; i < 3; i++ {
+			_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if specChanged {
+				t.Fatal("expected specChanged=false for an unchanged spec hash")
+			}
+		}
+		if got := drainEvents(); len(got) != 0 {
+			t.Errorf("expected zero events for steady-state reconciles, got %d: %v", len(got), got)
+		}
+	})
+
+	t.Run("exactly one event per overridden key when the spec changed", func(t *testing.T) {
+		// The Deployment carries a stale hash, so the spec is genuinely
+		// changed and the reserved keys must be reported.
+		r, dep := newReconciler(newDeployment("stale-hash"))
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true for a stale spec hash")
+		}
+		got := drainEvents()
+		if len(got) != 2 {
+			t.Fatalf("expected exactly 2 ConfigKeyOverridden events (one per reserved key), got %d: %v", len(got), got)
+		}
+		for _, key := range []string{"heap.opts", "schema.registry.group.id"} {
+			found := false
+			for _, e := range got {
+				if strings.Contains(e, "ConfigKeyOverridden") && strings.Contains(e, key) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected a ConfigKeyOverridden event naming %q, events: %v", key, got)
+			}
+		}
+	})
+}
 
 // newTestInstance creates a minimal StrimziSchemaRegistry for testing.
 func newTestInstance() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
@@ -829,7 +974,8 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 // leaves the given CR untouched: the instance comes from the informer cache,
 // and a shallow pod-template copy would share the Containers slice backing
 // array (and resource maps) with the cached object, letting the env, resource
-// and probe mutations below corrupt it for subsequent reconciles.
+// and probe mutations below corrupt it for subsequent reconciles. The
+// user-supplied template fields (B3 merge inputs) must also stay pristine.
 func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
@@ -839,9 +985,26 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 
 	inst := newTestInstance()
 	inst.Spec.Template = corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      map[string]string{"team": "data", "app": "user-value"},
+			Annotations: map[string]string{"user": "keep"},
+		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
-				{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"},
+				{
+					Name:  "sr",
+					Image: "confluentinc/cp-schema-registry:8.4.1",
+					Env: []corev1.EnvVar{
+						{Name: "MY_CUSTOM", Value: "custom"},
+						{Name: "SCHEMA_REGISTRY_HEAP_OPTS", Value: "user-value"},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "extra", MountPath: "/opt/extra"},
+					},
+				},
+			},
+			Volumes: []corev1.Volume{
+				{Name: "extra", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 			},
 		},
 	}
@@ -855,6 +1018,331 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 
 	if !equality.Semantic.DeepEqual(*before, inst.Spec.Template) {
 		t.Errorf("buildDeploymentSpec mutated the input instance.Spec.Template:\nbefore: %+v\nafter:  %+v", *before, inst.Spec.Template)
+	}
+}
+
+// TestMergeEnvVars is a table-driven test for the B3 env merge: the
+// operator-managed env comes first and wins on name conflicts, user-only vars
+// are appended in their original order, duplicates inside the user list are
+// collapsed, and empty inputs merge without allocating surprises.
+func TestMergeEnvVars(t *testing.T) {
+	env := func(names ...string) []corev1.EnvVar {
+		out := make([]corev1.EnvVar, 0, len(names))
+		for _, n := range names {
+			out = append(out, corev1.EnvVar{Name: n, Value: "v-" + n})
+		}
+		return out
+	}
+	names := func(vars []corev1.EnvVar) []string {
+		out := make([]string, 0, len(vars))
+		for _, e := range vars {
+			out = append(out, e.Name)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name     string
+		operator []corev1.EnvVar
+		user     []corev1.EnvVar
+		want     []string
+	}{
+		{name: "no user env keeps operator list", operator: env("A", "B"), user: nil, want: []string{"A", "B"}},
+		{name: "no operator env keeps user list", operator: nil, user: env("X", "Y"), want: []string{"X", "Y"}},
+		{name: "both empty yields empty", operator: nil, user: nil, want: nil},
+		{name: "operator wins on conflict", operator: env("A", "B"), user: env("B", "X"), want: []string{"A", "B", "X"}},
+		{name: "user extras appended in order", operator: env("A"), user: env("Z", "Y", "X"), want: []string{"A", "Z", "Y", "X"}},
+		{name: "duplicates inside user list collapse", operator: env("A"), user: env("X", "X", "Y"), want: []string{"A", "X", "Y"}},
+		{name: "duplicates inside operator list collapse", operator: env("A", "A"), user: env("A", "B"), want: []string{"A", "A", "B"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeEnvVars(tt.operator, tt.user)
+			if len(tt.want) == 0 && len(got) == 0 {
+				return
+			}
+			if want, gotNames := strings.Join(tt.want, ","), strings.Join(names(got), ","); want != gotNames {
+				t.Errorf("merged env names mismatch: want [%s], got [%s]", want, gotNames)
+			}
+			// Conflict keys must carry the operator value.
+			operatorCount := map[string]int{}
+			for _, e := range tt.operator {
+				operatorCount[e.Name]++
+			}
+			seen := map[string]int{}
+			for _, e := range got {
+				seen[e.Name]++
+				if c := operatorCount[e.Name]; c > 0 && e.Value != "v-"+e.Name {
+					t.Errorf("env %q must carry the operator value, got %q", e.Name, e.Value)
+				}
+			}
+			for n, count := range seen {
+				// Operator duplicates pass through as-is; user-added names
+				// must never duplicate anything.
+				if want := operatorCount[n]; want <= 1 && count > 1 {
+					t.Errorf("duplicate env name %q in merged output (%d occurrences)", n, count)
+				}
+			}
+		})
+	}
+}
+
+// TestMergeVolumes covers the B3 volume merge: operator volumes come first
+// and win on name conflicts; user volumes are appended in order; duplicates
+// inside the user list collapse.
+func TestMergeVolumes(t *testing.T) {
+	vol := func(names ...string) []corev1.Volume {
+		out := make([]corev1.Volume, 0, len(names))
+		for _, n := range names {
+			out = append(out, corev1.Volume{Name: n, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+		}
+		return out
+	}
+	names := func(vols []corev1.Volume) []string {
+		out := make([]string, 0, len(vols))
+		for _, v := range vols {
+			out = append(out, v.Name)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name     string
+		operator []corev1.Volume
+		user     []corev1.Volume
+		want     []string
+	}{
+		{name: "no user volumes", operator: vol("tls"), user: nil, want: []string{"tls"}},
+		{name: "no operator volumes", operator: nil, user: vol("extra"), want: []string{"extra"}},
+		{name: "empty both", operator: nil, user: nil, want: nil},
+		{name: "operator wins on name conflict", operator: vol("tls"), user: vol("tls", "extra"), want: []string{"tls", "extra"}},
+		{name: "user extras appended in order", operator: vol("a"), user: vol("z", "y"), want: []string{"a", "z", "y"}},
+		{name: "duplicates in user list collapse", operator: vol("a"), user: vol("x", "x"), want: []string{"a", "x"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeVolumes(tt.operator, tt.user)
+			if len(tt.want) == 0 && len(got) == 0 {
+				return
+			}
+			if want, gotNames := strings.Join(tt.want, ","), strings.Join(names(got), ","); want != gotNames {
+				t.Errorf("merged volume names mismatch: want [%s], got [%s]", want, gotNames)
+			}
+		})
+	}
+}
+
+// TestMergeVolumeMounts covers the B3 mount merge: operator mounts win on
+// both name and mount-path conflicts; user-only mounts are appended.
+func TestMergeVolumeMounts(t *testing.T) {
+	mnt := func(name, path string) corev1.VolumeMount {
+		return corev1.VolumeMount{Name: name, MountPath: path}
+	}
+	desc := func(mounts []corev1.VolumeMount) []string {
+		out := make([]string, 0, len(mounts))
+		for _, m := range mounts {
+			out = append(out, m.Name+":"+m.MountPath)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name     string
+		operator []corev1.VolumeMount
+		user     []corev1.VolumeMount
+		want     []string
+	}{
+		{
+			name:     "no user mounts",
+			operator: []corev1.VolumeMount{mnt("rest-api-tls", "/var/rest-api-tls")},
+			user:     nil,
+			want:     []string{"rest-api-tls:/var/rest-api-tls"},
+		},
+		{
+			name:     "user mount name conflict drops user entry",
+			operator: []corev1.VolumeMount{mnt("rest-api-tls", "/var/rest-api-tls")},
+			user:     []corev1.VolumeMount{mnt("rest-api-tls", "/elsewhere"), mnt("extra", "/opt/extra")},
+			want:     []string{"rest-api-tls:/var/rest-api-tls", "extra:/opt/extra"},
+		},
+		{
+			name:     "user mount path conflict with different name drops user entry",
+			operator: []corev1.VolumeMount{mnt("rest-api-tls", "/var/rest-api-tls")},
+			user:     []corev1.VolumeMount{mnt("user-vol", "/var/rest-api-tls")},
+			want:     []string{"rest-api-tls:/var/rest-api-tls"},
+		},
+		{
+			name:     "user extras preserved in order",
+			operator: []corev1.VolumeMount{mnt("tls", "/var/schemaregistry")},
+			user:     []corev1.VolumeMount{mnt("c", "/opt/c"), mnt("a", "/opt/a")},
+			want:     []string{"tls:/var/schemaregistry", "c:/opt/c", "a:/opt/a"},
+		},
+		{
+			name:     "duplicates within user list collapse",
+			operator: nil,
+			user:     []corev1.VolumeMount{mnt("x", "/opt/x"), mnt("x2", "/opt/x")},
+			want:     []string{"x:/opt/x"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeVolumeMounts(tt.operator, tt.user)
+			if want, gotDesc := strings.Join(tt.want, ","), strings.Join(desc(got), ","); want != gotDesc {
+				t.Errorf("merged mounts mismatch: want [%s], got [%s]", want, gotDesc)
+			}
+		})
+	}
+}
+
+// TestBuildDeploymentSpecMergesUserTemplateFields is the end-to-end check for
+// B3: user-provided env vars, volumes, mounts, labels and annotations in
+// spec.template survive buildDeploymentSpec, operator-managed values win on
+// conflicts, and the output is deterministic across calls (spec-hash
+// semantics stay stable).
+func TestBuildDeploymentSpecMergesUserTemplateFields(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+
+	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels:      map[string]string{"team": "data", "app": "user-label"},
+				Annotations: map[string]string{"user.io/keep": "yes"},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "sr",
+						Image: "confluentinc/cp-schema-registry:8.4.1",
+						Env: []corev1.EnvVar{
+							// collides with an operator-managed env var
+							{Name: "SCHEMA_REGISTRY_HEAP_OPTS", Value: "user-value"},
+							{Name: "MY_CUSTOM", Value: "custom-value"},
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							// collides with the operator rest-api-tls mount name
+							{Name: "rest-api-tls", MountPath: "/wrong"},
+							{Name: "extra", MountPath: "/opt/extra"},
+						},
+					},
+				},
+				Volumes: []corev1.Volume{
+					// collides with the operator-managed volume name
+					{Name: "rest-api-tls", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					{Name: "extra", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				},
+			},
+		}
+		return inst
+	}
+
+	envValue := func(env []corev1.EnvVar, name string) (string, int) {
+		count := 0
+		value := ""
+		for _, e := range env {
+			if e.Name == name {
+				count++
+				value = e.Value
+			}
+		}
+		return value, count
+	}
+
+	dep, _, err := reconciler.buildDeploymentSpec(newInst(), "kafka:9092", "kafka-cluster", "", "", "", "test-tls-secret", kafkaAuth{}, logr.Logger{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	container := dep.Spec.Template.Spec.Containers[0]
+
+	// Operator wins on env name conflicts.
+	if v, count := envValue(container.Env, "SCHEMA_REGISTRY_HEAP_OPTS"); count != 1 || v != "-Xms512M -Xmx512M" {
+		t.Errorf("expected the operator heap opts value, got %q (count %d)", v, count)
+	}
+	// User extras preserved.
+	if v, count := envValue(container.Env, "MY_CUSTOM"); count != 1 || v != "custom-value" {
+		t.Errorf("expected user env MY_CUSTOM to survive, got %q (count %d)", v, count)
+	}
+
+	// Volumes: operator-managed rest-api-tls wins (must be secret-backed, not
+	// the user's emptyDir), user extra volume preserved.
+	var restVol, extraVol *corev1.Volume
+	for i := range dep.Spec.Template.Spec.Volumes {
+		switch dep.Spec.Template.Spec.Volumes[i].Name {
+		case "rest-api-tls":
+			restVol = &dep.Spec.Template.Spec.Volumes[i]
+		case "extra":
+			extraVol = &dep.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	if restVol == nil || restVol.Secret == nil || restVol.Secret.SecretName != "test-tls-secret" {
+		t.Errorf("expected the operator-managed secret-backed rest-api-tls volume, got %+v", restVol)
+	}
+	if extraVol == nil {
+		t.Error("expected the user-provided extra volume to survive")
+	}
+
+	// Mounts: operator rest-api-tls mount kept at its path, user's colliding
+	// mount dropped, user's extra mount preserved.
+	var restMnt, userWrong, extraMnt *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		m := &container.VolumeMounts[i]
+		switch {
+		case m.Name == "rest-api-tls" && m.MountPath == "/var/rest-api-tls":
+			restMnt = m
+		case m.MountPath == "/wrong":
+			userWrong = m
+		case m.Name == "extra":
+			extraMnt = m
+		}
+	}
+	if restMnt == nil {
+		t.Error("expected the operator rest-api-tls mount")
+	}
+	if userWrong != nil {
+		t.Error("expected the user mount conflicting on name to be dropped")
+	}
+	if extraMnt == nil {
+		t.Error("expected the user extra volume mount to survive")
+	}
+
+	// Labels: operator overrides conflicting keys, user extras preserved.
+	if got := dep.Spec.Template.Labels["app"]; got != newInst().Name {
+		t.Errorf("expected operator app label %q, got %q", newInst().Name, got)
+	}
+	if got := dep.Spec.Template.Labels["team"]; got != "data" {
+		t.Errorf("expected user label team=data, got %q", got)
+	}
+
+	// Annotations: user annotation preserved alongside operator rollout
+	// markers.
+	if got := dep.Spec.Template.Annotations["user.io/keep"]; got != "yes" {
+		t.Errorf("expected user annotation to survive, got %q", got)
+	}
+	if _, ok := dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"]; !ok {
+		t.Error("expected the operator jksVersion annotation")
+	}
+
+	// Selector must remain the operator label set (user labels excluded).
+	if dep.Spec.Selector.MatchLabels["team"] != "" {
+		t.Error("expected user labels NOT to leak into the Deployment selector")
+	}
+
+	// Determinism: a second build with an identical input produces an
+	// identical pod template, keeping spec-hash comparison semantics stable.
+	dep2, _, err := reconciler.buildDeploymentSpec(newInst(), "kafka:9092", "kafka-cluster", "", "", "", "test-tls-secret", kafkaAuth{}, logr.Logger{})
+	if err != nil {
+		t.Fatalf("unexpected error on second build: %v", err)
+	}
+	if !equality.Semantic.DeepEqual(dep.Spec.Template, dep2.Spec.Template) {
+		t.Error("buildDeploymentSpec output must be deterministic across calls")
 	}
 }
 
@@ -1619,11 +2107,17 @@ func TestMapStrimziResourceToRequests(t *testing.T) {
 	})
 }
 
-// TestHandleTLSCertExpiry covers the TLS certificate expiry-based renewal:
-// with the default threshold a freshly generated one-year certificate is not
-// renewed; with a threshold larger than the certificate validity the secret
-// is renewed in place and the deployment is rolled via the tlsVersion
-// pod-template annotation.
+// TestHandleTLSCertExpiry covers the TLS certificate expiry-based renewal and
+// the periodic recheck scheduling:
+//   - with the default threshold a freshly generated one-year certificate is
+//     not renewed but a standing requeue interval is returned, so the expiry
+//     keeps being checked even when no watch event ever fires (B1);
+//   - a certificate inside the renewal window (threshold forced larger than
+//     its validity, or an actually expired certificate) is renewed in place
+//     and the deployment is rolled via the tlsVersion pod-template
+//     annotation;
+//   - a custom user-managed TLS secret is never touched and never forces a
+//     requeue.
 func TestHandleTLSCertExpiry(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
@@ -1635,7 +2129,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		t.Fatalf("failed to generate CA: %v", err)
 	}
 	cp := certprocessor.NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "test-sr.default")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "test-sr.default")
 	if err != nil {
 		t.Fatalf("failed to generate TLS keystore: %v", err)
 	}
@@ -1677,16 +2171,72 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		},
 	}
 
-	t.Run("no renewal while the certificate is valid", func(t *testing.T) {
+	t.Run("no renewal while the certificate is valid, standing recheck scheduled", func(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, tlsSecret.DeepCopy(), jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		result, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if result.RequeueAfter != 0 {
-			t.Errorf("expected no requeue for a valid certificate, got %v", result.RequeueAfter)
+			t.Errorf("expected no immediate requeue for a valid certificate, got %v", result.RequeueAfter)
+		}
+		// B1: a valid certificate must still schedule the periodic recheck
+		// so the renewal fires on time without any watch event.
+		if recheck != tlsCertRecheckInterval {
+			t.Errorf("expected the standing recheck interval %v, got %v", tlsCertRecheckInterval, recheck)
+		}
+	})
+
+	t.Run("renewal window sooner than the standing interval shortens the recheck", func(t *testing.T) {
+		// A certificate expiring in 40 days enters the default 30-day
+		// renewal window in about 10 days, which is sooner than the
+		// (temporarily enlarged) standing interval; the returned recheck
+		// must be the shorter value so renewal is observed before the
+		// window opens.
+		originalInterval := tlsCertRecheckInterval
+		tlsCertRecheckInterval = 100 * 24 * time.Hour
+		defer func() { tlsCertRecheckInterval = originalInterval }()
+
+		cp := certprocessor.NewCertProcessor(logr.Logger{})
+		ca, err := testutil.GenerateTestCA()
+		if err != nil {
+			t.Fatalf("failed to generate CA: %v", err)
+		}
+		uc, err := testutil.GenerateTestUserCertWithValidity(ca, "shortpw123", time.Now().AddDate(0, -1, 0), time.Now().AddDate(0, 0, 40))
+		if err != nil {
+			t.Fatalf("failed to generate user cert: %v", err)
+		}
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "shortpw123")
+		if err != nil {
+			t.Fatalf("failed to build keystore: %v", err)
+		}
+		freshTLSSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"tls-keystore.jks":  keystore,
+				"keystore_password": []byte(password),
+				"key_password":      []byte(password),
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, freshTLSSecret, jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != 0 {
+			t.Errorf("expected no immediate requeue (certificate outside the renewal window), got %v", result.RequeueAfter)
+		}
+		if recheck >= tlsCertRecheckInterval {
+			t.Errorf("expected a recheck shortened below the standing interval %v, got %v", tlsCertRecheckInterval, recheck)
+		}
+		// 40 days lifetime minus the 30-day renewal threshold is about 10 days.
+		if recheck < 9*24*time.Hour || recheck > 10*24*time.Hour+time.Minute {
+			t.Errorf("expected a recheck of about 10 days, got %v", recheck)
 		}
 	})
 
@@ -1698,12 +2248,17 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, tlsSecret.DeepCopy(), jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		result, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if result.RequeueAfter == 0 {
 			t.Error("expected a requeue after renewal")
+		}
+		// The immediate requeue re-runs the check; no standing interval is
+		// needed on top of it.
+		if recheck != 0 {
+			t.Errorf("expected no standing recheck alongside the immediate requeue, got %v", recheck)
 		}
 
 		renewed := &corev1.Secret{}
@@ -1738,7 +2293,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(plaintextInst, caCertSecret, caKeySecret, tlsSecret.DeepCopy(), deployment.DeepCopy()).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		result, err := reconciler.handleTLSCertExpiry(context.Background(), plaintextInst, logr.Logger{}, cluster)
+		result, _, err := reconciler.handleTLSCertExpiry(context.Background(), plaintextInst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1767,14 +2322,144 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		result, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if result.RequeueAfter != 0 {
 			t.Errorf("expected no requeue for a custom TLS secret, got %v", result.RequeueAfter)
 		}
+		// B1: a user-managed TLS secret is never expiry-checked by the
+		// operator, so no periodic requeue may be forced.
+		if recheck != 0 {
+			t.Errorf("expected no periodic recheck for a custom TLS secret, got %v", recheck)
+		}
 	})
+
+	t.Run("already-expired certificate is renewed with the default threshold", func(t *testing.T) {
+		// B1 failure path: with the default 30-day threshold, a certificate
+		// whose NotAfter is already in the past must enter the renewal
+		// branch immediately (time.Until(notAfter) <= threshold), instead
+		// of being skipped until some watch event fires.
+		cp := certprocessor.NewCertProcessor(logr.Logger{})
+		ca, err := testutil.GenerateTestCA()
+		if err != nil {
+			t.Fatalf("failed to generate CA: %v", err)
+		}
+		uc, err := testutil.GenerateTestUserCertWithValidity(ca, "expired123", time.Now().AddDate(0, -2, 0), time.Now().AddDate(0, 0, -1))
+		if err != nil {
+			t.Fatalf("failed to generate expired user cert: %v", err)
+		}
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "expired123")
+		if err != nil {
+			t.Fatalf("failed to build keystore from expired cert: %v", err)
+		}
+		expiredTLSSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"tls-keystore.jks":  keystore,
+				"keystore_password": []byte(password),
+				"key_password":      []byte(password),
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, expiredTLSSecret, jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			t.Error("expected a requeue after renewing the expired certificate")
+		}
+		if recheck != 0 {
+			t.Errorf("expected no standing recheck alongside the immediate requeue, got %v", recheck)
+		}
+
+		renewed := &corev1.Secret{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, renewed); err != nil {
+			t.Fatalf("failed to get renewed TLS secret: %v", err)
+		}
+		if string(renewed.Data["keystore_password"]) == password {
+			t.Error("expected the renewed secret to replace the expired keystore material")
+		}
+		newNotAfter, err := cp.KeystoreCertExpiry(context.Background(), renewed.Data["tls-keystore.jks"], string(renewed.Data["keystore_password"]))
+		if err != nil {
+			t.Fatalf("failed to read the renewed keystore expiry: %v", err)
+		}
+		if !newNotAfter.After(time.Now()) {
+			t.Errorf("expected the renewed certificate to be valid, NotAfter=%v", newNotAfter)
+		}
+	})
+}
+
+// TestCertRecheckInterval is a table-driven test for the periodic recheck
+// scheduling helper (B1): the standing interval applies while the renewal
+// window is further away than the interval; the recheck shortens to the time
+// until the window opens when that is sooner; expired or in-window
+// certificates fall through to the renewal path so the helper is not used
+// there, but it must still never return a non-positive interval.
+func TestCertRecheckInterval(t *testing.T) {
+	originalThreshold := tlsCertRenewalThreshold
+	originalInterval := tlsCertRecheckInterval
+	tlsCertRenewalThreshold = 30 * 24 * time.Hour
+	// A long standing interval lets the shortening branch be exercised: the
+	// recheck is clamped to the time until the renewal window opens when
+	// that is sooner than the interval.
+	tlsCertRecheckInterval = 100 * 24 * time.Hour
+	defer func() {
+		tlsCertRenewalThreshold = originalThreshold
+		tlsCertRecheckInterval = originalInterval
+	}()
+
+	tests := []struct {
+		name      string
+		notAfter  time.Time
+		wantExact bool // interval equals the standing value exactly
+		min       time.Duration
+		max       time.Duration
+	}{
+		{
+			name:      "far-from-expiry certificate uses the standing interval",
+			notAfter:  time.Now().AddDate(0, 6, 0),
+			wantExact: true,
+		},
+		{
+			name:     "certificate entering the window in about 10 days shortens the recheck",
+			notAfter: time.Now().AddDate(0, 0, 40),
+			min:      9 * 24 * time.Hour,
+			max:      10*24*time.Hour + time.Minute,
+		},
+		{
+			name:      "already-expired certificate still yields a positive interval",
+			notAfter:  time.Now().AddDate(0, 0, -5),
+			wantExact: true,
+		},
+		{
+			name:      "inside the renewal window yields the standing interval",
+			notAfter:  time.Now().AddDate(0, 0, 10),
+			wantExact: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := certRecheckInterval(tt.notAfter)
+			if got <= 0 {
+				t.Fatalf("recheck interval must be positive, got %v", got)
+			}
+			if tt.wantExact {
+				if got != tlsCertRecheckInterval {
+					t.Errorf("expected the standing interval %v, got %v", tlsCertRecheckInterval, got)
+				}
+				return
+			}
+			if got < tt.min || got > tt.max {
+				t.Errorf("expected a recheck in [%v, %v], got %v", tt.min, tt.max, got)
+			}
+		})
+	}
 }
 
 // TestCreateMTLSSecretFieldValidation verifies the explicit presence checks

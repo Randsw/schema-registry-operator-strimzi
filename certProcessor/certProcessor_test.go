@@ -1,6 +1,7 @@
 package certprocessor
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -76,7 +77,7 @@ func TestCreate_truststore(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	truststore, password, err := cp.CreateTruststore(clusterCA.CACertPEM, "test1234")
+	truststore, password, err := cp.CreateTruststore(context.Background(), clusterCA.CACertPEM, "test1234")
 	if err != nil {
 		t.Error(err)
 	}
@@ -103,7 +104,7 @@ func TestCreateKeystore(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.CreateKeystore(ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
+	keystore, password, err := cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
 	if err != nil {
 		t.Error(err)
 	}
@@ -130,7 +131,7 @@ func TestCreateKeystorep12(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.CreateKeystore(ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, string(uc.PKCS12Data), "test1234")
+	keystore, password, err := cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, string(uc.PKCS12Data), "test1234")
 	if err != nil {
 		t.Error(err)
 	}
@@ -153,7 +154,7 @@ func TestCreateTLSKeystore(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
 	if err != nil {
 		t.Error(err)
 	}
@@ -185,7 +186,7 @@ func TestConvertPEMToJKS(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
 
 	t.Run("converts PEM cert and key into a parseable JKS", func(t *testing.T) {
-		keystore, password, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "test1234")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "test1234")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -197,7 +198,7 @@ func TestConvertPEMToJKS(t *testing.T) {
 		}
 		// keytool -list must parse the JKS with the password and expose the
 		// certificate; this proves both the format and the password.
-		notAfter, err := cp.KeystoreCertExpiry(keystore, password)
+		notAfter, err := cp.KeystoreCertExpiry(context.Background(), keystore, password)
 		if err != nil {
 			t.Fatalf("keytool failed to parse the converted JKS with the password: %v", err)
 		}
@@ -207,30 +208,30 @@ func TestConvertPEMToJKS(t *testing.T) {
 	})
 
 	t.Run("wrong password cannot open the keystore", func(t *testing.T) {
-		keystore, _, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "test1234")
+		keystore, _, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "test1234")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if _, err := cp.KeystoreCertExpiry(keystore, "wrong-password"); err == nil {
+		if _, err := cp.KeystoreCertExpiry(context.Background(), keystore, "wrong-password"); err == nil {
 			t.Error("expected keytool to fail with a wrong password, got nil")
 		}
 	})
 
 	t.Run("empty password is auto-generated", func(t *testing.T) {
-		keystore, password, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(password) != 24 {
 			t.Errorf("expected a generated 24-character password, got %d characters", len(password))
 		}
-		if _, err := cp.KeystoreCertExpiry(keystore, password); err != nil {
+		if _, err := cp.KeystoreCertExpiry(context.Background(), keystore, password); err != nil {
 			t.Fatalf("keytool failed to parse the converted JKS with the generated password: %v", err)
 		}
 	})
 
 	t.Run("invalid PEM certificate fails", func(t *testing.T) {
-		if _, _, err := cp.ConvertPEMToJKS("not a valid PEM certificate", uc.UserKeyPEM, "test1234"); err == nil {
+		if _, _, err := cp.ConvertPEMToJKS(context.Background(), "not a valid PEM certificate", uc.UserKeyPEM, "test1234"); err == nil {
 			t.Error("expected error when converting invalid PEM data, got nil")
 		}
 	})
@@ -242,7 +243,7 @@ func TestConvertPEMToJKS(t *testing.T) {
 // when provided with invalid PEM certificate data.
 func TestCreateTruststore_InvalidPEM(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
-	_, _, err := cp.CreateTruststore("not a valid PEM certificate data", "test1234")
+	_, _, err := cp.CreateTruststore(context.Background(), "not a valid PEM certificate data", "test1234")
 	if err == nil {
 		t.Error("expected error when creating truststore with invalid PEM data, got nil")
 	}
@@ -262,7 +263,7 @@ func TestCreateKeystore_EmptyPassword(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.CreateKeystore(ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "")
+	keystore, password, err := cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error when password is empty (should auto-generate): %v", err)
 	}
@@ -285,12 +286,12 @@ func TestKeystoreCertExpiry(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
 	if err != nil {
 		t.Fatalf("failed to generate TLS keystore: %v", err)
 	}
 
-	notAfter, err := cp.KeystoreCertExpiry(keystore, password)
+	notAfter, err := cp.KeystoreCertExpiry(context.Background(), keystore, password)
 	if err != nil {
 		t.Fatalf("unexpected error reading keystore cert expiry: %v", err)
 	}
@@ -309,7 +310,7 @@ func TestKeystoreCertExpiry(t *testing.T) {
 // error for an empty keystore.
 func TestKeystoreCertExpiry_Empty(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
-	if _, err := cp.KeystoreCertExpiry(nil, "test1234"); err == nil {
+	if _, err := cp.KeystoreCertExpiry(context.Background(), nil, "test1234"); err == nil {
 		t.Error("expected error for empty keystore, got nil")
 	}
 }
@@ -336,7 +337,7 @@ func TestConcurrentCertGeneration(t *testing.T) {
 		go func() {
 			cp := NewCertProcessor(logr.Logger{})
 
-			truststore, _, err := cp.CreateTruststore(ca.CACertPEM, "test1234")
+			truststore, _, err := cp.CreateTruststore(context.Background(), ca.CACertPEM, "test1234")
 			if err != nil {
 				errCh <- fmt.Errorf("CreateTruststore: %w", err)
 				return
@@ -346,7 +347,7 @@ func TestConcurrentCertGeneration(t *testing.T) {
 				return
 			}
 
-			keystore, _, err := cp.CreateKeystore(ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
+			keystore, _, err := cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
 			if err != nil {
 				errCh <- fmt.Errorf("CreateKeystore: %w", err)
 				return
@@ -356,7 +357,7 @@ func TestConcurrentCertGeneration(t *testing.T) {
 				return
 			}
 
-			tlsKeystore, _, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+			tlsKeystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
 			if err != nil {
 				errCh <- fmt.Errorf("GenerateTLSforHTTP: %w", err)
 				return
@@ -389,7 +390,7 @@ func TestGenerateTLSforHTTP_EmptyCN(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, _, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "")
+	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "")
 	if err == nil {
 		// If no error returned, verify the keystore is empty (indicating failure)
 		if len(keystore) == 0 {

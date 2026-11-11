@@ -364,6 +364,23 @@ spec:
 
 - `template` is a standart Kubernetes template for pod. you can configure it as you want according to the [pod specification](https://dev-k8sref-io.web.app/docs/workloads/podtemplate-v1/)
 
+  The operator **merges** your template with its own managed values instead of
+  overwriting them. Custom container `env` vars, `volumeMounts`, pod `volumes`,
+  pod `labels` and pod `annotations` are preserved; the operator-managed values
+  always win on identity conflicts:
+
+  | Field            | Conflict key                     | Winner                                   |
+  |------------------|----------------------------------|------------------------------------------|
+  | `env`            | variable name                    | operator                                 |
+  | `volumes`        | volume name                      | operator                                 |
+  | `volumeMounts`   | mount name or mount path         | operator                                 |
+  | pod `labels`     | label key                        | operator                                 |
+  | pod `annotations`| annotation key                   | operator rollout markers                 |
+
+  User-only entries are appended after the operator's in a deterministic order.
+  The `Deployment` selector continues to match only the operator's labels, so
+  user labels never affect pod selection.
+
 - `service.type` is the Kubernetes Service type. Valid values: `ClusterIP` (default), `NodePort`, `LoadBalancer`.
 - `service.port` overrides the Service port. Defaults to `80` for plain HTTP and `443` for TLS REST endpoints.
 - `service.nodeport` pins the node port when `service.type` is `NodePort` or `LoadBalancer`. When unset,
@@ -414,6 +431,21 @@ Upgrading the operator may trigger a one-time rollout of existing Schema Registr
 spec is unchanged: the spec hash recorded in the `strimziregistryoperator.randsw.code/specHash` annotation
 was upgraded from a 32-bit to a 64-bit FNV digest, rewriting every stored value once.
 
+### Behavior changes
+
+- Operator-managed REST API TLS certificates (`securehttp: true` without
+  `tlssecretname`) are now re-checked periodically (every 12 hours, sooner when
+  the renewal window opens sooner) even when no Kubernetes event fires, so they
+  renew reliably instead of expiring silently.
+- `ConfigKeyOverridden` Warning events for reserved `spec.configuration` keys
+  are emitted only when the Deployment spec changes, not on every reconcile.
+- Custom `env`, `volumeMounts`, `volumes`, pod labels and annotations supplied
+  in `spec.template` are merged into the Deployment instead of being discarded
+  (see the `template` bullet above).
+- Stale JKS secrets are updated in place during rotation; they are no longer
+  deleted and recreated, closing the window in which restarting pods could not
+  mount them.
+
 ### Single replica support
 
 Only a **single replica** is supported. Running multiple replicas with `securehttp: true` is not supported
@@ -455,9 +487,10 @@ Examples:
 | `kafkastore.timeout.ms`       | `SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS`            |
 
 The following keys are operator-managed and are **ignored** when supplied through
-`spec.configuration` (their managed value wins). Each overridden key is logged
-and surfaced as a `Warning` event (`ConfigKeyOverridden`) on the CR; reconciliation
-still succeeds.
+`spec.configuration` (their managed value wins). Each overridden key is logged,
+and surfaced as a `Warning` event (`ConfigKeyOverridden`) on the CR when the key
+is first applied and again whenever the Deployment spec changes — steady-state
+reconciles do not repeat the events; reconciliation still succeeds.
 
 | Reserved key                               | Operator-managed setting                                    |
 |--------------------------------------------|-------------------------------------------------------------|

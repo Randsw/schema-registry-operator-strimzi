@@ -115,9 +115,13 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	var jksResourceVersion string
 	if secret != nil {
 		if created {
-			err = r.Create(ctx, secret)
+			// A rebuilt secret may carry the ResourceVersion of a stale
+			// existing secret (the Deployment was deleted but the Secret
+			// kept): persistJKSSecret updates it in place instead of
+			// creating a duplicate (B4).
+			err = r.persistJKSSecret(ctx, secret)
 			if err != nil {
-				logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+jksSecretSuffix)
+				logger.Error(err, "Failed to create/update secret", "Secret.Name", instance.Name+jksSecretSuffix)
 				return nil, err
 			}
 			jksResourceVersion = secret.ResourceVersion
@@ -267,12 +271,22 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	if _, ok := resources.Limits[v1.ResourceMemory]; !ok {
 		resources.Limits[v1.ResourceMemory] = mustParseQuantity("1Gi")
 	}
-	podSpec.Spec.Containers[0].Env = podEnv
-	podSpec.Spec.Containers[0].VolumeMounts = containerVolumeMount
-	podSpec.Spec.Volumes = podVolume
+	// Merge the operator-managed values with whatever the user supplied in
+	// spec.template so custom env vars, volumes, mounts, labels and
+	// annotations survive reconciliation instead of being discarded. The
+	// operator always wins on identity conflicts (env name, volume name,
+	// mount path, label/annotation key); user extras are appended/preserved.
+	podSpec.Spec.Containers[0].Env = mergeEnvVars(podEnv, podSpec.Spec.Containers[0].Env)
+	podSpec.Spec.Containers[0].VolumeMounts = mergeVolumeMounts(containerVolumeMount, podSpec.Spec.Containers[0].VolumeMounts)
+	podSpec.Spec.Volumes = mergeVolumes(podVolume, podSpec.Spec.Volumes)
 	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
-	podSpec.Labels = ls
-	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": jksResourceVersion}
+	// Operator labels override user labels on conflicting keys; the
+	// Deployment selector keeps using ls only, so user labels never narrow
+	// or break the selector.
+	podSpec.Labels = mergeStringMaps(podSpec.Labels, ls)
+	// Start from the user annotations so they are preserved, then set the
+	// operator-managed rollout markers (which override conflicting keys).
+	podSpec.Annotations = mergeStringMaps(podSpec.Annotations, map[string]string{keyPrefix + "/jksVersion": jksResourceVersion})
 	// Track the KafkaUser secret version for SASL modes so credential changes
 	// trigger a rollout without rebuilding any JKS material.
 	if auth.NeedsSASL {
@@ -840,8 +854,12 @@ func (r *StrimziSchemaRegistryReconciler) getSASLUserSecretVersion(
 }
 
 // existingJKSSecret fetches the current -jks secret and reports whether it is
-// up-to-date according to isUpToDate. When it exists but is stale it is deleted
-// so the caller can recreate it.
+// up-to-date according to isUpToDate. When it exists but is stale it is
+// returned as-is (NOT deleted) so the caller can rebuild the material and
+// update the secret in place, carrying the existing ResourceVersion (B4).
+// Delete-then-recreate left a window in which a pod restarting in between
+// failed to mount the secret — the same failure mode already fixed for the
+// REST TLS secret path in createTLSSecret.
 func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, isUpToDate func(annotations map[string]string) bool) (*v1.Secret, bool, error) {
 	jks_secret := &v1.Secret{}
@@ -853,17 +871,26 @@ func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimzireg
 			// updateDeployment without needing to re-fetch.
 			return jks_secret, true, nil
 		}
-		logger.V(1).Info("About to delete JKS secret")
-		if err := r.Delete(ctx, jks_secret); err != nil {
-			return nil, false, err
-		}
-		return nil, false, nil
+		logger.V(1).Info("JKS secret is stale; caller will update it in place")
+		// Return the stale secret so the caller can carry its
+		// ResourceVersion into the rebuilt one for an in-place Update.
+		return jks_secret, false, nil
 	}
 	if !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to get schema registry secret")
 		return nil, false, err
 	}
 	return nil, false, nil
+}
+
+// persistJKSSecret stores a (re)built JKS secret: secrets carrying a
+// ResourceVersion (a stale existing secret) are updated in place so they are
+// never absent for pods mounting them; new secrets are created.
+func (r *StrimziSchemaRegistryReconciler) persistJKSSecret(ctx context.Context, secret *v1.Secret) error {
+	if secret.ResourceVersion != "" {
+		return r.Update(ctx, secret)
+	}
+	return r.Create(ctx, secret)
 }
 
 // createMTLSSecret creates or returns an up-to-date JKS secret containing both
@@ -912,7 +939,7 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 		}
 	}
 
-	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
+	existing, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
 		return annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
 			annotations[userVersionKey] == userSecret.ResourceVersion
 	})
@@ -920,21 +947,21 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 		return nil, false, err
 	}
 	if upToDate {
-		return jks_secret, false, nil
+		return existing, false, nil
 	}
 
 	jks_secret_name := instance.Name + jksSecretSuffix
-	logger.Info("Creating new keystore and truststore", "Secret Name", jks_secret_name)
+	logger.Info("Rebuilding keystore and truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
-	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
+	truststore, truststore_password, err := cp.CreateTruststore(ctx, clusterCACert, "")
 	if err != nil {
 		return nil, false, err
 	}
-	keystore, keystore_password, err := cp.CreateKeystore(clientCACert, clientCert, clientKey, clientp12, userPassword)
+	keystore, keystore_password, err := cp.CreateKeystore(ctx, clientCACert, clientCert, clientKey, clientp12, userPassword)
 	if err != nil {
 		return nil, false, err
 	}
-	jks_secret = &v1.Secret{
+	jks_secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jks_secret_name,
 			Namespace: instance.Namespace,
@@ -960,6 +987,11 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
 		return nil, false, err
 	}
+	if existing != nil {
+		// Carry the ResourceVersion so the caller Updates in place instead
+		// of deleting and recreating the secret (B4).
+		jks_secret.ResourceVersion = existing.ResourceVersion
+	}
 	return jks_secret, true, nil
 }
 
@@ -976,24 +1008,24 @@ func (r *StrimziSchemaRegistryReconciler) createTruststoreSecret(instance *strim
 	}
 	clusterCACert := string(clusterSecret.Data["ca.crt"])
 
-	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
+	existing, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
 		return annotations[CAVersionKey] == clusterSecret.ResourceVersion
 	})
 	if err != nil {
 		return nil, false, err
 	}
 	if upToDate {
-		return jks_secret, false, nil
+		return existing, false, nil
 	}
 
 	jks_secret_name := instance.Name + jksSecretSuffix
-	logger.Info("Creating new truststore", "Secret Name", jks_secret_name)
+	logger.Info("Rebuilding truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
-	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
+	truststore, truststore_password, err := cp.CreateTruststore(ctx, clusterCACert, "")
 	if err != nil {
 		return nil, false, err
 	}
-	jks_secret = &v1.Secret{
+	jks_secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jks_secret_name,
 			Namespace: instance.Namespace,
@@ -1016,13 +1048,20 @@ func (r *StrimziSchemaRegistryReconciler) createTruststoreSecret(instance *strim
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
 		return nil, false, err
 	}
+	if existing != nil {
+		// Carry the ResourceVersion so the caller Updates in place instead
+		// of deleting and recreating the secret (B4).
+		jks_secret.ResourceVersion = existing.ResourceVersion
+	}
 	return jks_secret, true, nil
 }
 
 // ensureClientAuthTruststoreSecret ensures an operator-managed cluster-CA
 // truststore secret exists for REST API mutual TLS. It is used when the Kafka
 // auth mode does not already produce a truststore secret (PLAINTEXT and
-// SASL_PLAINTEXT). It returns the secret and whether it was newly created.
+// SASL_PLAINTEXT). It returns the secret and whether it was (re)built (as
+// opposed to already up-to-date). A rebuilt secret is persisted in place when
+// a stale secret existed (B4).
 func (r *StrimziSchemaRegistryReconciler) ensureClientAuthTruststoreSecret(
 	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context,
@@ -1036,8 +1075,8 @@ func (r *StrimziSchemaRegistryReconciler) ensureClientAuthTruststoreSecret(
 	if !created {
 		return secret, false, nil
 	}
-	if err := r.Create(ctx, secret); err != nil {
-		logger.Error(err, "Failed to create client-auth truststore secret")
+	if err := r.persistJKSSecret(ctx, secret); err != nil {
+		logger.Error(err, "Failed to create/update client-auth truststore secret")
 		return nil, false, err
 	}
 	return secret, true, nil
@@ -1139,6 +1178,81 @@ func mergeStringMaps(base, override map[string]string) map[string]string {
 	}
 	for k, v := range override {
 		merged[k] = v
+	}
+	return merged
+}
+
+// mergeEnvVars combines the operator-managed environment with the user's
+// template environment (B3). The operator values come first and win on name
+// conflicts; user-only variables are appended in their original order, so the
+// result is deterministic and contains no duplicate names. Nil slices merge
+// into nil, keeping a template without env vars unchanged.
+func mergeEnvVars(operator, user []v1.EnvVar) []v1.EnvVar {
+	if len(user) == 0 {
+		return operator
+	}
+	taken := make(map[string]struct{}, len(operator))
+	for _, e := range operator {
+		taken[e.Name] = struct{}{}
+	}
+	merged := append([]v1.EnvVar{}, operator...)
+	for _, e := range user {
+		if _, exists := taken[e.Name]; exists {
+			continue
+		}
+		taken[e.Name] = struct{}{}
+		merged = append(merged, e)
+	}
+	return merged
+}
+
+// mergeVolumes combines the operator-managed volumes with the user's template
+// volumes (B3). Operator volumes win on name conflicts and come first; user
+// volumes are appended in their original order so the output is deterministic.
+func mergeVolumes(operator, user []v1.Volume) []v1.Volume {
+	if len(user) == 0 {
+		return operator
+	}
+	taken := make(map[string]struct{}, len(operator))
+	for _, vol := range operator {
+		taken[vol.Name] = struct{}{}
+	}
+	merged := append([]v1.Volume{}, operator...)
+	for _, vol := range user {
+		if _, exists := taken[vol.Name]; exists {
+			continue
+		}
+		taken[vol.Name] = struct{}{}
+		merged = append(merged, vol)
+	}
+	return merged
+}
+
+// mergeVolumeMounts combines the operator-managed container mounts with the
+// user's template mounts (B3). Operator mounts win: on a conflicting volume
+// name or mount path the operator entry is kept and the user entry dropped.
+// User-only mounts are appended in their original order.
+func mergeVolumeMounts(operator, user []v1.VolumeMount) []v1.VolumeMount {
+	if len(user) == 0 {
+		return operator
+	}
+	takenNames := make(map[string]struct{}, len(operator))
+	takenPaths := make(map[string]struct{}, len(operator))
+	for _, m := range operator {
+		takenNames[m.Name] = struct{}{}
+		takenPaths[m.MountPath] = struct{}{}
+	}
+	merged := append([]v1.VolumeMount{}, operator...)
+	for _, m := range user {
+		if _, exists := takenNames[m.Name]; exists {
+			continue
+		}
+		if _, exists := takenPaths[m.MountPath]; exists {
+			continue
+		}
+		takenNames[m.Name] = struct{}{}
+		takenPaths[m.MountPath] = struct{}{}
+		merged = append(merged, m)
 	}
 	return merged
 }
@@ -1368,7 +1482,7 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 	}
 	logger.Info("Creating keystore for TLS secret", "Secret Name", jksTLSSecretName)
 	cp := certprocessor.NewCertProcessor(logger)
-	TLSKeystore, TLSKeystorePassword, err := cp.GenerateTLSforHTTP(clusterCert, clusterKey, "",
+	TLSKeystore, TLSKeystorePassword, err := cp.GenerateTLSforHTTP(ctx, clusterCert, clusterKey, "",
 		instance.Name+"."+instance.Namespace)
 	if err != nil {
 		return nil, false, err
@@ -1649,7 +1763,6 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	if err != nil {
 		return nil, false, err
 	}
-	r.emitConfigOverriddenEvents(instance, configOverridden)
 
 	// Compute desired spec hash
 	desiredHash, err := computeSpecHash(instance)
@@ -1666,11 +1779,20 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 
 	// If hash matches, no spec change detected
 	if existingHash == desiredHash {
+		// Steady state: do NOT emit ConfigKeyOverridden events here. The
+		// desired spec is rebuilt on every reconcile, so emitting on each
+		// pass would spam a Warning event per reserved configuration key
+		// per reconcile. The user was warned when the key was first
+		// applied (createDeployment and spec-change paths below).
 		return found, false, nil
 	}
 
 	logger.Info("Spec hash changed, updating deployment",
 		"oldHash", existingHash, "newHash", desiredHash)
+
+	// The spec actually changed: warn about operator-managed keys that were
+	// ignored while building the desired spec (B2).
+	r.emitConfigOverriddenEvents(instance, configOverridden)
 
 	// Update the deployment spec to match desired state
 	found.Spec = desired.Spec

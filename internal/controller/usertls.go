@@ -117,14 +117,17 @@ func validateUserTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSche
 // buildDerivedJKSSecret converts the PEM user TLS secret into the JKS
 // keystore contract and returns the desired derived secret. The user
 // secret's resourceVersion is recorded in an annotation so the conversion is
-// regenerated only when the user secret changes.
+// regenerated only when the user secret changes. ctx bounds the openssl and
+// keytool child processes in the conversion (B5).
 func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
+	ctx context.Context,
 	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	userSecret *v1.Secret,
 	logger logr.Logger,
 ) (*v1.Secret, error) {
 	cp := certprocessor.NewCertProcessor(logger)
 	keystore, keystorePassword, err := cp.ConvertPEMToJKS(
+		ctx,
 		string(userSecret.Data["tls.crt"]),
 		string(userSecret.Data["tls.key"]),
 		"",
@@ -177,7 +180,7 @@ func (r *StrimziSchemaRegistryReconciler) ensureDerivedJKSSecret(
 			logger.V(1).Info("Derived JKS secret is up-to-date", "Secret.Name", name)
 			return nil
 		}
-		desired, err := r.buildDerivedJKSSecret(instance, userSecret, logger)
+		desired, err := r.buildDerivedJKSSecret(ctx, instance, userSecret, logger)
 		if err != nil {
 			return err
 		}
@@ -195,7 +198,7 @@ func (r *StrimziSchemaRegistryReconciler) ensureDerivedJKSSecret(
 		logger.Error(err, "Failed to get derived JKS secret", "Secret.Name", name)
 		return err
 	}
-	desired, err := r.buildDerivedJKSSecret(instance, userSecret, logger)
+	desired, err := r.buildDerivedJKSSecret(ctx, instance, userSecret, logger)
 	if err != nil {
 		return err
 	}
