@@ -40,6 +40,17 @@ One of the instruments that integrates Confluent Schema Registry with a Strimzi 
 - Changes to the Strimzi `Kafka` CR (e.g. listener or bootstrap address changes) and to the `KafkaUser` CR (e.g. authentication type changes) are watched and trigger reconciliation automatically.
 - You can add TLS support to the Schema Registry REST API endpoint by providing your own certificate or letting the operator create one for you, signed by the Kafka Cluster CA certificate. Operator-generated REST API certificates are renewed automatically before they expire (see [`tlssecretName`](#tlsecretname)).
 
+### Supported versions
+
+The operator deploys the Confluent Schema Registry image you specify in `spec.template` of the `StrimziSchemaRegistry` CR — it does not pin or override the image itself.
+
+| Tested Schema Registry image (`confluentinc/cp-schema-registry`) | Notes |
+|---|---|
+| 7.6.x | Legacy Confluent Platform 7.x line |
+| 8.4.x | Current recommended line (samples and tests use `8.4.1`) |
+
+> **Caveat for CP 8.x:** Schema Registry 8.x requires Kafka broker protocol compatibility (Kafka 3.x+). Recent Strimzi versions are fine; if your Strimzi Kafka cluster runs an older broker, upgrade it (or stay on a 7.6.x Schema Registry image) before moving the Schema Registry to 8.x.
+
 ## 3. Deploy operator
 
 ***
@@ -156,7 +167,7 @@ spec:
     spec:
       containers:
         - name: confluent-sr
-          image: confluentinc/cp-schema-registry:7.6.5
+          image: confluentinc/cp-schema-registry:8.4.1
           imagePullPolicy: IfNotPresent
       restartPolicy: Always
 ```
@@ -191,7 +202,7 @@ spec:
     spec:
       containers:
         - name: confluent-sr
-          image: confluentinc/cp-schema-registry:7.6.5
+          image: confluentinc/cp-schema-registry:8.4.1
           imagePullPolicy: IfNotPresent
       restartPolicy: Always
 ```
@@ -487,7 +498,7 @@ spec:
     spec:
       containers:
         - name: confluent-sr
-          image: confluentinc/cp-schema-registry:7.6.5
+          image: confluentinc/cp-schema-registry:8.4.1
           env:
             - name: SCHEMA_REGISTRY_AUTHENTICATION_JAAS_CONFIG
               value: /etc/schema-registry/auth/jaas.conf
