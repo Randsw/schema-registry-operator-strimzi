@@ -1,3 +1,32 @@
+## [1.16.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.16.1...1.16.2) (2026-11-11)
+
+
+### 📔 Docs
+
+* **readme:** document Phase 2 behavior changes ([693d004](https://github.com/Randsw/schema-registry-operator-strimzi/commit/693d0048c27c603b52700207ec2fc8d2e3c47bb2))
+* **readme:** update image references and add supported versions section ([7ac4868](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7ac4868b7848a87dc010d3654e479a5b610a2cb7))
+
+
+### 🧪 Tests
+
+* **certprocessor:** cover context cancellation, exec timeout and stderr logging ([ce9eb39](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ce9eb399e220e5311067941f0283619f0642f8fa))
+
+
+### 🛠 Fixes
+
+* **certprocessor:** bind keytool/openssl exec to a context with a timeout ([72fd3e4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/72fd3e4c447614d333563baaa21021beb2701e7e))
+* **controller:** emit ConfigKeyOverridden events only on spec change ([181c774](https://github.com/Randsw/schema-registry-operator-strimzi/commit/181c77460d52cca5f637ca036673a75634bfd28f))
+* **controller:** merge user pod-template fields instead of discarding them ([ff240c1](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ff240c12304eb05baf723ec6488bedd684842fcf))
+* **controller:** schedule periodic requeue for operator-managed TLS cert expiry ([defe247](https://github.com/Randsw/schema-registry-operator-strimzi/commit/defe2474b4b13799a3d283084fc3b1a537317cbd))
+* **controller:** update the stale JKS secret in place instead of deleting it ([30b3687](https://github.com/Randsw/schema-registry-operator-strimzi/commit/30b368725378d8c10e0226e90e9824f5b7371f8e))
+
+
+### Other
+
+* **cleanup:** remove stray test-crd.yaml and dummy release comments ([7c992de](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7c992de75448b51bb11435a948f7967299e91880))
+* **e2e:** use cp-schema-registry 8.4.1 image in e2e scenarios ([d2fe140](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d2fe1406718f933e2bb3857590b2ed6df06ec264))
+* **registry:** bump cp-schema-registry image to 8.4.1 in samples and tests ([fa3964e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fa3964ef4e7a64309bf975fc7c46bac1b8ae822a))
+
 ## [1.16.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.16.0...1.16.1) (2026-11-09)
 
 
