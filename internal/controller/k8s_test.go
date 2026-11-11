@@ -974,7 +974,8 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 // leaves the given CR untouched: the instance comes from the informer cache,
 // and a shallow pod-template copy would share the Containers slice backing
 // array (and resource maps) with the cached object, letting the env, resource
-// and probe mutations below corrupt it for subsequent reconciles.
+// and probe mutations below corrupt it for subsequent reconciles. The
+// user-supplied template fields (B3 merge inputs) must also stay pristine.
 func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
@@ -984,9 +985,26 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 
 	inst := newTestInstance()
 	inst.Spec.Template = corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      map[string]string{"team": "data", "app": "user-value"},
+			Annotations: map[string]string{"user": "keep"},
+		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
-				{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"},
+				{
+					Name:  "sr",
+					Image: "confluentinc/cp-schema-registry:8.4.1",
+					Env: []corev1.EnvVar{
+						{Name: "MY_CUSTOM", Value: "custom"},
+						{Name: "SCHEMA_REGISTRY_HEAP_OPTS", Value: "user-value"},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "extra", MountPath: "/opt/extra"},
+					},
+				},
+			},
+			Volumes: []corev1.Volume{
+				{Name: "extra", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 			},
 		},
 	}
@@ -1000,6 +1018,331 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 
 	if !equality.Semantic.DeepEqual(*before, inst.Spec.Template) {
 		t.Errorf("buildDeploymentSpec mutated the input instance.Spec.Template:\nbefore: %+v\nafter:  %+v", *before, inst.Spec.Template)
+	}
+}
+
+// TestMergeEnvVars is a table-driven test for the B3 env merge: the
+// operator-managed env comes first and wins on name conflicts, user-only vars
+// are appended in their original order, duplicates inside the user list are
+// collapsed, and empty inputs merge without allocating surprises.
+func TestMergeEnvVars(t *testing.T) {
+	env := func(names ...string) []corev1.EnvVar {
+		out := make([]corev1.EnvVar, 0, len(names))
+		for _, n := range names {
+			out = append(out, corev1.EnvVar{Name: n, Value: "v-" + n})
+		}
+		return out
+	}
+	names := func(vars []corev1.EnvVar) []string {
+		out := make([]string, 0, len(vars))
+		for _, e := range vars {
+			out = append(out, e.Name)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name     string
+		operator []corev1.EnvVar
+		user     []corev1.EnvVar
+		want     []string
+	}{
+		{name: "no user env keeps operator list", operator: env("A", "B"), user: nil, want: []string{"A", "B"}},
+		{name: "no operator env keeps user list", operator: nil, user: env("X", "Y"), want: []string{"X", "Y"}},
+		{name: "both empty yields empty", operator: nil, user: nil, want: nil},
+		{name: "operator wins on conflict", operator: env("A", "B"), user: env("B", "X"), want: []string{"A", "B", "X"}},
+		{name: "user extras appended in order", operator: env("A"), user: env("Z", "Y", "X"), want: []string{"A", "Z", "Y", "X"}},
+		{name: "duplicates inside user list collapse", operator: env("A"), user: env("X", "X", "Y"), want: []string{"A", "X", "Y"}},
+		{name: "duplicates inside operator list collapse", operator: env("A", "A"), user: env("A", "B"), want: []string{"A", "A", "B"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeEnvVars(tt.operator, tt.user)
+			if len(tt.want) == 0 && len(got) == 0 {
+				return
+			}
+			if want, gotNames := strings.Join(tt.want, ","), strings.Join(names(got), ","); want != gotNames {
+				t.Errorf("merged env names mismatch: want [%s], got [%s]", want, gotNames)
+			}
+			// Conflict keys must carry the operator value.
+			operatorCount := map[string]int{}
+			for _, e := range tt.operator {
+				operatorCount[e.Name]++
+			}
+			seen := map[string]int{}
+			for _, e := range got {
+				seen[e.Name]++
+				if c := operatorCount[e.Name]; c > 0 && e.Value != "v-"+e.Name {
+					t.Errorf("env %q must carry the operator value, got %q", e.Name, e.Value)
+				}
+			}
+			for n, count := range seen {
+				// Operator duplicates pass through as-is; user-added names
+				// must never duplicate anything.
+				if want := operatorCount[n]; want <= 1 && count > 1 {
+					t.Errorf("duplicate env name %q in merged output (%d occurrences)", n, count)
+				}
+			}
+		})
+	}
+}
+
+// TestMergeVolumes covers the B3 volume merge: operator volumes come first
+// and win on name conflicts; user volumes are appended in order; duplicates
+// inside the user list collapse.
+func TestMergeVolumes(t *testing.T) {
+	vol := func(names ...string) []corev1.Volume {
+		out := make([]corev1.Volume, 0, len(names))
+		for _, n := range names {
+			out = append(out, corev1.Volume{Name: n, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+		}
+		return out
+	}
+	names := func(vols []corev1.Volume) []string {
+		out := make([]string, 0, len(vols))
+		for _, v := range vols {
+			out = append(out, v.Name)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name     string
+		operator []corev1.Volume
+		user     []corev1.Volume
+		want     []string
+	}{
+		{name: "no user volumes", operator: vol("tls"), user: nil, want: []string{"tls"}},
+		{name: "no operator volumes", operator: nil, user: vol("extra"), want: []string{"extra"}},
+		{name: "empty both", operator: nil, user: nil, want: nil},
+		{name: "operator wins on name conflict", operator: vol("tls"), user: vol("tls", "extra"), want: []string{"tls", "extra"}},
+		{name: "user extras appended in order", operator: vol("a"), user: vol("z", "y"), want: []string{"a", "z", "y"}},
+		{name: "duplicates in user list collapse", operator: vol("a"), user: vol("x", "x"), want: []string{"a", "x"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeVolumes(tt.operator, tt.user)
+			if len(tt.want) == 0 && len(got) == 0 {
+				return
+			}
+			if want, gotNames := strings.Join(tt.want, ","), strings.Join(names(got), ","); want != gotNames {
+				t.Errorf("merged volume names mismatch: want [%s], got [%s]", want, gotNames)
+			}
+		})
+	}
+}
+
+// TestMergeVolumeMounts covers the B3 mount merge: operator mounts win on
+// both name and mount-path conflicts; user-only mounts are appended.
+func TestMergeVolumeMounts(t *testing.T) {
+	mnt := func(name, path string) corev1.VolumeMount {
+		return corev1.VolumeMount{Name: name, MountPath: path}
+	}
+	desc := func(mounts []corev1.VolumeMount) []string {
+		out := make([]string, 0, len(mounts))
+		for _, m := range mounts {
+			out = append(out, m.Name+":"+m.MountPath)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name     string
+		operator []corev1.VolumeMount
+		user     []corev1.VolumeMount
+		want     []string
+	}{
+		{
+			name:     "no user mounts",
+			operator: []corev1.VolumeMount{mnt("rest-api-tls", "/var/rest-api-tls")},
+			user:     nil,
+			want:     []string{"rest-api-tls:/var/rest-api-tls"},
+		},
+		{
+			name:     "user mount name conflict drops user entry",
+			operator: []corev1.VolumeMount{mnt("rest-api-tls", "/var/rest-api-tls")},
+			user:     []corev1.VolumeMount{mnt("rest-api-tls", "/elsewhere"), mnt("extra", "/opt/extra")},
+			want:     []string{"rest-api-tls:/var/rest-api-tls", "extra:/opt/extra"},
+		},
+		{
+			name:     "user mount path conflict with different name drops user entry",
+			operator: []corev1.VolumeMount{mnt("rest-api-tls", "/var/rest-api-tls")},
+			user:     []corev1.VolumeMount{mnt("user-vol", "/var/rest-api-tls")},
+			want:     []string{"rest-api-tls:/var/rest-api-tls"},
+		},
+		{
+			name:     "user extras preserved in order",
+			operator: []corev1.VolumeMount{mnt("tls", "/var/schemaregistry")},
+			user:     []corev1.VolumeMount{mnt("c", "/opt/c"), mnt("a", "/opt/a")},
+			want:     []string{"tls:/var/schemaregistry", "c:/opt/c", "a:/opt/a"},
+		},
+		{
+			name:     "duplicates within user list collapse",
+			operator: nil,
+			user:     []corev1.VolumeMount{mnt("x", "/opt/x"), mnt("x2", "/opt/x")},
+			want:     []string{"x:/opt/x"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeVolumeMounts(tt.operator, tt.user)
+			if want, gotDesc := strings.Join(tt.want, ","), strings.Join(desc(got), ","); want != gotDesc {
+				t.Errorf("merged mounts mismatch: want [%s], got [%s]", want, gotDesc)
+			}
+		})
+	}
+}
+
+// TestBuildDeploymentSpecMergesUserTemplateFields is the end-to-end check for
+// B3: user-provided env vars, volumes, mounts, labels and annotations in
+// spec.template survive buildDeploymentSpec, operator-managed values win on
+// conflicts, and the output is deterministic across calls (spec-hash
+// semantics stay stable).
+func TestBuildDeploymentSpecMergesUserTemplateFields(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+
+	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels:      map[string]string{"team": "data", "app": "user-label"},
+				Annotations: map[string]string{"user.io/keep": "yes"},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "sr",
+						Image: "confluentinc/cp-schema-registry:8.4.1",
+						Env: []corev1.EnvVar{
+							// collides with an operator-managed env var
+							{Name: "SCHEMA_REGISTRY_HEAP_OPTS", Value: "user-value"},
+							{Name: "MY_CUSTOM", Value: "custom-value"},
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							// collides with the operator rest-api-tls mount name
+							{Name: "rest-api-tls", MountPath: "/wrong"},
+							{Name: "extra", MountPath: "/opt/extra"},
+						},
+					},
+				},
+				Volumes: []corev1.Volume{
+					// collides with the operator-managed volume name
+					{Name: "rest-api-tls", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					{Name: "extra", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				},
+			},
+		}
+		return inst
+	}
+
+	envValue := func(env []corev1.EnvVar, name string) (string, int) {
+		count := 0
+		value := ""
+		for _, e := range env {
+			if e.Name == name {
+				count++
+				value = e.Value
+			}
+		}
+		return value, count
+	}
+
+	dep, _, err := reconciler.buildDeploymentSpec(newInst(), "kafka:9092", "kafka-cluster", "", "", "", "test-tls-secret", kafkaAuth{}, logr.Logger{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	container := dep.Spec.Template.Spec.Containers[0]
+
+	// Operator wins on env name conflicts.
+	if v, count := envValue(container.Env, "SCHEMA_REGISTRY_HEAP_OPTS"); count != 1 || v != "-Xms512M -Xmx512M" {
+		t.Errorf("expected the operator heap opts value, got %q (count %d)", v, count)
+	}
+	// User extras preserved.
+	if v, count := envValue(container.Env, "MY_CUSTOM"); count != 1 || v != "custom-value" {
+		t.Errorf("expected user env MY_CUSTOM to survive, got %q (count %d)", v, count)
+	}
+
+	// Volumes: operator-managed rest-api-tls wins (must be secret-backed, not
+	// the user's emptyDir), user extra volume preserved.
+	var restVol, extraVol *corev1.Volume
+	for i := range dep.Spec.Template.Spec.Volumes {
+		switch dep.Spec.Template.Spec.Volumes[i].Name {
+		case "rest-api-tls":
+			restVol = &dep.Spec.Template.Spec.Volumes[i]
+		case "extra":
+			extraVol = &dep.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	if restVol == nil || restVol.Secret == nil || restVol.Secret.SecretName != "test-tls-secret" {
+		t.Errorf("expected the operator-managed secret-backed rest-api-tls volume, got %+v", restVol)
+	}
+	if extraVol == nil {
+		t.Error("expected the user-provided extra volume to survive")
+	}
+
+	// Mounts: operator rest-api-tls mount kept at its path, user's colliding
+	// mount dropped, user's extra mount preserved.
+	var restMnt, userWrong, extraMnt *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		m := &container.VolumeMounts[i]
+		switch {
+		case m.Name == "rest-api-tls" && m.MountPath == "/var/rest-api-tls":
+			restMnt = m
+		case m.MountPath == "/wrong":
+			userWrong = m
+		case m.Name == "extra":
+			extraMnt = m
+		}
+	}
+	if restMnt == nil {
+		t.Error("expected the operator rest-api-tls mount")
+	}
+	if userWrong != nil {
+		t.Error("expected the user mount conflicting on name to be dropped")
+	}
+	if extraMnt == nil {
+		t.Error("expected the user extra volume mount to survive")
+	}
+
+	// Labels: operator overrides conflicting keys, user extras preserved.
+	if got := dep.Spec.Template.Labels["app"]; got != newInst().Name {
+		t.Errorf("expected operator app label %q, got %q", newInst().Name, got)
+	}
+	if got := dep.Spec.Template.Labels["team"]; got != "data" {
+		t.Errorf("expected user label team=data, got %q", got)
+	}
+
+	// Annotations: user annotation preserved alongside operator rollout
+	// markers.
+	if got := dep.Spec.Template.Annotations["user.io/keep"]; got != "yes" {
+		t.Errorf("expected user annotation to survive, got %q", got)
+	}
+	if _, ok := dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"]; !ok {
+		t.Error("expected the operator jksVersion annotation")
+	}
+
+	// Selector must remain the operator label set (user labels excluded).
+	if dep.Spec.Selector.MatchLabels["team"] != "" {
+		t.Error("expected user labels NOT to leak into the Deployment selector")
+	}
+
+	// Determinism: a second build with an identical input produces an
+	// identical pod template, keeping spec-hash comparison semantics stable.
+	dep2, _, err := reconciler.buildDeploymentSpec(newInst(), "kafka:9092", "kafka-cluster", "", "", "", "test-tls-secret", kafkaAuth{}, logr.Logger{})
+	if err != nil {
+		t.Fatalf("unexpected error on second build: %v", err)
+	}
+	if !equality.Semantic.DeepEqual(dep.Spec.Template, dep2.Spec.Template) {
+		t.Error("buildDeploymentSpec output must be deterministic across calls")
 	}
 }
 

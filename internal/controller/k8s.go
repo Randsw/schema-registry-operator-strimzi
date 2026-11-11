@@ -267,12 +267,22 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	if _, ok := resources.Limits[v1.ResourceMemory]; !ok {
 		resources.Limits[v1.ResourceMemory] = mustParseQuantity("1Gi")
 	}
-	podSpec.Spec.Containers[0].Env = podEnv
-	podSpec.Spec.Containers[0].VolumeMounts = containerVolumeMount
-	podSpec.Spec.Volumes = podVolume
+	// Merge the operator-managed values with whatever the user supplied in
+	// spec.template so custom env vars, volumes, mounts, labels and
+	// annotations survive reconciliation instead of being discarded. The
+	// operator always wins on identity conflicts (env name, volume name,
+	// mount path, label/annotation key); user extras are appended/preserved.
+	podSpec.Spec.Containers[0].Env = mergeEnvVars(podEnv, podSpec.Spec.Containers[0].Env)
+	podSpec.Spec.Containers[0].VolumeMounts = mergeVolumeMounts(containerVolumeMount, podSpec.Spec.Containers[0].VolumeMounts)
+	podSpec.Spec.Volumes = mergeVolumes(podVolume, podSpec.Spec.Volumes)
 	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
-	podSpec.Labels = ls
-	podSpec.Annotations = map[string]string{keyPrefix + "/jksVersion": jksResourceVersion}
+	// Operator labels override user labels on conflicting keys; the
+	// Deployment selector keeps using ls only, so user labels never narrow
+	// or break the selector.
+	podSpec.Labels = mergeStringMaps(podSpec.Labels, ls)
+	// Start from the user annotations so they are preserved, then set the
+	// operator-managed rollout markers (which override conflicting keys).
+	podSpec.Annotations = mergeStringMaps(podSpec.Annotations, map[string]string{keyPrefix + "/jksVersion": jksResourceVersion})
 	// Track the KafkaUser secret version for SASL modes so credential changes
 	// trigger a rollout without rebuilding any JKS material.
 	if auth.NeedsSASL {
@@ -1139,6 +1149,81 @@ func mergeStringMaps(base, override map[string]string) map[string]string {
 	}
 	for k, v := range override {
 		merged[k] = v
+	}
+	return merged
+}
+
+// mergeEnvVars combines the operator-managed environment with the user's
+// template environment (B3). The operator values come first and win on name
+// conflicts; user-only variables are appended in their original order, so the
+// result is deterministic and contains no duplicate names. Nil slices merge
+// into nil, keeping a template without env vars unchanged.
+func mergeEnvVars(operator, user []v1.EnvVar) []v1.EnvVar {
+	if len(user) == 0 {
+		return operator
+	}
+	taken := make(map[string]struct{}, len(operator))
+	for _, e := range operator {
+		taken[e.Name] = struct{}{}
+	}
+	merged := append([]v1.EnvVar{}, operator...)
+	for _, e := range user {
+		if _, exists := taken[e.Name]; exists {
+			continue
+		}
+		taken[e.Name] = struct{}{}
+		merged = append(merged, e)
+	}
+	return merged
+}
+
+// mergeVolumes combines the operator-managed volumes with the user's template
+// volumes (B3). Operator volumes win on name conflicts and come first; user
+// volumes are appended in their original order so the output is deterministic.
+func mergeVolumes(operator, user []v1.Volume) []v1.Volume {
+	if len(user) == 0 {
+		return operator
+	}
+	taken := make(map[string]struct{}, len(operator))
+	for _, vol := range operator {
+		taken[vol.Name] = struct{}{}
+	}
+	merged := append([]v1.Volume{}, operator...)
+	for _, vol := range user {
+		if _, exists := taken[vol.Name]; exists {
+			continue
+		}
+		taken[vol.Name] = struct{}{}
+		merged = append(merged, vol)
+	}
+	return merged
+}
+
+// mergeVolumeMounts combines the operator-managed container mounts with the
+// user's template mounts (B3). Operator mounts win: on a conflicting volume
+// name or mount path the operator entry is kept and the user entry dropped.
+// User-only mounts are appended in their original order.
+func mergeVolumeMounts(operator, user []v1.VolumeMount) []v1.VolumeMount {
+	if len(user) == 0 {
+		return operator
+	}
+	takenNames := make(map[string]struct{}, len(operator))
+	takenPaths := make(map[string]struct{}, len(operator))
+	for _, m := range operator {
+		takenNames[m.Name] = struct{}{}
+		takenPaths[m.MountPath] = struct{}{}
+	}
+	merged := append([]v1.VolumeMount{}, operator...)
+	for _, m := range user {
+		if _, exists := takenNames[m.Name]; exists {
+			continue
+		}
+		if _, exists := takenPaths[m.MountPath]; exists {
+			continue
+		}
+		takenNames[m.Name] = struct{}{}
+		takenPaths[m.MountPath] = struct{}{}
+		merged = append(merged, m)
 	}
 	return merged
 }
