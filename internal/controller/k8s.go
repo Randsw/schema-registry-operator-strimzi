@@ -1649,7 +1649,6 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	if err != nil {
 		return nil, false, err
 	}
-	r.emitConfigOverriddenEvents(instance, configOverridden)
 
 	// Compute desired spec hash
 	desiredHash, err := computeSpecHash(instance)
@@ -1666,11 +1665,20 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 
 	// If hash matches, no spec change detected
 	if existingHash == desiredHash {
+		// Steady state: do NOT emit ConfigKeyOverridden events here. The
+		// desired spec is rebuilt on every reconcile, so emitting on each
+		// pass would spam a Warning event per reserved configuration key
+		// per reconcile. The user was warned when the key was first
+		// applied (createDeployment and spec-change paths below).
 		return found, false, nil
 	}
 
 	logger.Info("Spec hash changed, updating deployment",
 		"oldHash", existingHash, "newHash", desiredHash)
+
+	// The spec actually changed: warn about operator-managed keys that were
+	// ignored while building the desired spec (B2).
+	r.emitConfigOverriddenEvents(instance, configOverridden)
 
 	// Update the deployment spec to match desired state
 	found.Spec = desired.Spec

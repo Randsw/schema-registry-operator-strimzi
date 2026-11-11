@@ -35,8 +35,153 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	eventsfake "k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+// newTestKafkaCR returns a Kafka CR whose status exposes a "tls" listener so
+// getKafkaBootstrapServers resolves against the fake client.
+func newTestKafkaCR(name, namespace string) *kafka.Kafka {
+	return &kafka.Kafka{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Status: &kafka.KafkaStatus{
+			Listeners: []kafka.ListenerStatus{
+				{Name: "tls", BootstrapServers: name + "-kafka-bootstrap:9093"},
+			},
+		},
+	}
+}
+
+// TestUpdateExistingDeploymentConfigOverriddenEventSpam covers B2: the
+// ConfigKeyOverridden Warning events must be emitted only when the
+// deployment spec actually changed, not on every reconcile. A CR with
+// reserved spec.configuration keys is reconciled repeatedly against a
+// Deployment whose spec hash is current: steady-state reconciles must
+// produce zero events, while a real spec change must produce exactly one
+// event per overridden key.
+func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	recorder := eventsfake.NewFakeRecorder(64)
+	events := recorder.Events
+
+	inst := newTestInstance()
+	// PLAINTEXT avoids any JKS/user-secret requirements; only the Kafka CR
+	// with status listeners is needed.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Configuration = map[string]string{
+		// Reserved keys: both are operator-managed and must be reported
+		// as overridden (sorted order: heap.opts before schema.registry.group.id?
+		// sorted: "heap.opts" < "schema.registry.group.id").
+		"schema.registry.group.id": "custom-group",
+		"heap.opts":                "-Xmx1g",
+	}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+		},
+	}
+
+	desiredHash, err := computeSpecHash(inst)
+	if err != nil {
+		t.Fatalf("failed to compute spec hash: %v", err)
+	}
+
+	newDeployment := func(hash string) *apps.Deployment {
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+				},
+			},
+		}
+	}
+
+	newReconciler := func(dep *apps.Deployment) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), dep).
+			Build()
+		stored := &apps.Deployment{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace}, stored); err != nil {
+			t.Fatalf("failed to get the seeded deployment: %v", err)
+		}
+		return &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}, stored
+	}
+
+	drainEvents := func() []string {
+		var got []string
+		for {
+			select {
+			case e := <-events:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+
+	t.Run("zero events when the spec hash is unchanged", func(t *testing.T) {
+		r, dep := newReconciler(newDeployment(desiredHash))
+		// Several steady-state reconciles: this is exactly the spam pattern
+		// B2 removes — every reconcile rebuilds the desired spec and used to
+		// emit one Warning per reserved key.
+		for i := 0; i < 3; i++ {
+			_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if specChanged {
+				t.Fatal("expected specChanged=false for an unchanged spec hash")
+			}
+		}
+		if got := drainEvents(); len(got) != 0 {
+			t.Errorf("expected zero events for steady-state reconciles, got %d: %v", len(got), got)
+		}
+	})
+
+	t.Run("exactly one event per overridden key when the spec changed", func(t *testing.T) {
+		// The Deployment carries a stale hash, so the spec is genuinely
+		// changed and the reserved keys must be reported.
+		r, dep := newReconciler(newDeployment("stale-hash"))
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true for a stale spec hash")
+		}
+		got := drainEvents()
+		if len(got) != 2 {
+			t.Fatalf("expected exactly 2 ConfigKeyOverridden events (one per reserved key), got %d: %v", len(got), got)
+		}
+		for _, key := range []string{"heap.opts", "schema.registry.group.id"} {
+			found := false
+			for _, e := range got {
+				if strings.Contains(e, "ConfigKeyOverridden") && strings.Contains(e, key) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected a ConfigKeyOverridden event naming %q, events: %v", key, got)
+			}
+		}
+	})
+}
 
 // newTestInstance creates a minimal StrimziSchemaRegistry for testing.
 func newTestInstance() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
