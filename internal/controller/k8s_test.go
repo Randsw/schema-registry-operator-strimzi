@@ -157,7 +157,7 @@ func TestComputeSpecHash(t *testing.T) {
 		inst1.Spec.Template = corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.5"},
+					{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"},
 				},
 			},
 		}
@@ -189,7 +189,7 @@ func TestComputeSpecHash(t *testing.T) {
 		inst1.Spec.Template = corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.5"},
+					{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"},
 				},
 			},
 		}
@@ -199,7 +199,7 @@ func TestComputeSpecHash(t *testing.T) {
 				Containers: []corev1.Container{
 					{
 						Name:  "sr",
-						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Image: "confluentinc/cp-schema-registry:8.4.1",
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
 								corev1.ResourceCPU: mustParseQuantity("500m"),
@@ -232,7 +232,7 @@ func TestComputeSpecHash(t *testing.T) {
 				Containers: []corev1.Container{
 					{
 						Name:  "sr",
-						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Image: "confluentinc/cp-schema-registry:8.4.1",
 						Env: []corev1.EnvVar{
 							{Name: "CUSTOM_ENV", Value: "value1"},
 						},
@@ -246,7 +246,7 @@ func TestComputeSpecHash(t *testing.T) {
 				Containers: []corev1.Container{
 					{
 						Name:  "sr",
-						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Image: "confluentinc/cp-schema-registry:8.4.1",
 						Env: []corev1.EnvVar{
 							{Name: "CUSTOM_ENV", Value: "value2"},
 						},
@@ -747,7 +747,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 				Containers: []corev1.Container{
 					{
 						Name:  "sr",
-						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Image: "confluentinc/cp-schema-registry:8.4.1",
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{
 								corev1.ResourceCPU:    mustParseQuantity("2000m"),
@@ -778,7 +778,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 				Containers: []corev1.Container{
 					{
 						Name:  "sr",
-						Image: "confluentinc/cp-schema-registry:7.6.5",
+						Image: "confluentinc/cp-schema-registry:8.4.1",
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
 								corev1.ResourceCPU:    mustParseQuantity("300m"),
@@ -807,7 +807,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 		inst.Spec.Template = corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.5"},
+					{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"},
 				},
 			},
 		}
@@ -841,7 +841,7 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 	inst.Spec.Template = corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
-				{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.5"},
+				{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"},
 			},
 		},
 	}
