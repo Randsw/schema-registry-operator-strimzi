@@ -16,8 +16,6 @@ limitations under the License.
 
 package main
 
-// dummy change to trigger application release
-
 import (
 	"crypto/tls"
 	"flag"

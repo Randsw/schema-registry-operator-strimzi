@@ -23,6 +23,6 @@ spec:
     spec:
       containers:
         - name: confluent-sr
-          image: confluentinc/cp-schema-registry:7.6.5
+          image: confluentinc/cp-schema-registry:8.4.1
           imagePullPolicy: IfNotPresent
       restartPolicy: Always

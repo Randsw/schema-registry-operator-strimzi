@@ -130,7 +130,7 @@ func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool) {
 					RestartPolicy: corev1.RestartPolicyAlways,
 					Containers: []corev1.Container{{
 						Name:            "confluent-sr",
-						Image:           "confluentinc/cp-schema-registry:7.6.5",
+						Image:           "confluentinc/cp-schema-registry:8.4.1",
 						ImagePullPolicy: corev1.PullIfNotPresent,
 					}},
 				},

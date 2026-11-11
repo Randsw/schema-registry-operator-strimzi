@@ -262,7 +262,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test",
-										Image: "confluentinc/cp-schema-registry:7.6.5",
+										Image: "confluentinc/cp-schema-registry:8.4.1",
 									},
 								},
 							},
@@ -631,7 +631,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "SSL",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -798,7 +798,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					SecureHTTP:    true,
 					TLSSecretName: "my-custom-tls-secret",
 					Listener:      "TLS",
-					Template:      corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:      corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -899,7 +899,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true, Listener: "TLS",
-					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -974,7 +974,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true, Listener: "TLS",
-					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1048,7 +1048,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true, Listener: "TLS",
-					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1106,7 +1106,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true, Listener: "TLS",
-					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1226,7 +1226,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					CompatibilityLevel: "", // Should default to "forward"
 					SecurityProtocol:   "", // Should default to "SSL"
 					Listener:           "", // Should default to "tls"
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1381,7 +1381,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "SSL",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1542,7 +1542,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "SSL",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1698,7 +1698,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "SSL",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1852,7 +1852,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true,
 					Listener:   "TLS",
-					Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2012,7 +2012,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true,
 					Listener:   "TLS",
-					Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2181,7 +2181,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "SSL",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2340,7 +2340,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "SASL_SSL",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2468,7 +2468,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "SASL_PLAINTEXT",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2577,7 +2577,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "PLAINTEXT",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2690,7 +2690,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "SASL_SSL",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2775,7 +2775,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Template: corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
-								{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"},
+								{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"},
 							},
 						},
 					},
@@ -2894,7 +2894,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 						"authentication.realm":        "Basic",
 						"debug":                       "true",
 					},
-					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3014,7 +3014,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 						Labels:      map[string]string{"monitoring.example.com/team": "schemas"},
 					},
 					NetworkPolicy: &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true},
-					Template:      corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:      corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3136,7 +3136,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "PLAINTEXT",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3264,7 +3264,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "PLAINTEXT",
 					TLSSecretName:      UserTLSSecretName,
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3360,7 +3360,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "PLAINTEXT",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3509,7 +3509,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "PLAINTEXT",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3612,7 +3612,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
 						SecureHTTP: false,
 						HeapOpts:   heapOpts,
-						Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:7.6.5"}}}},
+						Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 					},
 				}
 			}
