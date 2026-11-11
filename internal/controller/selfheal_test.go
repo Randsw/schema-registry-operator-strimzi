@@ -30,8 +30,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
+
+// countSecretDeletes returns interceptor.Funcs that count Delete calls on
+// Secrets, so tests can assert the B4 in-place update path performs no
+// delete-then-recreate. Pass it to the fake client builder via
+// WithInterceptorFuncs and read the counter after the operation.
+func countSecretDeletes(deleted *int) interceptor.Funcs {
+	return interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*corev1.Secret); ok {
+				*deleted++
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	}
+}
 
 // TestHandleMTLSSecretRotationSelfHeal verifies that a manually deleted -jks
 // secret is recreated (and the deployment rolled) when the Deployment already
@@ -146,6 +163,73 @@ func TestHandleMTLSSecretRotationSelfHeal(t *testing.T) {
 		}
 		if result.RequeueAfter != 0 {
 			t.Errorf("expected no requeue once stable, got %v", result.RequeueAfter)
+		}
+	})
+
+	t.Run("stale secret is updated in place without any delete", func(t *testing.T) {
+		// B4: a stale -jks secret used to be deleted and recreated later,
+		// leaving a window in which a pod restart failed to mount it. The
+		// rotation must update the secret in place instead.
+		deletes := 0
+		stale := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            inst.Name + jksSecretSuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "5000",
+				Annotations: map[string]string{
+					CAVersionKey:   "stale-ca-version",
+					userVersionKey: "stale-user-version",
+				},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"truststore.jks":      []byte("stale-truststore-bytes"),
+				"keystore.jks":        []byte("stale-keystore-bytes"),
+				"truststore_password": []byte("stale"),
+				"keystore_password":   []byte("stale"),
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, clusterCASecret.DeepCopy(), userSecret.DeepCopy(), deployment.DeepCopy(), stale).
+			WithInterceptorFuncs(countSecretDeletes(&deletes)).
+			Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		ctx := context.Background()
+
+		result, err := reconciler.handleMTLSSecretRotation(ctx, inst, logr.Logger{}, cluster, auth)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			t.Error("expected a requeue after the stale secret rotation")
+		}
+		if deletes != 0 {
+			t.Errorf("expected zero Delete calls on the stale -jks secret, got %d", deletes)
+		}
+
+		updated := &corev1.Secret{}
+		if err := client.Get(ctx, types.NamespacedName{Name: inst.Name + jksSecretSuffix, Namespace: inst.Namespace}, updated); err != nil {
+			t.Fatalf("expected the -jks secret to still exist: %v", err)
+		}
+		if string(updated.Data["truststore.jks"]) == "stale-truststore-bytes" || string(updated.Data["keystore.jks"]) == "stale-keystore-bytes" {
+			t.Error("expected the stale secret material to be replaced in place")
+		}
+		if len(updated.Data["truststore.jks"]) == 0 || len(updated.Data["keystore.jks"]) == 0 {
+			t.Error("expected fresh keystore and truststore material after the in-place update")
+		}
+		if got := updated.Annotations[CAVersionKey]; got != clusterCASecret.ResourceVersion {
+			t.Errorf("expected CAVersionKey annotation %q, got %q", clusterCASecret.ResourceVersion, got)
+		}
+		if got := updated.Annotations[userVersionKey]; got != userSecret.ResourceVersion {
+			t.Errorf("expected userVersionKey annotation %q, got %q", userSecret.ResourceVersion, got)
+		}
+
+		dep := &apps.Deployment{}
+		if err := client.Get(ctx, types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err != nil {
+			t.Fatalf("failed to get deployment: %v", err)
+		}
+		if got := dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"]; got == "" {
+			t.Error("expected the jksVersion pod-template annotation to trigger a rollout")
 		}
 	})
 }

@@ -573,8 +573,11 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 			return ctrl.Result{}, err
 		}
 		if created && newSecret != nil {
-			if err := r.Create(ctx, newSecret); err != nil {
-				logger.Error(err, "Failed to create rebuilt jks secret")
+			// persistJKSSecret Updates in place when a stale secret was
+			// found and Creates otherwise (B4 — no delete-then-recreate
+			// window).
+			if err := r.persistJKSSecret(ctx, newSecret); err != nil {
+				logger.Error(err, "Failed to persist rebuilt jks secret")
 				return ctrl.Result{}, err
 			}
 		}
@@ -650,11 +653,14 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 			return ctrl.Result{}, err
 		}
 	}
-	// Only create the secret if createSecret indicated it was newly generated.
+	// Only persist the secret if createSecret indicated it was newly
+	// generated. A rebuilt secret carrying the stale secret's
+	// ResourceVersion is Updated in place (B4), so the -jks secret is never
+	// absent for mounting pods.
 	if newSecretCreated {
-		err = r.Create(ctx, newSecret)
+		err = r.persistJKSSecret(ctx, newSecret)
 		if err != nil {
-			logger.Error(err, "Failed to create new jks secret after user or cluster CA secret changed")
+			logger.Error(err, "Failed to create/update jks secret after user or cluster CA secret changed")
 			return ctrl.Result{}, err
 		}
 	}
@@ -721,8 +727,8 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 			return ctrl.Result{}, err
 		}
 		if newSecretCreated {
-			if err := r.Create(ctx, newSecret); err != nil {
-				logger.Error(err, "Failed to create new truststore secret after cluster CA secret changed")
+			if err := r.persistJKSSecret(ctx, newSecret); err != nil {
+				logger.Error(err, "Failed to create/update truststore secret after cluster CA secret changed")
 				return ctrl.Result{}, err
 			}
 		}

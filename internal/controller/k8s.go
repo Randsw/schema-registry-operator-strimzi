@@ -115,9 +115,13 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	var jksResourceVersion string
 	if secret != nil {
 		if created {
-			err = r.Create(ctx, secret)
+			// A rebuilt secret may carry the ResourceVersion of a stale
+			// existing secret (the Deployment was deleted but the Secret
+			// kept): persistJKSSecret updates it in place instead of
+			// creating a duplicate (B4).
+			err = r.persistJKSSecret(ctx, secret)
 			if err != nil {
-				logger.Error(err, "Failed to create secret", "Secret.Name", instance.Name+jksSecretSuffix)
+				logger.Error(err, "Failed to create/update secret", "Secret.Name", instance.Name+jksSecretSuffix)
 				return nil, err
 			}
 			jksResourceVersion = secret.ResourceVersion
@@ -850,8 +854,12 @@ func (r *StrimziSchemaRegistryReconciler) getSASLUserSecretVersion(
 }
 
 // existingJKSSecret fetches the current -jks secret and reports whether it is
-// up-to-date according to isUpToDate. When it exists but is stale it is deleted
-// so the caller can recreate it.
+// up-to-date according to isUpToDate. When it exists but is stale it is
+// returned as-is (NOT deleted) so the caller can rebuild the material and
+// update the secret in place, carrying the existing ResourceVersion (B4).
+// Delete-then-recreate left a window in which a pod restarting in between
+// failed to mount the secret — the same failure mode already fixed for the
+// REST TLS secret path in createTLSSecret.
 func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, isUpToDate func(annotations map[string]string) bool) (*v1.Secret, bool, error) {
 	jks_secret := &v1.Secret{}
@@ -863,17 +871,26 @@ func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimzireg
 			// updateDeployment without needing to re-fetch.
 			return jks_secret, true, nil
 		}
-		logger.V(1).Info("About to delete JKS secret")
-		if err := r.Delete(ctx, jks_secret); err != nil {
-			return nil, false, err
-		}
-		return nil, false, nil
+		logger.V(1).Info("JKS secret is stale; caller will update it in place")
+		// Return the stale secret so the caller can carry its
+		// ResourceVersion into the rebuilt one for an in-place Update.
+		return jks_secret, false, nil
 	}
 	if !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to get schema registry secret")
 		return nil, false, err
 	}
 	return nil, false, nil
+}
+
+// persistJKSSecret stores a (re)built JKS secret: secrets carrying a
+// ResourceVersion (a stale existing secret) are updated in place so they are
+// never absent for pods mounting them; new secrets are created.
+func (r *StrimziSchemaRegistryReconciler) persistJKSSecret(ctx context.Context, secret *v1.Secret) error {
+	if secret.ResourceVersion != "" {
+		return r.Update(ctx, secret)
+	}
+	return r.Create(ctx, secret)
 }
 
 // createMTLSSecret creates or returns an up-to-date JKS secret containing both
@@ -922,7 +939,7 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 		}
 	}
 
-	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
+	existing, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
 		return annotations[CAVersionKey] == clusterSecret.ResourceVersion &&
 			annotations[userVersionKey] == userSecret.ResourceVersion
 	})
@@ -930,11 +947,11 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 		return nil, false, err
 	}
 	if upToDate {
-		return jks_secret, false, nil
+		return existing, false, nil
 	}
 
 	jks_secret_name := instance.Name + jksSecretSuffix
-	logger.Info("Creating new keystore and truststore", "Secret Name", jks_secret_name)
+	logger.Info("Rebuilding keystore and truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
 	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
 	if err != nil {
@@ -944,7 +961,7 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 	if err != nil {
 		return nil, false, err
 	}
-	jks_secret = &v1.Secret{
+	jks_secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jks_secret_name,
 			Namespace: instance.Namespace,
@@ -970,6 +987,11 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
 		return nil, false, err
 	}
+	if existing != nil {
+		// Carry the ResourceVersion so the caller Updates in place instead
+		// of deleting and recreating the secret (B4).
+		jks_secret.ResourceVersion = existing.ResourceVersion
+	}
 	return jks_secret, true, nil
 }
 
@@ -986,24 +1008,24 @@ func (r *StrimziSchemaRegistryReconciler) createTruststoreSecret(instance *strim
 	}
 	clusterCACert := string(clusterSecret.Data["ca.crt"])
 
-	jks_secret, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
+	existing, upToDate, err := r.existingJKSSecret(instance, ctx, logger, func(annotations map[string]string) bool {
 		return annotations[CAVersionKey] == clusterSecret.ResourceVersion
 	})
 	if err != nil {
 		return nil, false, err
 	}
 	if upToDate {
-		return jks_secret, false, nil
+		return existing, false, nil
 	}
 
 	jks_secret_name := instance.Name + jksSecretSuffix
-	logger.Info("Creating new truststore", "Secret Name", jks_secret_name)
+	logger.Info("Rebuilding truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
 	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
 	if err != nil {
 		return nil, false, err
 	}
-	jks_secret = &v1.Secret{
+	jks_secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jks_secret_name,
 			Namespace: instance.Namespace,
@@ -1026,13 +1048,20 @@ func (r *StrimziSchemaRegistryReconciler) createTruststoreSecret(instance *strim
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
 		return nil, false, err
 	}
+	if existing != nil {
+		// Carry the ResourceVersion so the caller Updates in place instead
+		// of deleting and recreating the secret (B4).
+		jks_secret.ResourceVersion = existing.ResourceVersion
+	}
 	return jks_secret, true, nil
 }
 
 // ensureClientAuthTruststoreSecret ensures an operator-managed cluster-CA
 // truststore secret exists for REST API mutual TLS. It is used when the Kafka
 // auth mode does not already produce a truststore secret (PLAINTEXT and
-// SASL_PLAINTEXT). It returns the secret and whether it was newly created.
+// SASL_PLAINTEXT). It returns the secret and whether it was (re)built (as
+// opposed to already up-to-date). A rebuilt secret is persisted in place when
+// a stale secret existed (B4).
 func (r *StrimziSchemaRegistryReconciler) ensureClientAuthTruststoreSecret(
 	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context,
@@ -1046,8 +1075,8 @@ func (r *StrimziSchemaRegistryReconciler) ensureClientAuthTruststoreSecret(
 	if !created {
 		return secret, false, nil
 	}
-	if err := r.Create(ctx, secret); err != nil {
-		logger.Error(err, "Failed to create client-auth truststore secret")
+	if err := r.persistJKSSecret(ctx, secret); err != nil {
+		logger.Error(err, "Failed to create/update client-auth truststore secret")
 		return nil, false, err
 	}
 	return secret, true, nil
