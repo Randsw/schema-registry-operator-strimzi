@@ -28,5 +28,4 @@ docs
 .vscode
 .pytest_cache
 
-test-crd.yaml
 plans/
