@@ -1619,11 +1619,17 @@ func TestMapStrimziResourceToRequests(t *testing.T) {
 	})
 }
 
-// TestHandleTLSCertExpiry covers the TLS certificate expiry-based renewal:
-// with the default threshold a freshly generated one-year certificate is not
-// renewed; with a threshold larger than the certificate validity the secret
-// is renewed in place and the deployment is rolled via the tlsVersion
-// pod-template annotation.
+// TestHandleTLSCertExpiry covers the TLS certificate expiry-based renewal and
+// the periodic recheck scheduling:
+//   - with the default threshold a freshly generated one-year certificate is
+//     not renewed but a standing requeue interval is returned, so the expiry
+//     keeps being checked even when no watch event ever fires (B1);
+//   - a certificate inside the renewal window (threshold forced larger than
+//     its validity, or an actually expired certificate) is renewed in place
+//     and the deployment is rolled via the tlsVersion pod-template
+//     annotation;
+//   - a custom user-managed TLS secret is never touched and never forces a
+//     requeue.
 func TestHandleTLSCertExpiry(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
@@ -1677,16 +1683,72 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		},
 	}
 
-	t.Run("no renewal while the certificate is valid", func(t *testing.T) {
+	t.Run("no renewal while the certificate is valid, standing recheck scheduled", func(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, tlsSecret.DeepCopy(), jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		result, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if result.RequeueAfter != 0 {
-			t.Errorf("expected no requeue for a valid certificate, got %v", result.RequeueAfter)
+			t.Errorf("expected no immediate requeue for a valid certificate, got %v", result.RequeueAfter)
+		}
+		// B1: a valid certificate must still schedule the periodic recheck
+		// so the renewal fires on time without any watch event.
+		if recheck != tlsCertRecheckInterval {
+			t.Errorf("expected the standing recheck interval %v, got %v", tlsCertRecheckInterval, recheck)
+		}
+	})
+
+	t.Run("renewal window sooner than the standing interval shortens the recheck", func(t *testing.T) {
+		// A certificate expiring in 40 days enters the default 30-day
+		// renewal window in about 10 days, which is sooner than the
+		// (temporarily enlarged) standing interval; the returned recheck
+		// must be the shorter value so renewal is observed before the
+		// window opens.
+		originalInterval := tlsCertRecheckInterval
+		tlsCertRecheckInterval = 100 * 24 * time.Hour
+		defer func() { tlsCertRecheckInterval = originalInterval }()
+
+		cp := certprocessor.NewCertProcessor(logr.Logger{})
+		ca, err := testutil.GenerateTestCA()
+		if err != nil {
+			t.Fatalf("failed to generate CA: %v", err)
+		}
+		uc, err := testutil.GenerateTestUserCertWithValidity(ca, "shortpw123", time.Now().AddDate(0, -1, 0), time.Now().AddDate(0, 0, 40))
+		if err != nil {
+			t.Fatalf("failed to generate user cert: %v", err)
+		}
+		keystore, password, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "shortpw123")
+		if err != nil {
+			t.Fatalf("failed to build keystore: %v", err)
+		}
+		freshTLSSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"tls-keystore.jks":  keystore,
+				"keystore_password": []byte(password),
+				"key_password":      []byte(password),
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, freshTLSSecret, jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != 0 {
+			t.Errorf("expected no immediate requeue (certificate outside the renewal window), got %v", result.RequeueAfter)
+		}
+		if recheck >= tlsCertRecheckInterval {
+			t.Errorf("expected a recheck shortened below the standing interval %v, got %v", tlsCertRecheckInterval, recheck)
+		}
+		// 40 days lifetime minus the 30-day renewal threshold is about 10 days.
+		if recheck < 9*24*time.Hour || recheck > 10*24*time.Hour+time.Minute {
+			t.Errorf("expected a recheck of about 10 days, got %v", recheck)
 		}
 	})
 
@@ -1698,12 +1760,17 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, tlsSecret.DeepCopy(), jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		result, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if result.RequeueAfter == 0 {
 			t.Error("expected a requeue after renewal")
+		}
+		// The immediate requeue re-runs the check; no standing interval is
+		// needed on top of it.
+		if recheck != 0 {
+			t.Errorf("expected no standing recheck alongside the immediate requeue, got %v", recheck)
 		}
 
 		renewed := &corev1.Secret{}
@@ -1738,7 +1805,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(plaintextInst, caCertSecret, caKeySecret, tlsSecret.DeepCopy(), deployment.DeepCopy()).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		result, err := reconciler.handleTLSCertExpiry(context.Background(), plaintextInst, logr.Logger{}, cluster)
+		result, _, err := reconciler.handleTLSCertExpiry(context.Background(), plaintextInst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1767,14 +1834,144 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		result, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if result.RequeueAfter != 0 {
 			t.Errorf("expected no requeue for a custom TLS secret, got %v", result.RequeueAfter)
 		}
+		// B1: a user-managed TLS secret is never expiry-checked by the
+		// operator, so no periodic requeue may be forced.
+		if recheck != 0 {
+			t.Errorf("expected no periodic recheck for a custom TLS secret, got %v", recheck)
+		}
 	})
+
+	t.Run("already-expired certificate is renewed with the default threshold", func(t *testing.T) {
+		// B1 failure path: with the default 30-day threshold, a certificate
+		// whose NotAfter is already in the past must enter the renewal
+		// branch immediately (time.Until(notAfter) <= threshold), instead
+		// of being skipped until some watch event fires.
+		cp := certprocessor.NewCertProcessor(logr.Logger{})
+		ca, err := testutil.GenerateTestCA()
+		if err != nil {
+			t.Fatalf("failed to generate CA: %v", err)
+		}
+		uc, err := testutil.GenerateTestUserCertWithValidity(ca, "expired123", time.Now().AddDate(0, -2, 0), time.Now().AddDate(0, 0, -1))
+		if err != nil {
+			t.Fatalf("failed to generate expired user cert: %v", err)
+		}
+		keystore, password, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "expired123")
+		if err != nil {
+			t.Fatalf("failed to build keystore from expired cert: %v", err)
+		}
+		expiredTLSSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"tls-keystore.jks":  keystore,
+				"keystore_password": []byte(password),
+				"key_password":      []byte(password),
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, expiredTLSSecret, jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			t.Error("expected a requeue after renewing the expired certificate")
+		}
+		if recheck != 0 {
+			t.Errorf("expected no standing recheck alongside the immediate requeue, got %v", recheck)
+		}
+
+		renewed := &corev1.Secret{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, renewed); err != nil {
+			t.Fatalf("failed to get renewed TLS secret: %v", err)
+		}
+		if string(renewed.Data["keystore_password"]) == password {
+			t.Error("expected the renewed secret to replace the expired keystore material")
+		}
+		newNotAfter, err := cp.KeystoreCertExpiry(renewed.Data["tls-keystore.jks"], string(renewed.Data["keystore_password"]))
+		if err != nil {
+			t.Fatalf("failed to read the renewed keystore expiry: %v", err)
+		}
+		if !newNotAfter.After(time.Now()) {
+			t.Errorf("expected the renewed certificate to be valid, NotAfter=%v", newNotAfter)
+		}
+	})
+}
+
+// TestCertRecheckInterval is a table-driven test for the periodic recheck
+// scheduling helper (B1): the standing interval applies while the renewal
+// window is further away than the interval; the recheck shortens to the time
+// until the window opens when that is sooner; expired or in-window
+// certificates fall through to the renewal path so the helper is not used
+// there, but it must still never return a non-positive interval.
+func TestCertRecheckInterval(t *testing.T) {
+	originalThreshold := tlsCertRenewalThreshold
+	originalInterval := tlsCertRecheckInterval
+	tlsCertRenewalThreshold = 30 * 24 * time.Hour
+	// A long standing interval lets the shortening branch be exercised: the
+	// recheck is clamped to the time until the renewal window opens when
+	// that is sooner than the interval.
+	tlsCertRecheckInterval = 100 * 24 * time.Hour
+	defer func() {
+		tlsCertRenewalThreshold = originalThreshold
+		tlsCertRecheckInterval = originalInterval
+	}()
+
+	tests := []struct {
+		name      string
+		notAfter  time.Time
+		wantExact bool // interval equals the standing value exactly
+		min       time.Duration
+		max       time.Duration
+	}{
+		{
+			name:      "far-from-expiry certificate uses the standing interval",
+			notAfter:  time.Now().AddDate(0, 6, 0),
+			wantExact: true,
+		},
+		{
+			name:     "certificate entering the window in about 10 days shortens the recheck",
+			notAfter: time.Now().AddDate(0, 0, 40),
+			min:      9 * 24 * time.Hour,
+			max:      10*24*time.Hour + time.Minute,
+		},
+		{
+			name:      "already-expired certificate still yields a positive interval",
+			notAfter:  time.Now().AddDate(0, 0, -5),
+			wantExact: true,
+		},
+		{
+			name:      "inside the renewal window yields the standing interval",
+			notAfter:  time.Now().AddDate(0, 0, 10),
+			wantExact: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := certRecheckInterval(tt.notAfter)
+			if got <= 0 {
+				t.Fatalf("recheck interval must be positive, got %v", got)
+			}
+			if tt.wantExact {
+				if got != tlsCertRecheckInterval {
+					t.Errorf("expected the standing interval %v, got %v", tlsCertRecheckInterval, got)
+				}
+				return
+			}
+			if got < tt.min || got > tt.max {
+				t.Errorf("expected a recheck in [%v, %v], got %v", tt.min, tt.max, got)
+			}
+		})
+	}
 }
 
 // TestCreateMTLSSecretFieldValidation verifies the explicit presence checks

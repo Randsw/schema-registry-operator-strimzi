@@ -121,6 +121,14 @@ func GenerateTestCA() (*TestCA, error) {
 //
 // The PKCS#12 bundle includes: user cert + user key + CA cert.
 func GenerateTestUserCert(ca *TestCA, password string) (*TestUserCert, error) {
+	return GenerateTestUserCertWithValidity(ca, password, time.Now(), time.Now().AddDate(1, 0, 0))
+}
+
+// GenerateTestUserCertWithValidity generates a user certificate signed by the
+// CA with an explicit validity window, so tests can produce certificates that
+// are already expired or about to expire. NotBefore and NotAfter are taken
+// verbatim (a NotAfter in the past yields an expired certificate).
+func GenerateTestUserCertWithValidity(ca *TestCA, password string, notBefore, notAfter time.Time) (*TestUserCert, error) {
 	if password == "" {
 		password = "test1234"
 	}
@@ -144,8 +152,8 @@ func GenerateTestUserCert(ca *TestCA, password string) (*TestUserCert, error) {
 			CommonName: cn,
 		},
 		DNSNames:    []string{cn, cn + ".svc", cn + ".svc.cluster", cn + ".svc.cluster.local"},
-		NotBefore:   time.Now(),
-		NotAfter:    time.Now().AddDate(1, 0, 0),
+		NotBefore:   notBefore,
+		NotAfter:    notAfter,
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}

@@ -199,7 +199,7 @@ func TestHandleTLSCertExpirySelfHeal(t *testing.T) {
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 		ctx := context.Background()
 
-		result, err := reconciler.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
+		result, _, err := reconciler.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -232,18 +232,22 @@ func TestHandleTLSCertExpirySelfHeal(t *testing.T) {
 		ctx := context.Background()
 
 		// First reconcile heals the missing secret.
-		if _, err := reconciler.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster); err != nil {
+		if _, _, err := reconciler.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster); err != nil {
 			t.Fatalf("unexpected error on healing reconcile: %v", err)
 		}
 
 		// Second reconcile: the recreated certificate is fresh, so it is not
-		// inside the renewal window and nothing changes.
-		result, err := reconciler.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
+		// inside the renewal window and nothing changes immediately; the
+		// periodic recheck is scheduled instead (B1).
+		result, recheck, err := reconciler.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error on second reconcile: %v", err)
 		}
 		if result.RequeueAfter != 0 {
-			t.Errorf("expected no requeue once stable, got %v", result.RequeueAfter)
+			t.Errorf("expected no immediate requeue once stable, got %v", result.RequeueAfter)
+		}
+		if recheck != tlsCertRecheckInterval {
+			t.Errorf("expected the standing recheck interval %v once stable, got %v", tlsCertRecheckInterval, recheck)
 		}
 	})
 
@@ -254,12 +258,17 @@ func TestHandleTLSCertExpirySelfHeal(t *testing.T) {
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 		ctx := context.Background()
 
-		result, err := reconciler.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
+		result, recheck, err := reconciler.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if result.RequeueAfter != 0 {
 			t.Errorf("expected no requeue before the Deployment exists, got %v", result.RequeueAfter)
+		}
+		// No secret exists yet and the Deployment does not either; nothing
+		// was recreated, so no periodic recheck is scheduled.
+		if recheck != 0 {
+			t.Errorf("expected no periodic recheck before the Deployment exists, got %v", recheck)
 		}
 		err = client.Get(ctx, types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, &corev1.Secret{})
 		if !apierrors.IsNotFound(err) {
