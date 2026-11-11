@@ -1,6 +1,7 @@
 package certprocessor
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
@@ -45,27 +46,27 @@ func TestCommandBuildersFeedPasswordViaEnv(t *testing.T) {
 	}{
 		"keytoolImportCertCmd": {
 			build: func() *exec.Cmd {
-				return keytoolImportCertCmd("/tmp/ks.jks", "CARoot", "/tmp/ca.crt", pw)
+				return keytoolImportCertCmd(context.Background(), "/tmp/ks.jks", "CARoot", "/tmp/ca.crt", pw)
 			},
 		},
 		"keytoolImportKeystoreCmd": {
 			build: func() *exec.Cmd {
-				return keytoolImportKeystoreCmd("/tmp/dest.jks", "/tmp/src.p12", pw)
+				return keytoolImportKeystoreCmd(context.Background(), "/tmp/dest.jks", "/tmp/src.p12", pw)
 			},
 		},
 		"keytoolListCmd": {
 			build: func() *exec.Cmd {
-				return keytoolListCmd("/tmp/ks.jks", pw)
+				return keytoolListCmd(context.Background(), "/tmp/ks.jks", pw)
 			},
 		},
 		"opensslExportPKCS12Cmd with CA chain": {
 			build: func() *exec.Cmd {
-				return opensslExportPKCS12Cmd("/tmp/tls.crt", "/tmp/tls.key", "/tmp/ca.crt", "alias", "/tmp/out.p12", pw)
+				return opensslExportPKCS12Cmd(context.Background(), "/tmp/tls.crt", "/tmp/tls.key", "/tmp/ca.crt", "alias", "/tmp/out.p12", pw)
 			},
 		},
 		"opensslExportPKCS12Cmd without CA chain": {
 			build: func() *exec.Cmd {
-				return opensslExportPKCS12Cmd("/tmp/tls.crt", "/tmp/tls.key", "", "alias", "/tmp/out.p12", pw)
+				return opensslExportPKCS12Cmd(context.Background(), "/tmp/tls.crt", "/tmp/tls.key", "", "alias", "/tmp/out.p12", pw)
 			},
 		},
 	}
@@ -84,14 +85,14 @@ func TestCommandBuildersFeedPasswordViaEnv(t *testing.T) {
 // phrase source.
 func TestCommandBuildersUseEnvFedFlagForms(t *testing.T) {
 	t.Run("keytool importcert uses -storepass:env", func(t *testing.T) {
-		cmd := keytoolImportCertCmd("/tmp/ks.jks", "CARoot", "/tmp/ca.crt", "pw")
+		cmd := keytoolImportCertCmd(context.Background(), "/tmp/ks.jks", "CARoot", "/tmp/ca.crt", "pw")
 		if !containsAdjacent(cmd.Args, "-storepass:env", passwordEnvVar) {
 			t.Errorf("expected -storepass:env %s in args, got %v", passwordEnvVar, cmd.Args)
 		}
 	})
 
 	t.Run("keytool importkeystore uses -srcstorepass:env and -deststorepass:env", func(t *testing.T) {
-		cmd := keytoolImportKeystoreCmd("/tmp/dest.jks", "/tmp/src.p12", "pw")
+		cmd := keytoolImportKeystoreCmd(context.Background(), "/tmp/dest.jks", "/tmp/src.p12", "pw")
 		if !containsAdjacent(cmd.Args, "-srcstorepass:env", passwordEnvVar) {
 			t.Errorf("expected -srcstorepass:env %s in args, got %v", passwordEnvVar, cmd.Args)
 		}
@@ -101,14 +102,14 @@ func TestCommandBuildersUseEnvFedFlagForms(t *testing.T) {
 	})
 
 	t.Run("keytool list uses -storepass:env", func(t *testing.T) {
-		cmd := keytoolListCmd("/tmp/ks.jks", "pw")
+		cmd := keytoolListCmd(context.Background(), "/tmp/ks.jks", "pw")
 		if !containsAdjacent(cmd.Args, "-storepass:env", passwordEnvVar) {
 			t.Errorf("expected -storepass:env %s in args, got %v", passwordEnvVar, cmd.Args)
 		}
 	})
 
 	t.Run("openssl pkcs12 uses -passout env:", func(t *testing.T) {
-		cmd := opensslExportPKCS12Cmd("/tmp/tls.crt", "/tmp/tls.key", "", "alias", "/tmp/out.p12", "pw")
+		cmd := opensslExportPKCS12Cmd(context.Background(), "/tmp/tls.crt", "/tmp/tls.key", "", "alias", "/tmp/out.p12", "pw")
 		if !containsAdjacent(cmd.Args, "-passout", "env:"+passwordEnvVar) {
 			t.Errorf("expected -passout env:%s in args, got %v", passwordEnvVar, cmd.Args)
 		}

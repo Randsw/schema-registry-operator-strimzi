@@ -2129,7 +2129,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		t.Fatalf("failed to generate CA: %v", err)
 	}
 	cp := certprocessor.NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(ca.CACertPEM, ca.CAKeyPEM, "test1234", "test-sr.default")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "test-sr.default")
 	if err != nil {
 		t.Fatalf("failed to generate TLS keystore: %v", err)
 	}
@@ -2208,7 +2208,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to generate user cert: %v", err)
 		}
-		keystore, password, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "shortpw123")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "shortpw123")
 		if err != nil {
 			t.Fatalf("failed to build keystore: %v", err)
 		}
@@ -2350,7 +2350,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to generate expired user cert: %v", err)
 		}
-		keystore, password, err := cp.ConvertPEMToJKS(uc.UserCertPEM, uc.UserKeyPEM, "expired123")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "expired123")
 		if err != nil {
 			t.Fatalf("failed to build keystore from expired cert: %v", err)
 		}
@@ -2384,7 +2384,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		if string(renewed.Data["keystore_password"]) == password {
 			t.Error("expected the renewed secret to replace the expired keystore material")
 		}
-		newNotAfter, err := cp.KeystoreCertExpiry(renewed.Data["tls-keystore.jks"], string(renewed.Data["keystore_password"]))
+		newNotAfter, err := cp.KeystoreCertExpiry(context.Background(), renewed.Data["tls-keystore.jks"], string(renewed.Data["keystore_password"]))
 		if err != nil {
 			t.Fatalf("failed to read the renewed keystore expiry: %v", err)
 		}

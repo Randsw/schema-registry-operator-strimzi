@@ -953,11 +953,11 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 	jks_secret_name := instance.Name + jksSecretSuffix
 	logger.Info("Rebuilding keystore and truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
-	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
+	truststore, truststore_password, err := cp.CreateTruststore(ctx, clusterCACert, "")
 	if err != nil {
 		return nil, false, err
 	}
-	keystore, keystore_password, err := cp.CreateKeystore(clientCACert, clientCert, clientKey, clientp12, userPassword)
+	keystore, keystore_password, err := cp.CreateKeystore(ctx, clientCACert, clientCert, clientKey, clientp12, userPassword)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1021,7 +1021,7 @@ func (r *StrimziSchemaRegistryReconciler) createTruststoreSecret(instance *strim
 	jks_secret_name := instance.Name + jksSecretSuffix
 	logger.Info("Rebuilding truststore", "Secret Name", jks_secret_name)
 	cp := certprocessor.NewCertProcessor(logger)
-	truststore, truststore_password, err := cp.CreateTruststore(clusterCACert, "")
+	truststore, truststore_password, err := cp.CreateTruststore(ctx, clusterCACert, "")
 	if err != nil {
 		return nil, false, err
 	}
@@ -1482,7 +1482,7 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 	}
 	logger.Info("Creating keystore for TLS secret", "Secret Name", jksTLSSecretName)
 	cp := certprocessor.NewCertProcessor(logger)
-	TLSKeystore, TLSKeystorePassword, err := cp.GenerateTLSforHTTP(clusterCert, clusterKey, "",
+	TLSKeystore, TLSKeystorePassword, err := cp.GenerateTLSforHTTP(ctx, clusterCert, clusterKey, "",
 		instance.Name+"."+instance.Namespace)
 	if err != nil {
 		return nil, false, err

@@ -1086,7 +1086,7 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 	}
 
 	cp := certprocessor.NewCertProcessor(logger)
-	notAfter, err := cp.KeystoreCertExpiry(keystore, string(password))
+	notAfter, err := cp.KeystoreCertExpiry(ctx, keystore, string(password))
 	if err != nil {
 		// A malformed keystore must not block reconciliation; log and skip,
 		// but keep the periodic recheck so the cert is inspected again even
