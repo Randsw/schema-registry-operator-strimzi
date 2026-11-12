@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	eventsfake "k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -179,6 +180,108 @@ func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
 			if !found {
 				t.Errorf("expected a ConfigKeyOverridden event naming %q, events: %v", key, got)
 			}
+		}
+	})
+}
+
+// TestUpdateExistingDeploymentPreservesManualReplicas covers B6: a spec
+// change must not reset a manually scaled Deployment. The CR exposes no
+// replicas field, so the operator never desires a specific replica count and
+// the live Spec.Replicas (set by `kubectl scale`) must survive the update;
+// a Deployment left at the default (nil) must stay nil.
+func TestUpdateExistingDeploymentPreservesManualReplicas(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	// PLAINTEXT avoids any JKS/user-secret requirements; only the Kafka CR
+	// with status listeners is needed.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+		},
+	}
+
+	desiredHash, err := computeSpecHash(inst)
+	if err != nil {
+		t.Fatalf("failed to compute spec hash: %v", err)
+	}
+
+	newDeployment := func(hash string, replicas *int32) *apps.Deployment {
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Replicas: replicas,
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+				},
+			},
+		}
+	}
+
+	newReconciler := func(dep *apps.Deployment) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), dep).
+			Build()
+		stored := &apps.Deployment{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace}, stored); err != nil {
+			t.Fatalf("failed to get the seeded deployment: %v", err)
+		}
+		return &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}, stored
+	}
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+
+	t.Run("manually scaled replicas survive a spec change", func(t *testing.T) {
+		r, dep := newReconciler(newDeployment("stale-hash", ptr.To(int32(3))))
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true for a stale spec hash")
+		}
+		if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
+			t.Errorf("expected the manually scaled replicas (3) to survive the spec update, got %v", dep.Spec.Replicas)
+		}
+	})
+
+	t.Run("unset replicas stay unset across a spec change", func(t *testing.T) {
+		r, dep := newReconciler(newDeployment("stale-hash", nil))
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true for a stale spec hash")
+		}
+		if dep.Spec.Replicas != nil {
+			t.Errorf("expected replicas to stay unset, got %d", *dep.Spec.Replicas)
+		}
+	})
+
+	t.Run("steady-state reconcile leaves replicas untouched", func(t *testing.T) {
+		r, dep := newReconciler(newDeployment(desiredHash, ptr.To(int32(5))))
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if specChanged {
+			t.Fatal("expected specChanged=false for an unchanged spec hash")
+		}
+		if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 5 {
+			t.Errorf("expected replicas to stay 5 in steady state, got %v", dep.Spec.Replicas)
 		}
 	})
 }

@@ -1794,8 +1794,15 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	// ignored while building the desired spec (B2).
 	r.emitConfigOverriddenEvents(instance, configOverridden)
 
-	// Update the deployment spec to match desired state
+	// Update the deployment spec to match desired state. The CR exposes no
+	// replicas field yet, so the operator never desires a specific replica
+	// count: the live Spec.Replicas — which manual `kubectl scale` edits —
+	// must survive the update instead of being reset to the desired spec's
+	// nil (which defaults back to 1) (B6). When spec.replicas support lands,
+	// this becomes "preserve only when the CR leaves replicas unset".
+	replicas := found.Spec.Replicas
 	found.Spec = desired.Spec
+	found.Spec.Replicas = replicas
 
 	// Update annotations to trigger rollout
 	if found.Spec.Template.Annotations == nil {
