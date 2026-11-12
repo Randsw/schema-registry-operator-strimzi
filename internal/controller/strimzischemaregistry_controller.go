@@ -173,6 +173,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err = r.migrateFinalizer(ctx, instance, logger); err != nil {
 		logger.Error(err, "Failed to migrate finalizer")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
@@ -263,6 +264,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		logger.Error(err, "Failed to get strimzi cluster name from labels")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -270,6 +272,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	result, err := r.handleSecretRotation(ctx, instance, logger, strimziClusterName)
 	if err != nil {
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return result, err
 	}
 	if result.RequeueAfter > 0 {
@@ -283,6 +286,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	result, tlsRecheck, err := r.handleTLSCertExpiry(ctx, instance, logger, strimziClusterName)
 	if err != nil {
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return result, err
 	}
 	if result.RequeueAfter > 0 {
@@ -294,6 +298,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	result, err = r.handleUserTLSSecretRotation(ctx, instance, logger)
 	if err != nil {
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return result, err
 	}
 	if result.RequeueAfter > 0 {
@@ -309,12 +314,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to create deployment")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		err = r.Create(ctx, deployment)
 		if err != nil {
 			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		// Deployment created successfully - return and requeue
@@ -323,6 +330,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	} else if err != nil {
 		logger.Error(err, "Failed to get Deployment")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -331,6 +339,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		logger.Error(err, "Failed to reconcile deployment spec changes")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 	if specChanged {
@@ -338,6 +347,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to update deployment after spec change")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		monitoring.StrimziSchemaRegistryDeploymentUpdateTotal.Inc()
@@ -356,6 +366,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to update CR Status")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 	}
@@ -367,12 +378,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to create service")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		err = r.Create(ctx, svc)
 		if err != nil {
 			logger.Error(err, "Failed to create new Service", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		// Service created successfully - return and requeue
@@ -381,6 +394,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	} else if err != nil {
 		logger.Error(err, "Failed to get Service")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -389,6 +403,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		logger.Error(err, "Failed to create desired service spec")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -433,6 +448,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to update service after spec change")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
@@ -443,6 +459,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err = r.reconcileNetworkPolicy(ctx, instance, logger); err != nil {
 		logger.Error(err, "Failed to reconcile NetworkPolicy")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -454,6 +471,40 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{RequeueAfter: tlsRecheck}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// setReconcileErrorStatus marks the CR as failing reconciliation: a
+// Ready=False condition with a distinct ReconcileError reason carrying the
+// error message, plus status.status=ReconcileError for the printcolumn.
+// Without it, terminal-ish failures (a missing KafkaUser, a missing
+// bootstrap listener, a missing cluster CA secret, ...) returned errors with
+// backoff while the Ready condition stayed stale, leaving nothing on the CR
+// to explain why nothing is happening (B7). The write is skipped when
+// nothing changed, and write failures are logged instead of returned: the
+// original reconcile error is the one that matters. A later successful
+// reconcile overwrites the condition via readyCondition, clearing the error
+// state.
+func (r *StrimziSchemaRegistryReconciler) setReconcileErrorStatus(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	origStatus *strimziregistryoperatorv1alpha1.StrimziSchemaRegistryStatus,
+	logger logr.Logger,
+	reconcileErr error,
+) {
+	meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "ReconcileError",
+		Message:            reconcileErr.Error(),
+		ObservedGeneration: instance.Generation,
+	})
+	instance.Status.Status = "ReconcileError"
+	if equality.Semantic.DeepEqual(origStatus, instance.Status) {
+		return
+	}
+	if err := r.Status().Update(ctx, instance); err != nil {
+		logger.Error(err, "Failed to update CR status with the reconcile error")
+	}
 }
 
 // readyCondition builds the Ready status condition for the Schema Registry
