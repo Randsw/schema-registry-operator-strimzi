@@ -16,8 +16,8 @@ type MetricDescription struct {
 // metricsDescription is a map of string keys (metrics) to MetricDescription values (Name, Help).
 var metricDescription = map[string]MetricDescription{
 	"StrimziSchemaRegistryCurrentInstanceCount": {
-		Name: "strimzi_schema_register_instance_current_count",
-		Help: "Current number of running strimzi schema register instance in cluster",
+		Name: "strimzi_schema_registry_instance_current_count",
+		Help: "Current number of running strimzi schema registry instances in cluster",
 		Type: "Gauge",
 	},
 	"StrimziSchemaRegistryReconcileErrorsTotal": {
