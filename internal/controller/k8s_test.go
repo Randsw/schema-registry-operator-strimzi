@@ -145,6 +145,10 @@ func TestUpdateExistingDeploymentBootstrapDrift(t *testing.T) {
 				Annotations: map[string]string{keyPrefix + "/specHash": hash},
 			},
 			Spec: apps.DeploymentSpec{
+				// Operator-created deployments carry the stable identity
+				// selector (F1); without it updateExistingDeployment would
+				// treat this fixture as a legacy selector and migrate it.
+				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
 				Template: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{
 						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1", Env: env},
@@ -260,6 +264,10 @@ func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
 				Annotations: map[string]string{keyPrefix + "/specHash": hash},
 			},
 			Spec: apps.DeploymentSpec{
+				// Operator-created deployments carry the stable identity
+				// selector (F1); without it updateExistingDeployment would
+				// treat this fixture as a legacy selector and migrate it.
+				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
 				Template: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
 				},
@@ -379,6 +387,10 @@ func TestUpdateExistingDeploymentPreservesManualReplicas(t *testing.T) {
 				Annotations: map[string]string{keyPrefix + "/specHash": hash},
 			},
 			Spec: apps.DeploymentSpec{
+				// Operator-created deployments carry the stable identity
+				// selector (F1); without it updateExistingDeployment would
+				// treat this fixture as a legacy selector and migrate it.
+				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
 				Replicas: replicas,
 				Template: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
@@ -554,6 +566,10 @@ func TestUpdateExistingDeploymentAppliesCRReplicas(t *testing.T) {
 			Annotations: map[string]string{keyPrefix + "/specHash": "stale-hash"},
 		},
 		Spec: apps.DeploymentSpec{
+			// Operator-created deployments carry the stable identity selector
+			// (F1); without it updateExistingDeployment would treat this
+			// fixture as a legacy selector and migrate it.
+			Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
 			// A manual `kubectl scale` left the Deployment at 5 replicas.
 			Replicas: ptr.To(int32(5)),
 			Template: corev1.PodTemplateSpec{

@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Resource name suffixes and fixed names used throughout the operator.
@@ -60,28 +61,45 @@ const (
 	dnsPodValue       = "kube-dns"
 )
 
-// labelsForStrimziSchemaRegistryOperator returns the standard set of labels
-// for resources managed by the Schema Registry operator.
-func labelsForStrimziSchemaRegistryOperator(name, image, kafkaClusterName string) map[string]string {
+// selectorLabelsForStrimziSchemaRegistryOperator returns the stable identity
+// label subset used as the Deployment selector. The Deployment selector field
+// is immutable at the API server, so it must never contain labels that can
+// change over the lifetime of the resource: app.kubernetes.io/version is
+// derived from the container image tag and strimzi.io/cluster from the CR
+// label, so both are excluded (they remain on the Deployment and pod labels,
+// which are mutable). The returned subset is always contained in
+// labelsForStrimziSchemaRegistryOperator, so the selector keeps matching the
+// pods.
+func selectorLabelsForStrimziSchemaRegistryOperator(name string) map[string]string {
 	return map[string]string{
 		"app":                          name,
 		"strimzi-schema-registry":      name,
 		"app.kubernetes.io/instance":   name,
-		"app.kubernetes.io/managed-by": "strimzi-registry-operator",
 		"app.kubernetes.io/name":       "strimzischemaregistry",
+		"app.kubernetes.io/managed-by": "strimzi-registry-operator",
 		"app.kubernetes.io/part-of":    name,
-		"app.kubernetes.io/version": func() string {
-			parts := strings.Split(image, ":")
-			if len(parts) > 1 {
-				last := parts[len(parts)-1]
-				if !strings.Contains(last, "/") {
-					return last
-				}
-			}
-			return "latest"
-		}(),
-		"strimzi.io/cluster": kafkaClusterName,
 	}
+}
+
+// labelsForStrimziSchemaRegistryOperator returns the standard set of labels
+// for resources managed by the Schema Registry operator. It extends the
+// stable selector subset with the mutable app.kubernetes.io/version (derived
+// from the image tag) and strimzi.io/cluster (from the CR label); those two
+// must never be used in a Deployment selector (F1).
+func labelsForStrimziSchemaRegistryOperator(name, image, kafkaClusterName string) map[string]string {
+	ls := selectorLabelsForStrimziSchemaRegistryOperator(name)
+	ls["app.kubernetes.io/version"] = func() string {
+		parts := strings.Split(image, ":")
+		if len(parts) > 1 {
+			last := parts[len(parts)-1]
+			if !strings.Contains(last, "/") {
+				return last
+			}
+		}
+		return "latest"
+	}()
+	ls["strimzi.io/cluster"] = kafkaClusterName
+	return ls
 }
 
 // createDeployment creates a new Deployment along with its dependent secrets.
@@ -305,8 +323,8 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	podSpec.Spec.Volumes = mergeVolumes(podVolume, podSpec.Spec.Volumes)
 	ls := labelsForStrimziSchemaRegistryOperator(instance.Name, instance.Spec.Template.Spec.Containers[0].Image, kafkaClusterName)
 	// Operator labels override user labels on conflicting keys; the
-	// Deployment selector keeps using ls only, so user labels never narrow
-	// or break the selector.
+	// Deployment selector uses the stable identity subset only, so user
+	// labels never narrow or break the selector.
 	podSpec.Labels = mergeStringMaps(podSpec.Labels, ls)
 	// Start from the user annotations so they are preserved, then set the
 	// operator-managed rollout markers (which override conflicting keys).
@@ -348,7 +366,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 			// so CRs created before the field existed behave unchanged.
 			Replicas: ptr.To(effectiveReplicas(instance)),
 			Selector: &metav1.LabelSelector{
-				MatchLabels: ls,
+				MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(instance.Name),
 			},
 			Template: podSpec,
 		},
@@ -1805,6 +1823,18 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, found *apps.Deployment,
 ) (*apps.Deployment, bool, error) {
+	// F1: the Deployment selector is immutable at the API server. A
+	// Deployment created before the stable-selector fix carries mutable
+	// labels (app.kubernetes.io/version, strimzi.io/cluster) in its selector,
+	// so any image or cluster-label change makes the desired selector differ
+	// and the in-place update is rejected with "spec.selector: field is
+	// immutable". The selector cannot be rewritten: delete and re-create the
+	// Deployment in this reconcile instead. The check runs before the
+	// spec-hash short-circuit so the migration happens even in steady state.
+	if !deploymentSelectorMatches(found, instance.Name) {
+		return r.recreateDeploymentForLegacySelector(instance, ctx, logger, found)
+	}
+
 	// Get Kafka bootstrap server and cluster name (read-only, no side effects)
 	kafkaBootstrapServer, kafkaClusterName, err := r.getKafkaBootstrapServers(instance, ctx, logger)
 	if err != nil {
@@ -1952,6 +1982,60 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	found.Annotations[keyPrefix+"/specHash"] = desiredHash
 
 	return found, true, nil
+}
+
+// deploymentSelectorMatches reports whether the existing Deployment's
+// selector equals the stable identity selector the operator desires. A
+// missing selector (a hand-crafted object) counts as a legacy selector and
+// triggers the migration.
+func deploymentSelectorMatches(found *apps.Deployment, name string) bool {
+	existing := map[string]string{}
+	if found.Spec.Selector != nil && found.Spec.Selector.MatchLabels != nil {
+		existing = found.Spec.Selector.MatchLabels
+	}
+	return equality.Semantic.DeepEqual(existing, selectorLabelsForStrimziSchemaRegistryOperator(name))
+}
+
+// recreateDeploymentForLegacySelector migrates a Deployment whose selector
+// differs from the desired stable identity selector. The selector field is
+// immutable, so the migration cannot be an in-place update: the Deployment is
+// deleted and re-created in the same reconcile via the createDeployment path,
+// which bootstraps all dependent secrets exactly like a first reconcile.
+// Schema Registry is stateless (its state lives in the Kafka topic), so the
+// one-time rollout is safe. Returns the re-created Deployment with
+// specChanged=false: the object already exists in its desired form and needs
+// no further update this pass.
+func (r *StrimziSchemaRegistryReconciler) recreateDeploymentForLegacySelector(
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	ctx context.Context,
+	logger logr.Logger,
+	found *apps.Deployment,
+) (*apps.Deployment, bool, error) {
+	logger.Info("Deployment selector differs from the desired stable identity selector; recreating the Deployment (one-time migration, the selector field is immutable)",
+		"Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace,
+		"ExistingSelector", found.Spec.Selector.MatchLabels)
+
+	// Background propagation removes the Deployment immediately while the
+	// garbage collector cleans up the ReplicaSet and pods asynchronously, so
+	// the re-create below does not race the delete.
+	if err := r.Delete(ctx, found, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !errors.IsNotFound(err) {
+		logger.Error(err, "Failed to delete the Deployment with a legacy selector")
+		return nil, false, err
+	}
+	dep, err := r.createDeployment(instance, ctx, logger)
+	if err != nil {
+		logger.Error(err, "Failed to build the replacement Deployment during the selector migration")
+		return nil, false, err
+	}
+	if err := r.Create(ctx, dep); err != nil {
+		logger.Error(err, "Failed to create the replacement Deployment during the selector migration")
+		return nil, false, err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "DeploymentRecreated", "",
+			"Deployment %s had a selector containing mutable labels (e.g. app.kubernetes.io/version, strimzi.io/cluster); the selector field is immutable, so it was deleted and re-created with the stable identity selector as a one-time migration (Schema Registry is stateless)", dep.Name)
+	}
+	return dep, false, nil
 }
 
 // deploymentBootstrapServers returns the value of the operator-managed

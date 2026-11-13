@@ -408,12 +408,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	// The Deployment's effective desired replica count: Spec.Replicas when
 	// set (e.g. by a manual kubectl scale, which B6 preserves), else the
-	// operator default of 1.
+	// operator default of 1. updatedDep equals found in the steady state and
+	// is the freshly re-created Deployment after a selector migration (F1),
+	// whose empty status correctly reports NotReady until the rollout lands.
 	desiredReplicas := int32(1)
-	if found.Spec.Replicas != nil {
-		desiredReplicas = *found.Spec.Replicas
+	if updatedDep.Spec.Replicas != nil {
+		desiredReplicas = *updatedDep.Spec.Replicas
 	}
-	condition := readyCondition(desiredReplicas, found.Status.Replicas, found.Status.ReadyReplicas, instance.Generation)
+	condition := readyCondition(desiredReplicas, updatedDep.Status.Replicas, updatedDep.Status.ReadyReplicas, instance.Generation)
 	meta.SetStatusCondition(&instance.Status.Conditions, condition)
 	if condition.Status == metav1.ConditionTrue {
 		instance.Status.Status = "Ok"
