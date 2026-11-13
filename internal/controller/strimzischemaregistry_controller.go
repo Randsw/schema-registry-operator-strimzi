@@ -748,10 +748,6 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 			logger.Error(err, "Failed to create jks secret after user and cluster CA secret changed")
 			return ctrl.Result{}, err
 		}
-		// Renew REST API TLS secret after cluster CA secret changed
-		if err = r.renewTLSSecret(instance, ctx, logger); err != nil {
-			return ctrl.Result{}, err
-		}
 	} else if userSecretChanged && !clusterCASecretChanged {
 		newSecret, newSecretCreated, err = r.createSecret(instance, ctx, logger, strimziClusterName,
 			nil, userSecret, auth)
@@ -766,11 +762,12 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 			logger.Error(err, "Failed to create jks secret after cluster CA secret changed")
 			return ctrl.Result{}, err
 		}
-		// Renew REST API TLS secret after cluster CA secret changed
-		if err = r.renewTLSSecret(instance, ctx, logger); err != nil {
-			return ctrl.Result{}, err
-		}
 	}
+	// F2: the REST API TLS certificate is NOT renewed here anymore. The
+	// renewal is centralized in handleTLSCertExpiry, which detects a cluster
+	// CA rotation via the CA-version annotation on the -tls secret in every
+	// auth mode; it runs on the reconcile following this one (this path
+	// returns a 1s requeue).
 	// Only persist the secret if createSecret indicated it was newly
 	// generated. A rebuilt secret carrying the stale secret's
 	// ResourceVersion is Updated in place (B4), so the -jks secret is never
@@ -1114,39 +1111,6 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Complete(r)
 }
 
-// renewTLSSecret creates and applies a new TLS secret for Schema Registry REST API.
-// It is a no-op when SecureHTTP is disabled or a custom TLSSecretName is provided.
-// Uses controllerutil.CreateOrUpdate to handle AlreadyExists gracefully.
-func (r *StrimziSchemaRegistryReconciler) renewTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context, logger logr.Logger) error {
-	if !instance.Spec.SecureHTTP || instance.Spec.TLSSecretName != "" {
-		return nil
-	}
-	strimziClusterName, err := getStrimziClusterName(instance)
-	if err != nil {
-		logger.Error(err, "Failed to get strimzi cluster name from labels")
-		return err
-	}
-	TLSSecret, exists, err := r.createTLSSecret(instance, ctx, logger, strimziClusterName)
-	if err != nil {
-		logger.Error(err, "Failed to format TLS secret")
-		return err
-	}
-	// Update in place when the secret already exists so it is never absent
-	// for pods mounting it; createTLSSecret carries the existing
-	// ResourceVersion to make the Update valid.
-	if exists {
-		err = r.Update(ctx, TLSSecret)
-	} else {
-		err = r.Create(ctx, TLSSecret)
-	}
-	if err != nil {
-		logger.Error(err, "Failed to create or update TLS secret")
-		return err
-	}
-	logger.Info("Secret for Schema Registry TLS created/updated successfully", "Secret.Name", TLSSecret.Name)
-	return nil
-}
-
 // updateInstanceCountMetric recomputes the instance count gauge from the list
 // of StrimziSchemaRegistry CRs. Recomputing (instead of inc/dec bookkeeping)
 // keeps the metric correct across operator restarts, CR deletions and missed
@@ -1187,10 +1151,12 @@ func (r *StrimziSchemaRegistryReconciler) migrateFinalizer(
 
 // handleTLSCertExpiry renews the operator-managed REST API TLS certificate
 // (spec.securehttp with no custom tlssecretname) when it expires within
-// tlsCertRenewalThreshold. The renewed secret is updated in place and the
-// deployment is rolled via a tlsVersion pod-template annotation so the JVM
-// reloads the keystore. Custom TLS secrets are user-managed and never
-// touched.
+// tlsCertRenewalThreshold OR when the cluster CA that signed it has rotated
+// (F2: detected via the CA-version annotation recorded on the -tls secret,
+// in every auth mode — not only mTLS). The renewed secret is updated in
+// place and the deployment is rolled via a tlsVersion pod-template annotation
+// so the JVM reloads the keystore. Custom TLS secrets are user-managed and
+// never touched.
 //
 // It returns the immediate reconcile result (a short requeue when it took an
 // action, which Reconcile propagates directly) plus the periodic recheck
@@ -1221,32 +1187,68 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 		result, err := r.recreateMissingTLSSecret(ctx, instance, logger, strimziClusterName)
 		return result, 0, err
 	}
-	keystore := tlsSecret.Data["tls-keystore.jks"]
-	password, ok := tlsSecret.Data["keystore_password"]
-	if len(keystore) == 0 || !ok {
-		logger.Info("REST API TLS secret has no keystore material; skipping expiry check")
-		return ctrl.Result{}, tlsCertRecheckInterval, nil
+	// F2: renew when the cluster CA that signed the certificate has rotated,
+	// independent of the Kafka auth mode and of the certificate's expiry
+	// date. The signing CA cert secret's resourceVersion is recorded on the
+	// -tls secret at creation/renewal; a mismatch means Strimzi rotated the
+	// cluster CA and the REST API would keep serving a certificate signed by
+	// the retired CA until the annual renewal window. A missing annotation
+	// (secrets created before this tracking existed) also counts as changed,
+	// converging legacy secrets on the first reconcile after an operator
+	// upgrade.
+	caCertSecret := &v1.Secret{}
+	caChanged := false
+	err = r.Get(ctx, types.NamespacedName{Name: strimziClusterName + clusterCASuffix, Namespace: instance.Namespace}, caCertSecret)
+	switch {
+	case err == nil:
+		caChanged = tlsSecret.Annotations[CAVersionKey] != caCertSecret.ResourceVersion
+	case errors.IsNotFound(err):
+		// The cluster CA secret is gone: the version cannot be compared, so
+		// only the expiry-based renewal applies this pass.
+		logger.Info("Cluster CA cert secret not found; skipping the CA-version renewal check",
+			"Secret.Name", strimziClusterName+clusterCASuffix)
+	default:
+		logger.Error(err, "Failed to get cluster CA cert secret for the CA-version renewal check")
+		return ctrl.Result{}, 0, err
 	}
 
-	cp := certprocessor.NewCertProcessor(logger)
-	notAfter, err := cp.KeystoreCertExpiry(ctx, keystore, string(password))
-	if err != nil {
-		// A malformed keystore must not block reconciliation; log and skip,
-		// but keep the periodic recheck so the cert is inspected again even
-		// without watch events.
-		logger.Error(err, "Failed to read REST API TLS certificate expiry; skipping renewal check")
-		return ctrl.Result{}, tlsCertRecheckInterval, nil
-	}
-	if time.Until(notAfter) > tlsCertRenewalThreshold {
-		// Valid outside the renewal window: schedule the next check so the
-		// renewal happens on time even if no watch event ever fires again.
-		// An already-expired or near-expiry certificate (time.Until <=
-		// threshold) falls through to the renewal below.
-		return ctrl.Result{}, certRecheckInterval(notAfter), nil
+	var renewReason string
+	if caChanged {
+		logger.Info("Cluster CA rotated; renewing the REST API TLS certificate",
+			"ClusterCASecret", strimziClusterName+clusterCASuffix,
+			"RecordedCAVersion", tlsSecret.Annotations[CAVersionKey],
+			"CurrentCAVersion", caCertSecret.ResourceVersion)
+		renewReason = fmt.Sprintf("cluster CA secret %s changed", strimziClusterName+clusterCASuffix)
+	} else {
+		keystore := tlsSecret.Data["tls-keystore.jks"]
+		password, ok := tlsSecret.Data["keystore_password"]
+		if len(keystore) == 0 || !ok {
+			logger.Info("REST API TLS secret has no keystore material; skipping expiry check")
+			return ctrl.Result{}, tlsCertRecheckInterval, nil
+		}
+
+		cp := certprocessor.NewCertProcessor(logger)
+		notAfter, err := cp.KeystoreCertExpiry(ctx, keystore, string(password))
+		if err != nil {
+			// A malformed keystore must not block reconciliation; log and
+			// skip, but keep the periodic recheck so the cert is inspected
+			// again even without watch events.
+			logger.Error(err, "Failed to read REST API TLS certificate expiry; skipping renewal check")
+			return ctrl.Result{}, tlsCertRecheckInterval, nil
+		}
+		if time.Until(notAfter) > tlsCertRenewalThreshold {
+			// Valid outside the renewal window: schedule the next check so the
+			// renewal happens on time even if no watch event ever fires again.
+			// An already-expired or near-expiry certificate (time.Until <=
+			// threshold) falls through to the renewal below.
+			return ctrl.Result{}, certRecheckInterval(notAfter), nil
+		}
+
+		logger.Info("REST API TLS certificate is close to expiry, renewing",
+			"NotAfter", notAfter.Format(time.RFC3339), "Threshold", tlsCertRenewalThreshold.String())
+		renewReason = fmt.Sprintf("REST API TLS certificate expires at %s", notAfter.Format(time.RFC3339))
 	}
 
-	logger.Info("REST API TLS certificate is close to expiry, renewing",
-		"NotAfter", notAfter.Format(time.RFC3339), "Threshold", tlsCertRenewalThreshold.String())
 	newSecret, exists, err := r.createTLSSecret(instance, ctx, logger, strimziClusterName)
 	if err != nil {
 		logger.Error(err, "Failed to build renewed REST API TLS secret")
@@ -1264,8 +1266,7 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
 	if r.Recorder != nil {
 		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "TLSCertificateRenewed", "",
-			"REST API TLS certificate expires at %s; renewed it and rolling the deployment",
-			notAfter.Format(time.RFC3339))
+			"%s; renewed it and rolling the deployment", renewReason)
 	}
 
 	// Roll the deployment so the JVM reloads the renewed keystore. The

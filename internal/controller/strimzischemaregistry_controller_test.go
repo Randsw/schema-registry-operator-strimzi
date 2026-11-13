@@ -451,6 +451,19 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				return JKSResourceVersionNewInt, nil
 			}, time.Minute, time.Second).Should(BeNumerically(">", JKSResourceVersionOldInt))
 
+			// F2: the REST API TLS renewal is centralized in
+			// handleTLSCertExpiry, which runs on the reconcile following the
+			// rotation (the rotation pass returns a 1s requeue).
+			By("Reconciling again so handleTLSCertExpiry renews the TLS secret")
+			controllerReconciler = &StrimziSchemaRegistryReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
 			// Read updated TLS secret using Eventually
 			Eventually(func() (int, error) {
 				secret := &corev1.Secret{}
@@ -2068,6 +2081,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Update(ctx, caKeySecret)).To(Succeed())
 
 			By("Reconciling to trigger secret rotation and TLS renewal")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			// F2: the rotation pass rebuilds the -jks secret and returns a 1s
+			// requeue; the TLS renewal happens in handleTLSCertExpiry on the
+			// following reconcile.
+			By("Reconciling again so handleTLSCertExpiry renews the TLS secret")
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -4041,4 +4061,5 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			}, time.Minute, time.Second).Should(ContainSubstring("DeploymentRecreated"))
 		})
 	})
+
 })

@@ -1292,61 +1292,6 @@ func TestGetStrimziClusterName(t *testing.T) {
 	})
 }
 
-// TestRenewTLSSecret_NoOp covers T1: verify that renewTLSSecret is a no-op
-// when SecureHTTP is false or a custom TLSSecretName is provided. Also tests
-// that a missing strimzi.io/cluster label causes an error.
-func TestRenewTLSSecret_NoOp(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
-	_ = corev1.AddToScheme(scheme)
-
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	reconciler := &StrimziSchemaRegistryReconciler{
-		Client: fakeClient,
-		Scheme: scheme,
-	}
-
-	t.Run("SecureHTTP=false is no-op", func(t *testing.T) {
-		inst := newTestInstance()
-		inst.Spec.SecureHTTP = false
-		inst.Spec.TLSSecretName = ""
-		inst.Labels = map[string]string{
-			"strimzi.io/cluster": "test-cluster",
-		}
-
-		err := reconciler.renewTLSSecret(inst, context.Background(), logr.Logger{})
-		if err != nil {
-			t.Errorf("expected no error when SecureHTTP=false, got: %v", err)
-		}
-	})
-
-	t.Run("TLSSecretName set is no-op", func(t *testing.T) {
-		inst := newTestInstance()
-		inst.Spec.SecureHTTP = true
-		inst.Spec.TLSSecretName = "my-custom-tls"
-		inst.Labels = map[string]string{
-			"strimzi.io/cluster": "test-cluster",
-		}
-
-		err := reconciler.renewTLSSecret(inst, context.Background(), logr.Logger{})
-		if err != nil {
-			t.Errorf("expected no error when TLSSecretName is set, got: %v", err)
-		}
-	})
-
-	t.Run("missing strimzi.io/cluster label returns error", func(t *testing.T) {
-		inst := newTestInstance()
-		inst.Spec.SecureHTTP = true
-		inst.Spec.TLSSecretName = ""
-		inst.Labels = nil
-
-		err := reconciler.renewTLSSecret(inst, context.Background(), logr.Logger{})
-		if err == nil {
-			t.Error("expected error when strimzi.io/cluster label is missing, got nil")
-		}
-	})
-}
-
 // TestBuildProbesInitialDelay verifies that readiness and liveness probes no
 // longer carry an InitialDelaySeconds value (the startup probe already gates
 // them), while the startup probe keeps its 30s initial delay.

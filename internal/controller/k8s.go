@@ -1612,6 +1612,10 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 	if err != nil {
 		return nil, false, err
 	}
+	// F2: record the signing cluster CA cert secret's resourceVersion on the
+	// -tls secret. handleTLSCertExpiry compares it with the current CA
+	// secret's version so a cluster CA rotation renews the REST API
+	// certificate in every auth mode, not only mTLS.
 	jksTLSSecret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jksTLSSecretName,
@@ -1619,6 +1623,9 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 			Labels: map[string]string{
 				"app":  "strimzi-schema-registry",
 				"user": instance.Name,
+			},
+			Annotations: map[string]string{
+				CAVersionKey: clusterCertSecret.ResourceVersion,
 			},
 		},
 		Type: v1.SecretTypeOpaque,
