@@ -2166,8 +2166,8 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	if np.Spec.Ingress[0].Ports[0].Port.IntVal != 8081 {
 		t.Errorf("expected ingress on SR listener port 8081, got %d", np.Spec.Ingress[0].Ports[0].Port.IntVal)
 	}
-	if len(np.Spec.Egress) != 2 {
-		t.Fatalf("expected two egress rules (Kafka + DNS), got %v", np.Spec.Egress)
+	if len(np.Spec.Egress) != 3 {
+		t.Fatalf("expected three egress rules (Kafka + DNS + inter-instance), got %v", np.Spec.Egress)
 	}
 	if len(np.Spec.Egress[0].Ports) != 1 {
 		t.Fatalf("expected a single port on the Kafka egress rule, got %v", np.Spec.Egress[0].Ports)
@@ -2218,6 +2218,24 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	}
 	if dns.To[0].PodSelector.MatchLabels[dnsPodLabel] != dnsPodValue {
 		t.Errorf("expected DNS pod selector from constants %s=%s, got %v", dnsPodLabel, dnsPodValue, dns.To[0].PodSelector.MatchLabels)
+	}
+
+	// Inter-instance egress: replicas advertise their own pod IP as
+	// host.name, so peer forwarding connects pod-to-pod on the listener
+	// port. Without this rule a multi-replica registry with the policy
+	// enabled cannot forward requests between instances.
+	peers := np.Spec.Egress[2]
+	if len(peers.To) != 1 {
+		t.Fatalf("expected one peer on the inter-instance egress rule, got %v", peers.To)
+	}
+	if peers.To[0].PodSelector == nil || peers.To[0].PodSelector.MatchLabels["app"] != "test-sr" {
+		t.Errorf("expected inter-instance peer selector app=test-sr, got %v", peers.To[0].PodSelector)
+	}
+	if len(peers.Ports) != 1 || peers.Ports[0].Port.IntVal != 8081 {
+		t.Errorf("expected inter-instance egress on the listener port 8081, got %v", peers.Ports)
+	}
+	if peers.Ports[0].Protocol == nil || *peers.Ports[0].Protocol != corev1.ProtocolTCP {
+		t.Errorf("expected inter-instance egress protocol TCP, got %v", peers.Ports[0].Protocol)
 	}
 	if dnsNamespaceLabel != "kubernetes.io/metadata.name" || dnsNamespaceName != "kube-system" || dnsPodLabel != "k8s-app" || dnsPodValue != "kube-dns" {
 		t.Errorf("DNS egress constants changed; update the README NetworkPolicy section to match the new assumption: %s=%s in namespace %s (label %s)",

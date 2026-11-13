@@ -1444,6 +1444,26 @@ func buildNetworkPolicy(instance *strimziregistryoperatorv1alpha1.StrimziSchemaR
 						{Protocol: &tcp, Port: &dnsPortTarget},
 					},
 				},
+				{
+					// Inter-instance traffic: every replica advertises its own
+					// pod IP as host.name (downward API), so a replica
+					// forwarding a request to a peer connects to the peer pod
+					// directly on the listener port. Without this rule a
+					// multi-replica registry with the policy enabled cannot
+					// forward requests between instances.
+					To: []networkingv1.NetworkPolicyPeer{
+						{
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"app": instance.Name,
+								},
+							},
+						},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: &tcp, Port: &listenerPortTarget},
+					},
+				},
 			},
 		},
 	}, nil

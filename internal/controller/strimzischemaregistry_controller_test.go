@@ -3066,13 +3066,17 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(np.Spec.Ingress).To(HaveLen(1))
 			Expect(np.Spec.Ingress[0].Ports).To(HaveLen(1))
 			Expect(np.Spec.Ingress[0].Ports[0].Port.IntVal).To(Equal(int32(8081)))
-			Expect(np.Spec.Egress).To(HaveLen(2))
+			Expect(np.Spec.Egress).To(HaveLen(3))
 			Expect(np.Spec.Egress[0].To).To(HaveLen(1))
 			Expect(np.Spec.Egress[0].To[0].PodSelector.MatchLabels["strimzi.io/cluster"]).To(Equal("kafka-cluster"))
 			// DNS egress to kube-dns is required for bootstrap name resolution.
 			Expect(np.Spec.Egress[1].Ports).To(HaveLen(2))
 			Expect(np.Spec.Egress[1].Ports[0].Port.IntVal).To(Equal(int32(53)))
 			Expect(np.Spec.Egress[1].To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"]).To(Equal("kube-system"))
+			// Inter-instance egress is required for multi-replica peer
+			// forwarding: replicas advertise their own pod IP as host.name.
+			Expect(np.Spec.Egress[2].To[0].PodSelector.MatchLabels["app"]).To(Equal(SchemaRegistryName))
+			Expect(np.Spec.Egress[2].Ports[0].Port.IntVal).To(Equal(int32(8081)))
 		})
 	})
 
