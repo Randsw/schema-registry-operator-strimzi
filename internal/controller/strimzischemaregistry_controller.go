@@ -361,7 +361,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	condition := readyCondition(found.Status.Replicas, found.Status.ReadyReplicas, instance.Generation)
+	// The Deployment's effective desired replica count: Spec.Replicas when
+	// set (e.g. by a manual kubectl scale, which B6 preserves), else the
+	// operator default of 1.
+	desiredReplicas := int32(1)
+	if found.Spec.Replicas != nil {
+		desiredReplicas = *found.Spec.Replicas
+	}
+	condition := readyCondition(desiredReplicas, found.Status.Replicas, found.Status.ReadyReplicas, instance.Generation)
 	meta.SetStatusCondition(&instance.Status.Conditions, condition)
 	if condition.Status == metav1.ConditionTrue {
 		instance.Status.Status = "Ok"
@@ -515,11 +522,16 @@ func (r *StrimziSchemaRegistryReconciler) setReconcileErrorStatus(
 }
 
 // readyCondition builds the Ready status condition for the Schema Registry
-// Deployment. The Deployment is only Ready when it has at least one replica
-// and all of them are ready: immediately after creation Replicas and
-// ReadyReplicas are both 0, which must not be reported as Ready.
-func readyCondition(replicas, readyReplicas int32, generation int64) metav1.Condition {
-	if replicas > 0 && readyReplicas == replicas {
+// Deployment. The Deployment is only Ready when it has converged on the
+// desired replica count: exactly the desired number of replicas exist and
+// all of them are ready. Immediately after creation Replicas and
+// ReadyReplicas are both 0, which must not be reported as Ready; and
+// comparing Status.Replicas with ReadyReplicas alone reported Ready
+// prematurely during scale-down windows, while surplus replicas from a
+// previous scale were still terminating (B14). desiredReplicas is the
+// Deployment's Spec.Replicas (1 when unset, the operator default).
+func readyCondition(desiredReplicas, replicas, readyReplicas int32, generation int64) metav1.Condition {
+	if desiredReplicas > 0 && replicas == desiredReplicas && readyReplicas == desiredReplicas {
 		return metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionTrue,
@@ -529,10 +541,11 @@ func readyCondition(replicas, readyReplicas int32, generation int64) metav1.Cond
 		}
 	}
 	return metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             "NotReady",
-		Message:            fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready", readyReplicas, replicas),
+		Type:   "Ready",
+		Status: metav1.ConditionFalse,
+		Reason: "NotReady",
+		Message: fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready (%d running, %d desired)",
+			readyReplicas, desiredReplicas, replicas, desiredReplicas),
 		ObservedGeneration: generation,
 	}
 }

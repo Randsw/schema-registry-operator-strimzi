@@ -1453,33 +1453,40 @@ func TestBuildDeploymentSpecMergesUserTemplateFields(t *testing.T) {
 
 // TestReadyCondition is a table-driven test for the Ready condition helper: a
 // Deployment with zero replicas (as observed immediately after creation) must
-// not be reported as Ready, and partial readiness must report NotReady.
+// not be reported as Ready, partial readiness must report NotReady, and a
+// scale-down in progress (surplus replicas still running) must not report
+// Ready prematurely (B14).
 func TestReadyCondition(t *testing.T) {
 	tests := []struct {
-		name          string
-		replicas      int32
-		readyReplicas int32
-		wantStatus    metav1.ConditionStatus
-		wantReason    string
+		name            string
+		desiredReplicas int32
+		replicas        int32
+		readyReplicas   int32
+		wantStatus      metav1.ConditionStatus
+		wantReason      string
 	}{
-		{name: "0/0 replicas (fresh Deployment) is NotReady", replicas: 0, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
-		{name: "1/2 replicas is NotReady", replicas: 2, readyReplicas: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
-		{name: "2/2 replicas is Ready", replicas: 2, readyReplicas: 2, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
-		{name: "1/1 replica is Ready", replicas: 1, readyReplicas: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
-		{name: "0 ready of 1 replica is NotReady", replicas: 1, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "0/0 replicas (fresh Deployment) is NotReady", desiredReplicas: 1, replicas: 0, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "1/2 replicas is NotReady", desiredReplicas: 2, replicas: 2, readyReplicas: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "2/2 replicas is Ready", desiredReplicas: 2, replicas: 2, readyReplicas: 2, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
+		{name: "1/1 replica is Ready", desiredReplicas: 1, replicas: 1, readyReplicas: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
+		{name: "0 ready of 1 replica is NotReady", desiredReplicas: 1, replicas: 1, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		// B14: during a scale-down from 3 to 1 the old replicas are still
+		// running and ready; the deployment has not converged on the desired
+		// count and must not be reported as Ready.
+		{name: "scale-down in progress (3 running/ready, 1 desired) is NotReady", desiredReplicas: 1, replicas: 3, readyReplicas: 3, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cond := readyCondition(tt.replicas, tt.readyReplicas, 7)
+			cond := readyCondition(tt.desiredReplicas, tt.replicas, tt.readyReplicas, 7)
 			if cond.Type != "Ready" {
 				t.Errorf("expected condition type Ready, got %q", cond.Type)
 			}
 			if cond.Status != tt.wantStatus {
-				t.Errorf("replicas=%d readyReplicas=%d: expected status %v, got %v", tt.replicas, tt.readyReplicas, tt.wantStatus, cond.Status)
+				t.Errorf("desired=%d replicas=%d readyReplicas=%d: expected status %v, got %v", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.wantStatus, cond.Status)
 			}
 			if cond.Reason != tt.wantReason {
-				t.Errorf("replicas=%d readyReplicas=%d: expected reason %q, got %q", tt.replicas, tt.readyReplicas, tt.wantReason, cond.Reason)
+				t.Errorf("desired=%d replicas=%d readyReplicas=%d: expected reason %q, got %q", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.wantReason, cond.Reason)
 			}
 			if cond.ObservedGeneration != 7 {
 				t.Errorf("expected ObservedGeneration 7, got %d", cond.ObservedGeneration)

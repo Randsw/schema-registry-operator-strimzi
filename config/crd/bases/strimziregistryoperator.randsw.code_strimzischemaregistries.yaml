@@ -4080,6 +4080,12 @@ spec:
                   type: object
                 type: array
               status:
+                enum:
+                - Ok
+                - NotReady
+                - InvalidSpec
+                - InvalidTLSSecret
+                - ReconcileError
                 type: string
             required:
             - status
