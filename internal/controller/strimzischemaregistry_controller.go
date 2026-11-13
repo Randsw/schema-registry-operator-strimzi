@@ -210,6 +210,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if r.Recorder != nil {
 			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ClientAuthRequiresSecureHTTP", "",
 				"spec.clientauth is set but spec.securehttp is false; mutual TLS on the REST API will not be enabled")
+			// B12: reconciliation is skipped entirely for this invalid
+			// combination, so a previously created Deployment keeps serving
+			// with its current configuration and is no longer reconciled.
+			// Say so explicitly — the validation event above alone read like
+			// a mere mTLS downgrade.
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "",
+				"reconciliation is skipped until the invalid spec.clientauth/spec.securehttp combination is fixed; an existing Deployment (if any) keeps running with its current configuration and is no longer reconciled")
 		}
 		return ctrl.Result{}, nil
 	}

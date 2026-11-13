@@ -39,6 +39,7 @@ import (
 	eventsfake "k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // newTestKafkaCR returns a Kafka CR whose status exposes a "tls" listener so
@@ -1896,6 +1897,78 @@ func TestGetKafkaBootstrapServersError(t *testing.T) {
 			t.Errorf("expected the error to mention the missing status.listeners, got: %s", err.Error())
 		}
 	})
+}
+
+// TestReconcileSkipsInvalidClientAuthCombination covers B12: when
+// spec.clientauth is enabled without spec.securehttp, reconciliation is
+// skipped and a previously created Deployment keeps serving unreconciled.
+// The skip must be announced with a ReconciliationSkipped Warning event so
+// the stale-deployment situation is visible, not just the validation error.
+func TestReconcileSkipsInvalidClientAuthCombination(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	recorder := eventsfake.NewFakeRecorder(16)
+	events := recorder.Events
+
+	inst := newTestInstance()
+	inst.Spec.ClientAuth = true
+	inst.Spec.SecureHTTP = false
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst).
+		WithStatusSubresource(inst).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for the skipped reconciliation, got %v", result.RequeueAfter)
+	}
+
+	drainEvents := func() []string {
+		var got []string
+		for {
+			select {
+			case e := <-events:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+	got := drainEvents()
+	var hasValidation, hasSkip bool
+	for _, e := range got {
+		if strings.Contains(e, "ClientAuthRequiresSecureHTTP") {
+			hasValidation = true
+		}
+		if strings.Contains(e, "ReconciliationSkipped") {
+			hasSkip = true
+		}
+	}
+	if !hasValidation {
+		t.Errorf("expected a ClientAuthRequiresSecureHTTP event, got %v", got)
+	}
+	if !hasSkip {
+		t.Errorf("expected a ReconciliationSkipped event announcing the skipped reconciliation, got %v", got)
+	}
+
+	// The CR status must still report the invalid spec.
+	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
+		t.Fatalf("failed to get the updated CR: %v", err)
+	}
+	if updated.Status.Status != "InvalidSpec" {
+		t.Errorf("expected status.status InvalidSpec, got %q", updated.Status.Status)
+	}
 }
 
 func TestPortFromBootstrapServer(t *testing.T) {
