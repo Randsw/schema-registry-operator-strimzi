@@ -29,6 +29,7 @@ import (
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1781,6 +1782,64 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	if dnsNamespaceLabel != "kubernetes.io/metadata.name" || dnsNamespaceName != "kube-system" || dnsPodLabel != "k8s-app" || dnsPodValue != "kube-dns" {
 		t.Errorf("DNS egress constants changed; update the README NetworkPolicy section to match the new assumption: %s=%s in namespace %s (label %s)",
 			dnsPodLabel, dnsPodValue, dnsNamespaceName, dnsNamespaceLabel)
+	}
+}
+
+// TestReconcileNetworkPolicyPreservesAnnotations covers B8: updating an
+// existing NetworkPolicy must not wipe annotations set on it. The operator
+// never sets annotations and the desired spec carries none, so the previous
+// existing.Annotations = desired.Annotations assignment destroyed any
+// user-managed annotations on every spec change.
+func TestReconcileNetworkPolicyPreservesAnnotations(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+	_ = networkingv1.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	// PLAINTEXT avoids any JKS/user-secret requirements; only the Kafka CR
+	// with status listeners is needed.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
+
+	existing := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      inst.Name + networkPolicySuffix,
+			Namespace: inst.Namespace,
+			Annotations: map[string]string{
+				"example.com/owner": "platform-team",
+			},
+		},
+		// A stale spec (no egress rules) so the update path runs.
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": inst.Name}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), existing).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+	if err := r.reconcileNetworkPolicy(context.Background(), inst, logr.Logger{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &networkingv1.NetworkPolicy{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name + networkPolicySuffix, Namespace: inst.Namespace}, updated); err != nil {
+		t.Fatalf("failed to get the updated NetworkPolicy: %v", err)
+	}
+	if updated.Annotations["example.com/owner"] != "platform-team" {
+		t.Errorf("expected the existing annotation to be preserved, got %v", updated.Annotations)
+	}
+	// The spec must still be reconciled to the desired state.
+	if len(updated.Spec.Egress) == 0 {
+		t.Error("expected the spec to be updated with the desired egress rules")
 	}
 }
 

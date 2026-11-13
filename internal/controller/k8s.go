@@ -1380,8 +1380,9 @@ func portFromBootstrapServer(bootstrap string) (int32, error) {
 }
 
 // networkPoliciesEqual reports whether the existing NetworkPolicy matches the
-// desired state (spec and labels only; annotations are operator-managed only
-// when present, and no passthrough exists for them yet).
+// desired state (spec and labels only). Annotations are user-managed — the
+// operator never sets any and preserves the existing ones on update (B8) —
+// so they are deliberately excluded from the comparison.
 func networkPoliciesEqual(existing, desired *networkingv1.NetworkPolicy) bool {
 	if !equality.Semantic.DeepEqual(existing.Spec, desired.Spec) {
 		return false
@@ -1436,7 +1437,9 @@ func (r *StrimziSchemaRegistryReconciler) reconcileNetworkPolicy(
 	if !networkPoliciesEqual(existing, desired) {
 		existing.Spec = desired.Spec
 		existing.Labels = desired.Labels
-		existing.Annotations = desired.Annotations
+		// Annotations are user-managed and preserved: assigning the desired
+		// (always nil) annotations wiped any annotations set on the existing
+		// policy (B8).
 		logger.Info("NetworkPolicy changed, updating", "NetworkPolicy.Name", name.Name)
 		return r.Update(ctx, existing)
 	}
