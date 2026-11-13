@@ -350,6 +350,31 @@ func TestGenerateCSRKeyBits(t *testing.T) {
 	})
 }
 
+// TestGenerateCSRDNSNames covers B22: the CSR DNS names must include the
+// standard Kubernetes service DNS forms but not the non-standard
+// <cn>.svc.cluster entry, which is not a resolvable name.
+func TestGenerateCSRDNSNames(t *testing.T) {
+	cp := NewCertProcessor(logr.Logger{})
+	_, csr, err := cp.generateCSR("test-sr.default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := make(map[string]struct{}, len(csr.DNSNames))
+	for _, name := range csr.DNSNames {
+		got[name] = struct{}{}
+	}
+	for _, want := range []string{"test-sr", "test-sr.default", "test-sr.default.svc", "test-sr.default.svc.cluster.local"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("expected DNS name %q to be present, got %v", want, csr.DNSNames)
+		}
+	}
+	// B22: the non-standard <cn>.svc.cluster entry must be gone.
+	if _, ok := got["test-sr.default.svc.cluster"]; ok {
+		t.Errorf("expected the non-standard <cn>.svc.cluster DNS name to be dropped, got %v", csr.DNSNames)
+	}
+}
+
 // TestSignCSRNotBeforeSkewMargin covers B9: the signed REST API certificate
 // must carry a NotBefore in the past (a 5 minute back-dated skew margin) so
 // clients and kubelets with slightly fast clocks do not reject the fresh

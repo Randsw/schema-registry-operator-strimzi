@@ -652,13 +652,15 @@ func (cp *CertProcessor) generateCSR(cn string) (*rsa.PrivateKey, *x509.Certific
 	if err != nil {
 		return nil, nil, err
 	}
-	// Create CSR template
+	// Create CSR template. The DNS names cover the standard Kubernetes
+	// service DNS forms; the non-standard <cn>.svc.cluster entry is not
+	// included (B22) — it is not a resolvable name and only added noise.
 	csrTemplate := &x509.CertificateRequest{
 		Subject: pkix.Name{
 			Organization: []string{"Schema Registry"},
 			CommonName:   strings.Split(cn, ".")[0],
 		},
-		DNSNames: []string{strings.Split(cn, ".")[0], cn, cn + ".svc", cn + ".svc.cluster", cn + ".svc.cluster.local"},
+		DNSNames: []string{strings.Split(cn, ".")[0], cn, cn + ".svc", cn + ".svc.cluster.local"},
 	}
 	// Create CSR
 	csrDER, err := x509.CreateCertificateRequest(cryptorand.Reader, csrTemplate, serverKey)
