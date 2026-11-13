@@ -1843,6 +1843,61 @@ func TestReconcileNetworkPolicyPreservesAnnotations(t *testing.T) {
 	}
 }
 
+// TestGetKafkaBootstrapServersError covers B10: the bootstrap lookup error
+// must be actionable — it names the requested listener, the Kafka cluster
+// and the requesting CR, and lists the listeners the Kafka CR exposes.
+func TestGetKafkaBootstrapServersError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	newInstance := func(listener string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.Listener = listener
+		inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+		return inst
+	}
+
+	t.Run("missing listener names the request and the available listeners", func(t *testing.T) {
+		// The Kafka CR exposes only the "plain" listener; the CR asks for "tls".
+		kafkaCR := newTestKafkaCR("kafka-cluster", "default")
+		kafkaCR.Status.Listeners[0].Name = "plain"
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(newInstance("tls"), kafkaCR).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, _, err := r.getKafkaBootstrapServers(newInstance("tls"), context.Background(), logr.Logger{})
+		if err == nil {
+			t.Fatal("expected an error for a missing listener")
+		}
+		for _, want := range []string{`"tls"`, "kafka-cluster", "test-sr", "plain"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("expected the error to contain %q, got: %s", want, err.Error())
+			}
+		}
+	})
+
+	t.Run("no listeners at all is reported explicitly", func(t *testing.T) {
+		kafkaCR := newTestKafkaCR("kafka-cluster", "default")
+		kafkaCR.Status.Listeners = nil
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(newInstance("tls"), kafkaCR).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, _, err := r.getKafkaBootstrapServers(newInstance("tls"), context.Background(), logr.Logger{})
+		if err == nil {
+			t.Fatal("expected an error when the Kafka CR has no listeners")
+		}
+		if !strings.Contains(err.Error(), "no status.listeners") {
+			t.Errorf("expected the error to mention the missing status.listeners, got: %s", err.Error())
+		}
+	})
+}
+
 func TestPortFromBootstrapServer(t *testing.T) {
 	t.Run("valid host port", func(t *testing.T) {
 		port, err := portFromBootstrapServer("kafka-bootstrap.kafka.svc:9093")

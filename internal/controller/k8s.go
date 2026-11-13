@@ -778,7 +778,21 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 		}
 	}
 	logger.V(1).Info("No listeners found. Check CR config", "Listener", kafkaListener)
-	return "", "", go_err.New("cant find bootstrap address")
+	// Actionable error (B10): name the requested listener, the Kafka cluster
+	// and the CR that requested it, and the listeners the Kafka CR actually
+	// exposes, so the operator log and the CR status (B7) say what to fix.
+	available := make([]string, 0, len(kafkaCluster.Status.Listeners))
+	for _, listener := range kafkaCluster.Status.Listeners {
+		available = append(available, listener.Name)
+	}
+	if len(available) == 0 {
+		return "", "", fmt.Errorf(
+			"listener %q not found on Kafka cluster %s/%s: the Kafka CR exposes no status.listeners yet; requested by StrimziSchemaRegistry %s/%s",
+			kafkaListener, kafkaCluster.Name, kafkaCluster.Namespace, instance.Name, instance.Namespace)
+	}
+	return "", "", fmt.Errorf(
+		"listener %q not found on Kafka cluster %s/%s: available listeners are [%s]; check spec.listener on StrimziSchemaRegistry %s/%s",
+		kafkaListener, kafkaCluster.Name, kafkaCluster.Namespace, strings.Join(available, ", "), instance.Name, instance.Namespace)
 }
 
 // createSecret creates or returns an up-to-date JKS secret for the Schema Registry.
