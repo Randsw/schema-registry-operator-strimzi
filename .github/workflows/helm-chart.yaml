@@ -105,6 +105,10 @@ jobs:
         uses: helm/chart-releaser-action@v1.9.0
         with:
             charts_dir: helm-chart
+            # Skip upload when the chart version was already released: a
+            # re-run (or a merge that changes Chart.yaml without a version
+            # bump) must not fail on an already-existing release tag.
+            skip_existing: true
         env:
             CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
         if: steps.changed-files-helm-chart.outputs.chart_version_any_changed == 'true' && github.ref == 'refs/heads/main'
