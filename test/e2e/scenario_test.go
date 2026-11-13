@@ -17,8 +17,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 )
@@ -37,6 +40,11 @@ const (
 	// readyTimeout is the maximum time to wait for the CR or deployment
 	// transitions.
 	readyTimeout = 5 * time.Minute
+
+	// deploymentSuffix is appended to the CR name to form the name of the
+	// operator-created Schema Registry Deployment. It mirrors deploySuffix in
+	// internal/controller/k8s.go.
+	deploymentSuffix = "-deploy"
 )
 
 // The scenario runs three phases against the same Kafka cluster:
@@ -61,6 +69,17 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 		var err error
 		ca, err = fetchClusterCA(context.Background())
 		Expect(err).NotTo(HaveOccurred())
+	})
+
+	// Ginkgo randomizes spec order and every spec shares the same CR name and
+	// namespace, so each container must leave no CR behind: a leftover CR (for
+	// example with spec.replicas=2 from the multi-replica scenario) is still
+	// being reconciled by the operator while the next spec updates it, which
+	// both poisons the next spec's expectations and makes its CR updates race
+	// the reconcile (409 Conflict).
+	AfterAll(func() {
+		By("deleting the StrimziSchemaRegistry CR to leave a clean slate")
+		deleteRegistryCR(context.Background(), readyTimeout)
 	})
 
 	It("phase 1: deploys with clientauth disabled and passes the REST round-trip", func() {
@@ -143,16 +162,38 @@ func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas 
 	if replicas != nil {
 		cr.Spec.Replicas = replicas
 	}
+	desiredSpec := cr.Spec
 
-	existing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}, existing)
-	if apierrors.IsNotFound(err) {
-		Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-		return
-	}
-	Expect(err).NotTo(HaveOccurred())
-	existing.Spec = cr.Spec
-	Expect(k8sClient.Update(ctx, existing)).To(Succeed())
+	// The operator mutates the CR while reconciling it (it adds its finalizer
+	// and writes the status subresource), so a plain Get followed by Update
+	// races the reconcile and fails with a 409 Conflict. Retry on conflict,
+	// re-reading the object inside the closure so every attempt carries the
+	// latest resourceVersion.
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}, existing)
+		if apierrors.IsNotFound(err) {
+			err = k8sClient.Create(ctx, cr)
+			if apierrors.IsAlreadyExists(err) {
+				// Lost a create race; surface it as a conflict so the retry
+				// re-reads the object and takes the update path.
+				return apierrors.NewConflict(
+					schema.GroupResource{
+						Group:    strimziregistryoperatorv1alpha1.GroupVersion.Group,
+						Resource: "strimzischemaregistries",
+					},
+					cr.Name, err)
+			}
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		existing.Spec = desiredSpec
+		return k8sClient.Update(ctx, existing)
+	})
+	Expect(err).NotTo(HaveOccurred(),
+		"failed to apply the StrimziSchemaRegistry CR %s/%s", scenario.Namespace, scenario.RegistryName)
 }
 
 // waitForReadyCondition waits until the CR reports the Ready=True condition.
@@ -163,75 +204,71 @@ func waitForReadyCondition(ctx context.Context, timeout time.Duration) {
 }
 
 // waitForCondition polls the CR's Ready condition until match returns true.
+// The Get runs inside the Eventually closure, so a CR that does not exist yet
+// (or a transient API error) is retried instead of failing the spec on the
+// first poll.
 func waitForCondition(ctx context.Context, timeout time.Duration, match func(*metav1.Condition) bool) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	Eventually(func(g Gomega) {
 		cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
-		err := k8sClient.Get(ctx, types.NamespacedName{
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{
 			Name:      scenario.RegistryName,
 			Namespace: scenario.Namespace,
-		}, cr)
-		Expect(err).NotTo(HaveOccurred())
+		}, cr)).To(Succeed())
 
-		if cond := meta.FindStatusCondition(cr.Status.Conditions, "Ready"); cond != nil && match(cond) {
-			return
-		}
-		time.Sleep(5 * time.Second)
-	}
-	Fail(fmt.Sprintf("timed out after %s waiting for the Ready condition of %s/%s",
-		timeout, scenario.Namespace, scenario.RegistryName))
+		cond := meta.FindStatusCondition(cr.Status.Conditions, "Ready")
+		g.Expect(cond).NotTo(BeNil(), "the CR has no Ready condition yet")
+		g.Expect(match(cond)).To(BeTrue(),
+			"Ready condition is %s/%s (message: %s)", cond.Status, cond.Reason, cond.Message)
+	}, timeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for the Ready condition of %s/%s",
+		timeout, scenario.Namespace, scenario.RegistryName)
 }
 
 // waitForDeploymentEnv waits until the Schema Registry deployment pod template
 // carries the given environment variable value on the confluent-sr container.
+// The Get runs inside the Eventually closure, so a deployment that does not
+// exist yet (the operator has not reconciled the CR yet) is retried instead of
+// failing the spec on the first poll.
 func waitForDeploymentEnv(ctx context.Context, timeout time.Duration, envName, envValue string) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	Eventually(func(g Gomega) {
 		dep := &appsv1.Deployment{}
-		err := k8sClient.Get(ctx, types.NamespacedName{
-			Name:      scenario.RegistryName + "-deploy",
-			Namespace: scenario.Namespace,
-		}, dep)
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(k8sClient.Get(ctx, registryDeploymentKey(), dep)).To(Succeed())
 
+		found := false
 		for _, container := range dep.Spec.Template.Spec.Containers {
 			for _, env := range container.Env {
 				if env.Name == envName && env.Value == envValue {
-					return
+					found = true
 				}
 			}
 		}
-		time.Sleep(5 * time.Second)
-	}
-	Fail(fmt.Sprintf("timed out after %s waiting for env %s=%s on deployment %s/%s",
-		timeout, envName, envValue, scenario.Namespace, scenario.RegistryName+"-deploy"))
+		g.Expect(found).To(BeTrue(),
+			"env %s=%s is not set on the confluent-sr container", envName, envValue)
+	}, timeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for env %s=%s on deployment %s/%s",
+		timeout, envName, envValue, scenario.Namespace, scenario.RegistryName+deploymentSuffix)
 }
 
 // waitForDeploymentRollout waits until the Schema Registry deployment has
 // rolled out the latest generation (all replicas updated and available).
 func waitForDeploymentRollout(ctx context.Context, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	Eventually(func(g Gomega) {
 		dep := &appsv1.Deployment{}
-		err := k8sClient.Get(ctx, types.NamespacedName{
-			Name:      scenario.RegistryName + "-deploy",
-			Namespace: scenario.Namespace,
-		}, dep)
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(k8sClient.Get(ctx, registryDeploymentKey(), dep)).To(Succeed())
 
 		desired := int32(1)
 		if dep.Spec.Replicas != nil {
 			desired = *dep.Spec.Replicas
 		}
-		if dep.Status.ObservedGeneration >= dep.Generation &&
-			dep.Status.UpdatedReplicas == desired &&
-			dep.Status.AvailableReplicas == desired {
-			return
-		}
-		time.Sleep(5 * time.Second)
-	}
-	Fail(fmt.Sprintf("timed out after %s waiting for the rollout of deployment %s/%s",
-		timeout, scenario.Namespace, scenario.RegistryName+"-deploy"))
+		g.Expect(dep.Status.ObservedGeneration).To(BeNumerically(">=", dep.Generation),
+			"generation %d has not been observed yet", dep.Generation)
+		g.Expect(dep.Status.UpdatedReplicas).To(Equal(desired),
+			"%d of %d updated replicas so far", dep.Status.UpdatedReplicas, desired)
+		g.Expect(dep.Status.AvailableReplicas).To(Equal(desired),
+			"%d of %d available replicas so far", dep.Status.AvailableReplicas, desired)
+	}, timeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for the rollout of deployment %s/%s",
+		timeout, scenario.Namespace, scenario.RegistryName+deploymentSuffix)
 }
 
 // verifyRoundTrip exercises the Schema Registry REST API: list subjects,
@@ -299,6 +336,13 @@ func verifyClientAuthEnforced(ca *clusterCA) {
 // host.name is resolved per pod through the downward API (status.podIP), so
 // each replica advertises a unique address.
 var _ = Describe("StrimziSchemaRegistry e2e multi-replica scenario", Ordered, func() {
+	// Same CR name and namespace as the main scenario above; clean up so the
+	// specs stay order-independent under Ginkgo's randomized ordering.
+	AfterAll(func() {
+		By("deleting the StrimziSchemaRegistry CR to leave a clean slate")
+		deleteRegistryCR(context.Background(), readyTimeout)
+	})
+
 	It("deploys and scales to multiple replicas behind the Service", func() {
 		ctx := context.Background()
 
@@ -319,50 +363,84 @@ var _ = Describe("StrimziSchemaRegistry e2e multi-replica scenario", Ordered, fu
 
 // waitForDeploymentEnvFieldRef waits until the Schema Registry deployment pod
 // template carries the given environment variable resolved from the given
-// downward API field path on the confluent-sr container.
+// downward API field path on the confluent-sr container. The Get runs inside
+// the Eventually closure, so a deployment that does not exist yet (the
+// operator has not reconciled the CR yet) is retried instead of failing the
+// spec on the first poll.
 func waitForDeploymentEnvFieldRef(ctx context.Context, timeout time.Duration, envName, fieldPath string) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	Eventually(func(g Gomega) {
 		dep := &appsv1.Deployment{}
-		err := k8sClient.Get(ctx, types.NamespacedName{
-			Name:      scenario.RegistryName + "-deploy",
-			Namespace: scenario.Namespace,
-		}, dep)
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(k8sClient.Get(ctx, registryDeploymentKey(), dep)).To(Succeed())
 
+		found := false
 		for _, container := range dep.Spec.Template.Spec.Containers {
 			for _, env := range container.Env {
 				if env.Name == envName && env.ValueFrom != nil && env.ValueFrom.FieldRef != nil &&
 					env.ValueFrom.FieldRef.FieldPath == fieldPath {
-					return
+					found = true
 				}
 			}
 		}
-		time.Sleep(5 * time.Second)
-	}
-	Fail(fmt.Sprintf("timed out after %s waiting for env %s (fieldRef %s) on deployment %s/%s",
-		timeout, envName, fieldPath, scenario.Namespace, scenario.RegistryName+"-deploy"))
+		g.Expect(found).To(BeTrue(),
+			"env %s (fieldRef %s) is not set on the confluent-sr container", envName, fieldPath)
+	}, timeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for env %s (fieldRef %s) on deployment %s/%s",
+		timeout, envName, fieldPath, scenario.Namespace, scenario.RegistryName+deploymentSuffix)
 }
 
 // waitForDeploymentReplicas waits until the Schema Registry deployment
 // desires and has ready the given number of replicas.
 func waitForDeploymentReplicas(ctx context.Context, timeout time.Duration, want int32) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	Eventually(func(g Gomega) {
 		dep := &appsv1.Deployment{}
-		err := k8sClient.Get(ctx, types.NamespacedName{
-			Name:      scenario.RegistryName + "-deploy",
-			Namespace: scenario.Namespace,
-		}, dep)
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(k8sClient.Get(ctx, registryDeploymentKey(), dep)).To(Succeed())
 
-		if dep.Spec.Replicas != nil && *dep.Spec.Replicas == want &&
-			dep.Status.ReadyReplicas == want &&
-			dep.Status.ObservedGeneration >= dep.Generation {
-			return
-		}
-		time.Sleep(5 * time.Second)
+		g.Expect(dep.Spec.Replicas).NotTo(BeNil(), "spec.replicas is not set yet")
+		g.Expect(*dep.Spec.Replicas).To(Equal(want), "spec.replicas is %d", *dep.Spec.Replicas)
+		g.Expect(dep.Status.ReadyReplicas).To(Equal(want),
+			"%d of %d replicas are ready", dep.Status.ReadyReplicas, want)
+		g.Expect(dep.Status.ObservedGeneration).To(BeNumerically(">=", dep.Generation),
+			"generation %d has not been observed yet", dep.Generation)
+	}, timeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for %d ready replicas on deployment %s/%s",
+		timeout, want, scenario.Namespace, scenario.RegistryName+deploymentSuffix)
+}
+
+// registryDeploymentKey returns the NamespacedName of the operator-created
+// Schema Registry Deployment (CR name + deploymentSuffix).
+func registryDeploymentKey() types.NamespacedName {
+	return types.NamespacedName{
+		Name:      scenario.RegistryName + deploymentSuffix,
+		Namespace: scenario.Namespace,
 	}
-	Fail(fmt.Sprintf("timed out after %s waiting for %d ready replicas on deployment %s/%s",
-		timeout, want, scenario.Namespace, scenario.RegistryName+"-deploy"))
+}
+
+// deleteRegistryCR deletes the scenario CR and waits until the CR and its
+// operator-managed Deployment are gone, so a spec that fails mid-way cannot
+// leave a CR behind to poison the next spec (which shares the same CR name
+// and namespace).
+func deleteRegistryCR(ctx context.Context, timeout time.Duration) {
+	cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: scenario.RegistryName, Namespace: scenario.Namespace},
+	}
+	err := k8sClient.Delete(ctx, cr)
+	Expect(client.IgnoreNotFound(err)).To(Succeed(),
+		"failed to delete the StrimziSchemaRegistry CR %s/%s", scenario.Namespace, scenario.RegistryName)
+
+	Eventually(func(g Gomega) {
+		err := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      scenario.RegistryName,
+			Namespace: scenario.Namespace,
+		}, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{})
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the CR is still present (err: %v)", err)
+	}, timeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for the deletion of the CR %s/%s",
+		timeout, scenario.Namespace, scenario.RegistryName)
+
+	Eventually(func(g Gomega) {
+		err := k8sClient.Get(ctx, registryDeploymentKey(), &appsv1.Deployment{})
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the Deployment is still present (err: %v)", err)
+	}, timeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for the deletion of the Deployment %s/%s",
+		timeout, scenario.Namespace, scenario.RegistryName+deploymentSuffix)
 }
