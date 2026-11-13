@@ -940,7 +940,28 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 //     typically carry no Strimzi label, so they are matched by name instead.
 //
 // A CR matching both paths is enqueued once.
+//
+// Secret events are cluster-wide, so cheap pre-filters (B11) exit before any
+// CR List call:
+//  1. Secrets the operator itself owns — the <name>-jks and <name>-tls
+//     outputs and the derived <tlssecretname>-jks — are written by
+//     reconciliation, never inputs to it, so their events must not
+//     re-trigger reconciliation. The controller-owner check (rather than the
+//     bare name suffix) keeps user-provided TLS secrets that merely end with
+//     -tls/-jks (e.g. the documented schema-registry-tls name) flowing to
+//     the matching paths below.
+//  2. Cluster CA cert secrets (<cluster>-cluster-ca-cert) can only match
+//     through the label path: no CR can reference one via spec.tlssecretname
+//     (the user TLS secret validation requires keystore material the CA
+//     secret does not carry), so the namespace-wide name-path List is
+//     skipped for them.
 func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Context, obj client.Object) []reconcile.Request {
+	if owner := metav1.GetControllerOf(obj); owner != nil && owner.Kind == "StrimziSchemaRegistry" {
+		return nil
+	}
+	// Cluster CA cert secrets never match the name path (see above).
+	isClusterCA := strings.HasSuffix(obj.GetName(), clusterCASuffix)
+
 	requests := make([]reconcile.Request, 0, 1)
 	seen := make(map[types.NamespacedName]struct{}, 1)
 	add := func(name, namespace string) {
@@ -981,13 +1002,17 @@ func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Contex
 
 	// Name path: user-provided REST API TLS secrets referenced via
 	// spec.tlssecretname. Namespace-scoped so unrelated secrets only pay the
-	// cost of listing the (typically few) CRs in their own namespace.
-	tlsReferencing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
-	if err := r.List(ctx, tlsReferencing, client.InNamespace(obj.GetNamespace())); err == nil {
-		for i := range tlsReferencing.Items {
-			item := &tlsReferencing.Items[i]
-			if item.Spec.TLSSecretName != "" && item.Spec.TLSSecretName == obj.GetName() {
-				add(item.Name, item.Namespace)
+	// cost of listing the (typically few) CRs in their own namespace. Skipped
+	// entirely for cluster CA cert secrets, which can only match via the
+	// label path (B11).
+	if !isClusterCA {
+		tlsReferencing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+		if err := r.List(ctx, tlsReferencing, client.InNamespace(obj.GetNamespace())); err == nil {
+			for i := range tlsReferencing.Items {
+				item := &tlsReferencing.Items[i]
+				if item.Spec.TLSSecretName != "" && item.Spec.TLSSecretName == obj.GetName() {
+					add(item.Name, item.Namespace)
+				}
 			}
 		}
 	}
