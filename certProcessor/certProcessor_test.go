@@ -315,6 +315,78 @@ func TestKeystoreCertExpiry_Empty(t *testing.T) {
 	}
 }
 
+// TestGenerateCSRKeyBits covers B18: the RSA key size of the REST API server
+// certificate key is the package-level rsaKeyBits variable (2048 by default
+// for fast renewals), not a hardcoded 4096, and raising the variable is
+// honored.
+func TestGenerateCSRKeyBits(t *testing.T) {
+	original := rsaKeyBits
+	defer func() { rsaKeyBits = original }()
+
+	cp := NewCertProcessor(logr.Logger{})
+
+	t.Run("default key size is 2048 bits", func(t *testing.T) {
+		rsaKeyBits = 2048
+		key, _, err := cp.generateCSR("schema-registry.kafka.svc")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if bits := key.N.BitLen(); bits != 2048 {
+			t.Errorf("expected a 2048-bit key, got %d bits", bits)
+		}
+	})
+
+	t.Run("key size follows the configurable variable", func(t *testing.T) {
+		// A distinct value proves the variable is honored (and documents the
+		// supported way to raise the key size).
+		rsaKeyBits = 3072
+		key, _, err := cp.generateCSR("schema-registry.kafka.svc")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if bits := key.N.BitLen(); bits != 3072 {
+			t.Errorf("expected a 3072-bit key after raising rsaKeyBits, got %d bits", bits)
+		}
+	})
+}
+
+// TestSignCSRNotBeforeSkewMargin covers B9: the signed REST API certificate
+// must carry a NotBefore in the past (a 5 minute back-dated skew margin) so
+// clients and kubelets with slightly fast clocks do not reject the fresh
+// certificate as not yet valid.
+func TestSignCSRNotBeforeSkewMargin(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	_, csr, err := cp.generateCSR("schema-registry.kafka.svc")
+	if err != nil {
+		t.Fatalf("failed to generate CSR: %v", err)
+	}
+
+	serverCert, err := signCSR(ca.CACert, ca.CAKey, csr)
+	if err != nil {
+		t.Fatalf("failed to sign CSR: %v", err)
+	}
+
+	now := time.Now()
+	if !serverCert.NotBefore.Before(now) {
+		t.Errorf("expected NotBefore %s to be in the past (skew margin)", serverCert.NotBefore)
+	}
+	// The margin must be roughly the documented 5 minutes, not days.
+	skew := now.Sub(serverCert.NotBefore)
+	if skew < 4*time.Minute || skew > 6*time.Minute {
+		t.Errorf("expected a ~5 minute skew margin, got %s", skew)
+	}
+	// The skew margin must not shorten the validity window: NotAfter stays
+	// about one year out.
+	if !serverCert.NotAfter.After(now.Add(300 * 24 * time.Hour)) {
+		t.Errorf("expected NotAfter about one year out, got %v", serverCert.NotAfter)
+	}
+}
+
 // TestConcurrentCertGeneration verifies that concurrent invocations of the
 // certificate generation functions do not interfere with each other. Before
 // the per-call temp directory fix, all invocations shared fixed file names in
