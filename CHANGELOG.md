@@ -1,3 +1,40 @@
+## [1.16.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.16.2...1.16.3) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **metrics:** the metric strimzi_schema_register_instance_current_count
+no longer exists. Update dashboards and alerts to
+strimzi_schema_registry_instance_current_count.
+
+Tests: TestRegisterMetricsExposesCorrectedInstanceCountGauge asserts the
+corrected name is registered and exposed;
+TestInstanceCountGaugeRegisterCleanly asserts the gauge registers into a
+fresh registry and exposes its value.
+
+### ⏩ Performance
+
+* **controller:** pre-filter Secret watch events before listing CRs ([09d868a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/09d868a416527784a4df4d7d29e9a695f62505ef))
+
+
+### 📔 Docs
+
+* **readme:** document Phase 3 behavior changes ([20d6b9b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/20d6b9bd5f5582cfaa8dc6bc32023124eb468613))
+
+
+### 🛠 Fixes
+
+* **certprocessor:** backdate cert NotBefore and make the RSA key size configurable ([fd116e9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fd116e9004824d3c7037ca43856051985d785de5))
+* **certprocessor:** drop the non-standard .svc.cluster DNS name from CSRs ([06be897](https://github.com/Randsw/schema-registry-operator-strimzi/commit/06be897b73fa23fa20d8f8ffa527ef19b9ff81f4))
+* **controller:** announce skipped reconciliation for invalid clientauth combination ([9f65c31](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9f65c31af5d2ebf72371618a0a92f01b86f3436f))
+* **controller:** compare Ready against desired replicas and validate status enum ([087d1b2](https://github.com/Randsw/schema-registry-operator-strimzi/commit/087d1b2728fd56e7c398360f97bce3fe42c53e36))
+* **controller:** declare the Schema Registry listener port in the pod spec ([e0a2764](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e0a27649e5971d370bd57131787c196d39dc8312))
+* **controller:** make the bootstrap server lookup error actionable ([6adbe68](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6adbe68c01adfc7e2d0865d79d5f9b22aa98bd13))
+* **controller:** preserve manually scaled replicas across deployment spec updates ([2557c00](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2557c0049f824af128e9af853d370284c77d1321))
+* **controller:** preserve NetworkPolicy annotations on update ([c7f18fa](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c7f18fa7103f070cbff24ff08caffbeae7c95b60))
+* **controller:** surface reconcile errors in the CR Ready condition ([c14e3a5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c14e3a559388d8e226499a27956fcd87cceda33c))
+* **metrics:** rename instance count metric to the correct spelling ([01aade4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/01aade4a73e03824e93d658d3d7072d29674b9ad))
+
 ## [1.16.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.16.1...1.16.2) (2026-11-11)
 
 
