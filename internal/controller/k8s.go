@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -336,6 +337,10 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 			},
 		},
 		Spec: apps.DeploymentSpec{
+			// The desired replica count comes from spec.replicas (B20); an
+			// unset value defaults to 1, matching the Deployment API default
+			// so CRs created before the field existed behave unchanged.
+			Replicas: ptr.To(effectiveReplicas(instance)),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: ls,
 			},
@@ -349,6 +354,16 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 		return nil, nil, err
 	}
 	return dep, configOverridden, nil
+}
+
+// effectiveReplicas returns the desired number of Schema Registry replicas
+// (B20). An unset spec.replicas defaults to 1, matching the Deployment API
+// default so CRs created before the field existed keep working unchanged.
+func effectiveReplicas(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) int32 {
+	if instance.Spec.Replicas != nil {
+		return *instance.Spec.Replicas
+	}
+	return 1
 }
 
 // listenerPortAndScheme returns the container port and URI scheme based on SecureHTTP.
@@ -1710,6 +1725,15 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 		return "", fmt.Errorf("failed to write MasterEligibility to hash: %w", err)
 	}
 
+	// The replica count is part of the desired Deployment spec (B20), so
+	// changing spec.replicas must trigger a deployment update. Hashed using
+	// the same effective value buildDeploymentSpec emits, so an explicit 1
+	// and an unset replicas (both meaning 1) hash identically and never
+	// cause a spurious rollout.
+	if _, err := fmt.Fprintf(h, "%d", effectiveReplicas(instance)); err != nil {
+		return "", fmt.Errorf("failed to write Replicas to hash: %w", err)
+	}
+
 	// Configuration entries are hashed in sorted key order so the hash is
 	// deterministic regardless of map iteration order.
 	for _, key := range sortedConfigurationKeys(instance.Spec.Configuration) {
@@ -1860,15 +1884,17 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	// ignored while building the desired spec (B2).
 	r.emitConfigOverriddenEvents(instance, configOverridden)
 
-	// Update the deployment spec to match desired state. The CR exposes no
-	// replicas field yet, so the operator never desires a specific replica
-	// count: the live Spec.Replicas — which manual `kubectl scale` edits —
-	// must survive the update instead of being reset to the desired spec's
-	// nil (which defaults back to 1) (B6). When spec.replicas support lands,
-	// this becomes "preserve only when the CR leaves replicas unset".
+	// Update the deployment spec to match desired state. When the CR sets
+	// spec.replicas (B20), the desired replica count wins and a manual
+	// `kubectl scale` is reverted on the next spec change. When the CR leaves
+	// replicas unset, the operator still never desires a specific replica
+	// count: the live Spec.Replicas — set by manual `kubectl scale` edits —
+	// must survive the update instead of being reset (B6).
 	replicas := found.Spec.Replicas
 	found.Spec = desired.Spec
-	found.Spec.Replicas = replicas
+	if instance.Spec.Replicas == nil {
+		found.Spec.Replicas = replicas
+	}
 
 	// Update annotations to trigger rollout
 	if found.Spec.Template.Annotations == nil {

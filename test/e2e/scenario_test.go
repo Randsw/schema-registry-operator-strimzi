@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 )
@@ -65,7 +66,7 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 	It("phase 1: deploys with clientauth disabled and passes the REST round-trip", func() {
 		ctx := context.Background()
 
-		applyRegistryCR(ctx, false, true)
+		applyRegistryCR(ctx, false, true, nil)
 		waitForReadyCondition(ctx, readyTimeout)
 		waitForDeploymentRollout(ctx, readyTimeout)
 
@@ -75,7 +76,7 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 	It("rejects clientauth without securehttp", func() {
 		ctx := context.Background()
 
-		applyRegistryCR(ctx, true, false)
+		applyRegistryCR(ctx, true, false, nil)
 		waitForCondition(ctx, readyTimeout, func(cond *metav1.Condition) bool {
 			return cond.Status == metav1.ConditionFalse && cond.Reason == "ClientAuthRequiresSecureHTTP"
 		})
@@ -84,7 +85,7 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 	It("phase 2: redeploys with clientauth enabled and enforces mutual TLS on the REST API", func() {
 		ctx := context.Background()
 
-		applyRegistryCR(ctx, true, true)
+		applyRegistryCR(ctx, true, true, nil)
 
 		By("waiting for the deployment to pick up the clientauth configuration")
 		waitForDeploymentEnv(ctx, readyTimeout, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", "REQUIRED")
@@ -103,8 +104,9 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 })
 
 // applyRegistryCR creates or updates the StrimziSchemaRegistry CR for the
-// scenario with the given clientauth/securehttp values.
-func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool) {
+// scenario with the given clientauth/securehttp values. A nil replicas leaves
+// spec.replicas unset (the operator default of 1 applies).
+func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas *int32) {
 	replicationFactor := int32(1)
 
 	cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
@@ -136,6 +138,10 @@ func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool) {
 				},
 			},
 		},
+	}
+
+	if replicas != nil {
+		cr.Spec.Replicas = replicas
 	}
 
 	existing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
@@ -273,4 +279,62 @@ func verifyClientAuthEnforced(ca *clusterCA) {
 		Expect(err).To(HaveOccurred(),
 			"request without a client certificate should fail while clientauth is enabled")
 	})
+}
+
+// The multi-replica scenario (B20) deploys the Schema Registry with
+// spec.replicas=2 and verifies that the operator propagates the replica
+// count to the Deployment, both replicas become ready behind the Service,
+// and the REST round-trip still succeeds. master.eligibility keeps its
+// per-CR semantics: every replica of this CR is master-eligible and Schema
+// Registry performs the election among them; host.name is resolved per pod
+// through the downward API (status.podIP), so each replica advertises a
+// unique address.
+var _ = Describe("StrimziSchemaRegistry e2e multi-replica scenario", Ordered, func() {
+	var ca *clusterCA
+
+	BeforeAll(func() {
+		var err error
+		ca, err = fetchClusterCA(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("deploys and scales to multiple replicas behind the Service", func() {
+		ctx := context.Background()
+
+		By("applying the CR with spec.replicas=2")
+		applyRegistryCR(ctx, false, true, ptr.To(int32(2)))
+
+		By("waiting for 2 ready replicas on the Deployment")
+		waitForDeploymentReplicas(ctx, readyTimeout, 2)
+
+		By("waiting for the CR Ready condition and the rollout")
+		waitForReadyCondition(ctx, readyTimeout)
+		waitForDeploymentRollout(ctx, readyTimeout)
+
+		By("verifying the REST round-trip through the Service")
+		verifyRoundTrip(ca, nil)
+	})
+})
+
+// waitForDeploymentReplicas waits until the Schema Registry deployment
+// desires and has ready the given number of replicas.
+func waitForDeploymentReplicas(ctx context.Context, timeout time.Duration, want int32) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		dep := &appsv1.Deployment{}
+		err := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      scenario.RegistryName + "-deploy",
+			Namespace: scenario.Namespace,
+		}, dep)
+		Expect(err).NotTo(HaveOccurred())
+
+		if dep.Spec.Replicas != nil && *dep.Spec.Replicas == want &&
+			dep.Status.ReadyReplicas == want &&
+			dep.Status.ObservedGeneration >= dep.Generation {
+			return
+		}
+		time.Sleep(5 * time.Second)
+	}
+	Fail(fmt.Sprintf("timed out after %s waiting for %d ready replicas on deployment %s/%s",
+		timeout, want, scenario.Namespace, scenario.RegistryName+"-deploy"))
 }
