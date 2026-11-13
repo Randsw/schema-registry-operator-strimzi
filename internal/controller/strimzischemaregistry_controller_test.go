@@ -29,6 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	eventsfake "k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -449,6 +450,19 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				}
 				return JKSResourceVersionNewInt, nil
 			}, time.Minute, time.Second).Should(BeNumerically(">", JKSResourceVersionOldInt))
+
+			// F2: the REST API TLS renewal is centralized in
+			// handleTLSCertExpiry, which runs on the reconcile following the
+			// rotation (the rotation pass returns a 1s requeue).
+			By("Reconciling again so handleTLSCertExpiry renews the TLS secret")
+			controllerReconciler = &StrimziSchemaRegistryReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
 
 			// Read updated TLS secret using Eventually
 			Eventually(func() (int, error) {
@@ -2067,6 +2081,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Update(ctx, caKeySecret)).To(Succeed())
 
 			By("Reconciling to trigger secret rotation and TLS renewal")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			// F2: the rotation pass rebuilds the -jks secret and returns a 1s
+			// requeue; the TLS renewal happens in handleTLSCertExpiry on the
+			// following reconcile.
+			By("Reconciling again so handleTLSCertExpiry renews the TLS secret")
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -3835,6 +3856,380 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			By("Accepting the empty HeapOpts (operator default applies)")
 			Expect(k8sClient.Create(ctx, newCR("sr-empty-heap", ""))).To(Succeed())
+		})
+	})
+
+	// F1 regression: the Deployment selector must contain stable identity
+	// labels only. Changing the container image (which drives the mutable
+	// app.kubernetes.io/version label) must update the Deployment in place,
+	// and a Deployment created before the fix (mutable selector) must be
+	// migrated by delete+re-create instead of failing with "spec.selector:
+	// field is immutable".
+	Context("When changing the container image of an existing Deployment", func() {
+		ctx := context.Background()
+		specCounter := 0
+
+		var (
+			namespaceName      string
+			typeNamespacedName types.NamespacedName
+		)
+
+		newCR := func(image string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+			return &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      namespaceName,
+					Namespace: namespaceName,
+					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+				},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP: false,
+					Listener:   "plain",
+					// PLAINTEXT keeps the scenario free of KafkaUser and
+					// CA-secret fixtures: the image change exercises the
+					// Deployment update path only.
+					SecurityProtocol: "PLAINTEXT",
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: image}}},
+					},
+				},
+			}
+		}
+
+		reconcileCR := func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		BeforeEach(func() {
+			// A unique namespace per spec: envtest has no namespace
+			// controller, so a deleted namespace stays terminating and a
+			// same-name create would fail in the next spec.
+			specCounter++
+			namespaceName = "test-image-change-" + strconv.Itoa(specCounter)
+			typeNamespacedName = types.NamespacedName{Name: namespaceName, Namespace: namespaceName}
+
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})).To(Succeed())
+
+			By("Creating strimzi kafka cluster with a plain listener")
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: namespaceName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: namespaceName}, updateCluster)).To(Succeed())
+			updateCluster.Status = &kafka.KafkaStatus{
+				ClusterId: "image-change-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.image-change.svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+			Expect(k8sClient.Create(ctx, newCR("confluentinc/cp-schema-registry:7.6.1"))).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should update the Deployment in place when the image changes", func() {
+			deployName := types.NamespacedName{Name: namespaceName + "-deploy", Namespace: namespaceName}
+
+			By("Reconciling to create the Deployment with image A")
+			reconcileCR()
+			Eventually(func() error {
+				return k8sClient.Get(ctx, deployName, &appsv1.Deployment{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deployName, deployment)).To(Succeed())
+			Expect(deployment.Spec.Selector.MatchLabels).To(Equal(selectorLabelsForStrimziSchemaRegistryOperator(namespaceName)))
+			Expect(deployment.Spec.Template.Spec.Containers[0].Image).To(Equal("confluentinc/cp-schema-registry:7.6.1"))
+			originalUID := deployment.UID
+
+			By("Changing the CR image to B")
+			cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, cr)).To(Succeed())
+			cr.Spec.Template.Spec.Containers[0].Image = "confluentinc/cp-schema-registry:8.4.1"
+			Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+
+			By("Reconciling: the Deployment must update, not fail on the immutable selector")
+			reconcileCR()
+
+			updated := &appsv1.Deployment{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, deployName, updated); err != nil {
+					return ""
+				}
+				return updated.Spec.Template.Spec.Containers[0].Image
+			}, time.Minute, time.Second).Should(Equal("confluentinc/cp-schema-registry:8.4.1"))
+
+			Expect(k8sClient.Get(ctx, deployName, updated)).To(Succeed())
+			// Same UID: the Deployment was updated in place, not recreated.
+			Expect(updated.UID).To(Equal(originalUID))
+			Expect(updated.Spec.Selector.MatchLabels).To(Equal(selectorLabelsForStrimziSchemaRegistryOperator(namespaceName)))
+			// The mutable labels remain on the pod template (they drive the rollout).
+			Expect(updated.Spec.Template.Labels["app.kubernetes.io/version"]).To(Equal("8.4.1"))
+		})
+
+		It("should recreate a legacy-selector Deployment instead of failing on the immutable selector", func() {
+			deployName := types.NamespacedName{Name: namespaceName + "-deploy", Namespace: namespaceName}
+
+			By("Reconciling to create the Deployment")
+			reconcileCR()
+			Eventually(func() error {
+				return k8sClient.Get(ctx, deployName, &appsv1.Deployment{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			By("Replacing it with a pre-fix Deployment whose selector contains mutable labels")
+			legacySelector := map[string]string{
+				"app":                          namespaceName,
+				"strimzi-schema-registry":      namespaceName,
+				"app.kubernetes.io/instance":   namespaceName,
+				"app.kubernetes.io/name":       "strimzischemaregistry",
+				"app.kubernetes.io/managed-by": "strimzi-registry-operator",
+				"app.kubernetes.io/part-of":    namespaceName,
+				"app.kubernetes.io/version":    "7.6.1",
+				"strimzi.io/cluster":           "kafka-cluster",
+			}
+			legacy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deployName, legacy)).To(Succeed())
+			legacy.Spec.Selector = &metav1.LabelSelector{MatchLabels: legacySelector}
+			legacy.Spec.Template.Labels = legacySelector
+			// The selector is immutable, so the pre-fix object can only be
+			// produced by deleting and re-creating it.
+			Expect(k8sClient.Delete(ctx, legacy)).To(Succeed())
+			legacy.ResourceVersion = ""
+			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
+			legacyDeployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deployName, legacyDeployment)).To(Succeed())
+			legacyUID := legacyDeployment.UID
+
+			By("Changing the CR image to B")
+			cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, cr)).To(Succeed())
+			cr.Spec.Template.Spec.Containers[0].Image = "confluentinc/cp-schema-registry:8.4.1"
+			Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+
+			By("Reconciling with an event recorder: the legacy Deployment must be recreated")
+			recorder := eventsfake.NewFakeRecorder(16)
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: recorder}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the Deployment was recreated with the stable selector and image B")
+			migrated := &appsv1.Deployment{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, deployName, migrated); err != nil {
+					return ""
+				}
+				return migrated.Spec.Template.Spec.Containers[0].Image
+			}, time.Minute, time.Second).Should(Equal("confluentinc/cp-schema-registry:8.4.1"))
+			Expect(k8sClient.Get(ctx, deployName, migrated)).To(Succeed())
+			Expect(migrated.UID).NotTo(Equal(legacyUID))
+			Expect(migrated.Spec.Selector.MatchLabels).To(Equal(selectorLabelsForStrimziSchemaRegistryOperator(namespaceName)))
+			Expect(migrated.Spec.Selector.MatchLabels).NotTo(HaveKey("app.kubernetes.io/version"))
+			Expect(migrated.Spec.Selector.MatchLabels).NotTo(HaveKey("strimzi.io/cluster"))
+
+			By("Verifying the DeploymentRecreated event was emitted")
+			Eventually(func() string {
+				select {
+				case e := <-recorder.Events:
+					return e
+				default:
+					return ""
+				}
+			}, time.Minute, time.Second).Should(ContainSubstring("DeploymentRecreated"))
+		})
+	})
+
+	// F2: a Strimzi cluster CA rotation must renew the operator-managed REST
+	// API TLS certificate in every auth mode — here SASL_SSL with
+	// securehttp — not only mTLS. The -tls secret records the signing CA
+	// cert secret's resourceVersion; handleTLSCertExpiry renews when it
+	// differs and rolls the deployment via the tlsVersion annotation.
+	Context("When the cluster CA rotates in SASL_SSL mode with securehttp", func() {
+		ctx := context.Background()
+		specCounter := 0
+
+		var (
+			namespaceName      string
+			typeNamespacedName types.NamespacedName
+			clusterCA          *testutil.TestCA
+		)
+
+		BeforeEach(func() {
+			var err error
+			clusterCA, err = testutil.GenerateClusterCACert("STIMZI-SR-CA-ROTATION")
+			Expect(err).NotTo(HaveOccurred())
+
+			specCounter++
+			namespaceName = "test-ca-rotation-" + strconv.Itoa(specCounter)
+			typeNamespacedName = types.NamespacedName{Name: namespaceName, Namespace: namespaceName}
+
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: namespaceName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "tls", Port: 9093, Tls: true, Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+								Authentication: &kafka.KafkaListenerAuthentication{Type: kafka.SCRAM_SHA_512_KAFKALISTENERAUTHENTICATIONTYPE}},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: namespaceName}, updateCluster)).To(Succeed())
+			updateCluster.Status = &kafka.KafkaStatus{
+				ClusterId: "ca-rotation-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.ca-rotation.svc:9093", Name: "TLS", Certificates: []string{clusterCA.CACertPEM}},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			kafkaUser := &kafka.KafkaUser{
+				ObjectMeta: metav1.ObjectMeta{Name: namespaceName, Namespace: namespaceName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec:       &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.SCRAM_SHA_512_KAFKAUSERAUTHENTICATIONTYPE}},
+			}
+			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
+
+			By("Creating cluster CA cert and key secrets")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca-cert", Namespace: namespaceName},
+				Data:       map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)},
+			})).To(Succeed())
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: namespaceName},
+				Data:       map[string][]byte{"ca.key": []byte(clusterCA.CAKeyPEM)},
+			})).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: namespaceName, Namespace: namespaceName},
+				Data: map[string][]byte{
+					"password":         []byte("scram-password"),
+					"sasl.jaas.config": []byte(`org.apache.kafka.common.security.scram.ScramLoginModule required username="` + namespaceName + `" password="scram-password";`),
+				},
+			})).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: namespaceName, Namespace: namespaceName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:       true,
+					Listener:         "TLS",
+					SecurityProtocol: "SASL_SSL",
+					Template:         corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should renew the -tls secret and roll the Deployment after the cluster CA rotates", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("First reconcile to create the Deployment, -jks and -tls secrets")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			tlsName := types.NamespacedName{Name: namespaceName + "-tls", Namespace: namespaceName}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, tlsName, &corev1.Secret{})
+			}, time.Minute*2, time.Second).Should(Succeed())
+
+			tlsSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, tlsName, tlsSecret)).To(Succeed())
+			oldTLSResourceVersion := tlsSecret.ResourceVersion
+			caCertName := types.NamespacedName{Name: "kafka-cluster-cluster-ca-cert", Namespace: namespaceName}
+			caCertSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, caCertName, caCertSecret)).To(Succeed())
+			Expect(tlsSecret.Annotations[CAVersionKey]).To(Equal(caCertSecret.ResourceVersion))
+
+			deployName := types.NamespacedName{Name: namespaceName + "-deploy", Namespace: namespaceName}
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deployName, deployment)).To(Succeed())
+			oldTLSVersionAnnotation := deployment.Spec.Template.Annotations[tlsVersionKey]
+
+			By("Rotating the cluster CA (new cert and key bump the resourceVersions)")
+			newClusterCA, err := testutil.GenerateClusterCACert("STIMZI-SR-CA-ROTATION-V2")
+			Expect(err).NotTo(HaveOccurred())
+			caCertSecret.Data["ca.crt"] = []byte(newClusterCA.CACertPEM)
+			Expect(k8sClient.Update(ctx, caCertSecret)).To(Succeed())
+			// The CA key must also be updated to match the new cert, otherwise
+			// x509 signing will fail with "provided PrivateKey doesn't match
+			// parent's PublicKey".
+			caKeySecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster-cluster-ca", Namespace: namespaceName}, caKeySecret)).To(Succeed())
+			caKeySecret.Data["ca.key"] = []byte(newClusterCA.CAKeyPEM)
+			Expect(k8sClient.Update(ctx, caKeySecret)).To(Succeed())
+
+			By("Reconciling: the SASL_SSL rotation pass rebuilds the truststore")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Reconciling again: handleTLSCertExpiry renews the -tls secret on the CA change")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking that the -tls secret was renewed for the new CA")
+			renewed := &corev1.Secret{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, tlsName, renewed); err != nil {
+					return ""
+				}
+				return renewed.ResourceVersion
+			}, time.Minute*2, time.Second).ShouldNot(Equal(oldTLSResourceVersion))
+			Expect(k8sClient.Get(ctx, caCertName, caCertSecret)).To(Succeed())
+			Expect(renewed.Annotations[CAVersionKey]).To(Equal(caCertSecret.ResourceVersion))
+			Expect(renewed.Data).To(HaveKey("tls-keystore.jks"))
+			Expect(renewed.Data).To(HaveKey("keystore_password"))
+
+			By("Checking that the Deployment rolled via the tlsVersion annotation")
+			rolled := &appsv1.Deployment{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, deployName, rolled); err != nil {
+					return ""
+				}
+				return rolled.Spec.Template.Annotations[tlsVersionKey]
+			}, time.Minute, time.Second).ShouldNot(Equal(oldTLSVersionAnnotation))
+			Expect(rolled.Spec.Template.Annotations[tlsVersionKey]).To(Equal(renewed.ResourceVersion))
 		})
 	})
 })
