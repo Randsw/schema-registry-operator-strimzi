@@ -1292,6 +1292,202 @@ func TestGetStrimziClusterName(t *testing.T) {
 	})
 }
 
+// TestCreateTLSSecretRecordsCAVersion covers F2: the operator-managed -tls
+// secret must record the signing cluster CA cert secret's resourceVersion so
+// handleTLSCertExpiry can detect a cluster CA rotation in every auth mode.
+func TestCreateTLSSecretRecordsCAVersion(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	ca, err := testutil.GenerateClusterCACert("test-ca-version")
+	if err != nil {
+		t.Fatalf("failed to generate cluster CA: %v", err)
+	}
+
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	inst.Labels = map[string]string{strimziClusterLabel: "test-cluster"}
+
+	caCertSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-cluster" + clusterCASuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "1000",
+		},
+		Data: map[string][]byte{"ca.crt": []byte(ca.CACertPEM)},
+	}
+	caKeySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-cluster" + clusterCAKeySuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "1001",
+		},
+		Data: map[string][]byte{"ca.key": []byte(ca.CAKeyPEM)},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, caCertSecret, caKeySecret).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+	secret, exists, err := r.createTLSSecret(inst, context.Background(), logr.Logger{}, "test-cluster")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exists {
+		t.Error("expected the -tls secret to not exist yet")
+	}
+	if got := secret.Annotations[CAVersionKey]; got != caCertSecret.ResourceVersion {
+		t.Errorf("expected the CAVersionKey annotation %q, got %q", caCertSecret.ResourceVersion, got)
+	}
+}
+
+// TestHandleTLSCertExpiryRenewsOnCAChange covers F2: the REST API TLS
+// certificate must be renewed when the cluster CA rotates, in any auth mode,
+// even while the certificate itself is far from expiry; the deployment rolls
+// via the tlsVersion pod-template annotation. When the recorded CA version
+// matches, only the expiry-based behavior applies.
+func TestHandleTLSCertExpiryRenewsOnCAChange(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	ca, err := testutil.GenerateClusterCACert("test-ca-rotation")
+	if err != nil {
+		t.Fatalf("failed to generate cluster CA: %v", err)
+	}
+
+	cluster := "test-cluster"
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	// PLAINTEXT keeps the scenario free of -jks material; the expiry handler
+	// is independent of the Kafka auth mode.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "plaintext"
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+
+	caCertSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            cluster + clusterCASuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "1000",
+		},
+		Data: map[string][]byte{"ca.crt": []byte(ca.CACertPEM)},
+	}
+	caKeySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            cluster + clusterCAKeySuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "1001",
+		},
+		Data: map[string][]byte{"ca.key": []byte(ca.CAKeyPEM)},
+	}
+	deployment := &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + deploySuffix, Namespace: inst.Namespace},
+		Spec: apps.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
+			},
+		},
+	}
+
+	t.Run("renews when the recorded CA version differs from the current cluster CA", func(t *testing.T) {
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            inst.Name + tlsSecretSuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "2000",
+				Annotations:     map[string]string{CAVersionKey: "999"},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"tls-keystore.jks":  []byte("stale-keystore-bytes"),
+				"keystore_password": []byte("stale"),
+				"key_password":      []byte("stale"),
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, caCertSecret.DeepCopy(), caKeySecret.DeepCopy(), deployment.DeepCopy(), tlsSecret).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		ctx := context.Background()
+
+		result, recheck, err := r.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			t.Error("expected a requeue after the CA-change renewal")
+		}
+		if recheck != 0 {
+			t.Errorf("expected no standing recheck after an action, got %v", recheck)
+		}
+
+		renewed := &corev1.Secret{}
+		if err := client.Get(ctx, types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, renewed); err != nil {
+			t.Fatalf("failed to get the renewed -tls secret: %v", err)
+		}
+		if string(renewed.Data["tls-keystore.jks"]) == "stale-keystore-bytes" {
+			t.Error("expected the keystore material to be regenerated for the new CA")
+		}
+		if got := renewed.Annotations[CAVersionKey]; got != caCertSecret.ResourceVersion {
+			t.Errorf("expected the CAVersionKey annotation to record %q, got %q", caCertSecret.ResourceVersion, got)
+		}
+
+		dep := &apps.Deployment{}
+		if err := client.Get(ctx, types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err != nil {
+			t.Fatalf("failed to get deployment: %v", err)
+		}
+		if got := dep.Spec.Template.Annotations[tlsVersionKey]; got != renewed.ResourceVersion {
+			t.Errorf("expected the tlsVersion pod-template annotation %q to roll the deployment, got %q", renewed.ResourceVersion, got)
+		}
+	})
+
+	t.Run("no renewal when the recorded CA version matches and the certificate is fresh", func(t *testing.T) {
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, caCertSecret.DeepCopy(), caKeySecret.DeepCopy(), deployment.DeepCopy()).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		ctx := context.Background()
+
+		// Seed a real -tls secret (signed by the current CA) so the recorded
+		// annotation matches and the certificate is far from expiry.
+		seeded, exists, err := r.createTLSSecret(inst, ctx, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("failed to seed the -tls secret: %v", err)
+		}
+		if exists {
+			t.Fatal("expected the -tls secret to not exist before seeding")
+		}
+		if err := client.Create(ctx, seeded); err != nil {
+			t.Fatalf("failed to create the seeded -tls secret: %v", err)
+		}
+
+		result, recheck, err := r.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != 0 {
+			t.Errorf("expected no immediate requeue once stable, got %v", result.RequeueAfter)
+		}
+		if recheck != tlsCertRecheckInterval {
+			t.Errorf("expected the standing recheck interval %v once stable, got %v", tlsCertRecheckInterval, recheck)
+		}
+
+		stored := &corev1.Secret{}
+		if err := client.Get(ctx, types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, stored); err != nil {
+			t.Fatalf("failed to get the -tls secret: %v", err)
+		}
+		if stored.ResourceVersion != seeded.ResourceVersion {
+			t.Errorf("expected the -tls secret to be untouched (RV %s), got %s", seeded.ResourceVersion, stored.ResourceVersion)
+		}
+	})
+}
+
 // TestBuildProbesInitialDelay verifies that readiness and liveness probes no
 // longer carry an InitialDelaySeconds value (the startup probe already gates
 // them), while the startup probe keeps its 30s initial delay.
@@ -3134,17 +3330,24 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 	inst.Spec.TLSSecretName = ""
 	inst.Labels = map[string]string{"strimzi.io/cluster": cluster}
 
+	// The -tls secret records the signing CA cert secret's resourceVersion
+	// (F2); the fixtures pin both sides to "1000" so the expiry-based
+	// subtests below exercise the expiry path, not a CA change.
 	caCertSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: cluster + clusterCASuffix, Namespace: inst.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: cluster + clusterCASuffix, Namespace: inst.Namespace, ResourceVersion: "1000"},
 		Data:       map[string][]byte{"ca.crt": []byte(ca.CACertPEM)},
 	}
 	caKeySecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: cluster + clusterCAKeySuffix, Namespace: inst.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: cluster + clusterCAKeySuffix, Namespace: inst.Namespace, ResourceVersion: "1001"},
 		Data:       map[string][]byte{"ca.key": []byte(ca.CAKeyPEM)},
 	}
 	tlsSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace},
-		Type:       corev1.SecretTypeOpaque,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        inst.Name + tlsSecretSuffix,
+			Namespace:   inst.Namespace,
+			Annotations: map[string]string{CAVersionKey: "1000"},
+		},
+		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			"tls-keystore.jks":  keystore,
 			"keystore_password": []byte(password),
@@ -3207,8 +3410,12 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 			t.Fatalf("failed to build keystore: %v", err)
 		}
 		freshTLSSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace},
-			Type:       corev1.SecretTypeOpaque,
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + tlsSecretSuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{CAVersionKey: "1000"},
+			},
+			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
 				"tls-keystore.jks":  keystore,
 				"keystore_password": []byte(password),
@@ -3349,8 +3556,12 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 			t.Fatalf("failed to build keystore from expired cert: %v", err)
 		}
 		expiredTLSSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace},
-			Type:       corev1.SecretTypeOpaque,
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + tlsSecretSuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{CAVersionKey: "1000"},
+			},
+			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
 				"tls-keystore.jks":  keystore,
 				"keystore_password": []byte(password),

@@ -4062,4 +4062,174 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 	})
 
+	// F2: a Strimzi cluster CA rotation must renew the operator-managed REST
+	// API TLS certificate in every auth mode — here SASL_SSL with
+	// securehttp — not only mTLS. The -tls secret records the signing CA
+	// cert secret's resourceVersion; handleTLSCertExpiry renews when it
+	// differs and rolls the deployment via the tlsVersion annotation.
+	Context("When the cluster CA rotates in SASL_SSL mode with securehttp", func() {
+		ctx := context.Background()
+		specCounter := 0
+
+		var (
+			namespaceName      string
+			typeNamespacedName types.NamespacedName
+			clusterCA          *testutil.TestCA
+		)
+
+		BeforeEach(func() {
+			var err error
+			clusterCA, err = testutil.GenerateClusterCACert("STIMZI-SR-CA-ROTATION")
+			Expect(err).NotTo(HaveOccurred())
+
+			specCounter++
+			namespaceName = "test-ca-rotation-" + strconv.Itoa(specCounter)
+			typeNamespacedName = types.NamespacedName{Name: namespaceName, Namespace: namespaceName}
+
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})).To(Succeed())
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: namespaceName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "tls", Port: 9093, Tls: true, Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+								Authentication: &kafka.KafkaListenerAuthentication{Type: kafka.SCRAM_SHA_512_KAFKALISTENERAUTHENTICATIONTYPE}},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: namespaceName}, updateCluster)).To(Succeed())
+			updateCluster.Status = &kafka.KafkaStatus{
+				ClusterId: "ca-rotation-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.ca-rotation.svc:9093", Name: "TLS", Certificates: []string{clusterCA.CACertPEM}},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			kafkaUser := &kafka.KafkaUser{
+				ObjectMeta: metav1.ObjectMeta{Name: namespaceName, Namespace: namespaceName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec:       &kafka.KafkaUserSpec{Authentication: &kafka.KafkaUserAuthentication{Type: kafka.SCRAM_SHA_512_KAFKAUSERAUTHENTICATIONTYPE}},
+			}
+			Expect(k8sClient.Create(ctx, kafkaUser)).To(Succeed())
+
+			By("Creating cluster CA cert and key secrets")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca-cert", Namespace: namespaceName},
+				Data:       map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)},
+			})).To(Succeed())
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: namespaceName},
+				Data:       map[string][]byte{"ca.key": []byte(clusterCA.CAKeyPEM)},
+			})).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: namespaceName, Namespace: namespaceName},
+				Data: map[string][]byte{
+					"password":         []byte("scram-password"),
+					"sasl.jaas.config": []byte(`org.apache.kafka.common.security.scram.ScramLoginModule required username="` + namespaceName + `" password="scram-password";`),
+				},
+			})).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: namespaceName, Namespace: namespaceName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:       true,
+					Listener:         "TLS",
+					SecurityProtocol: "SASL_SSL",
+					Template:         corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should renew the -tls secret and roll the Deployment after the cluster CA rotates", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("First reconcile to create the Deployment, -jks and -tls secrets")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			tlsName := types.NamespacedName{Name: namespaceName + "-tls", Namespace: namespaceName}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, tlsName, &corev1.Secret{})
+			}, time.Minute*2, time.Second).Should(Succeed())
+
+			tlsSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, tlsName, tlsSecret)).To(Succeed())
+			oldTLSResourceVersion := tlsSecret.ResourceVersion
+			caCertName := types.NamespacedName{Name: "kafka-cluster-cluster-ca-cert", Namespace: namespaceName}
+			caCertSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, caCertName, caCertSecret)).To(Succeed())
+			Expect(tlsSecret.Annotations[CAVersionKey]).To(Equal(caCertSecret.ResourceVersion))
+
+			deployName := types.NamespacedName{Name: namespaceName + "-deploy", Namespace: namespaceName}
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deployName, deployment)).To(Succeed())
+			oldTLSVersionAnnotation := deployment.Spec.Template.Annotations[tlsVersionKey]
+
+			By("Rotating the cluster CA (new cert and key bump the resourceVersions)")
+			newClusterCA, err := testutil.GenerateClusterCACert("STIMZI-SR-CA-ROTATION-V2")
+			Expect(err).NotTo(HaveOccurred())
+			caCertSecret.Data["ca.crt"] = []byte(newClusterCA.CACertPEM)
+			Expect(k8sClient.Update(ctx, caCertSecret)).To(Succeed())
+			// The CA key must also be updated to match the new cert, otherwise
+			// x509 signing will fail with "provided PrivateKey doesn't match
+			// parent's PublicKey".
+			caKeySecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster-cluster-ca", Namespace: namespaceName}, caKeySecret)).To(Succeed())
+			caKeySecret.Data["ca.key"] = []byte(newClusterCA.CAKeyPEM)
+			Expect(k8sClient.Update(ctx, caKeySecret)).To(Succeed())
+
+			By("Reconciling: the SASL_SSL rotation pass rebuilds the truststore")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Reconciling again: handleTLSCertExpiry renews the -tls secret on the CA change")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking that the -tls secret was renewed for the new CA")
+			renewed := &corev1.Secret{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, tlsName, renewed); err != nil {
+					return ""
+				}
+				return renewed.ResourceVersion
+			}, time.Minute*2, time.Second).ShouldNot(Equal(oldTLSResourceVersion))
+			Expect(k8sClient.Get(ctx, caCertName, caCertSecret)).To(Succeed())
+			Expect(renewed.Annotations[CAVersionKey]).To(Equal(caCertSecret.ResourceVersion))
+			Expect(renewed.Data).To(HaveKey("tls-keystore.jks"))
+			Expect(renewed.Data).To(HaveKey("keystore_password"))
+
+			By("Checking that the Deployment rolled via the tlsVersion annotation")
+			rolled := &appsv1.Deployment{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, deployName, rolled); err != nil {
+					return ""
+				}
+				return rolled.Spec.Template.Annotations[tlsVersionKey]
+			}, time.Minute, time.Second).ShouldNot(Equal(oldTLSVersionAnnotation))
+			Expect(rolled.Spec.Template.Annotations[tlsVersionKey]).To(Equal(renewed.ResourceVersion))
+		})
+	})
 })
