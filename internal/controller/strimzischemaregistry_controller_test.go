@@ -2846,6 +2846,79 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 	})
 
+	// Phase 1b: the unsupported multi-replica HTTPS combination. Multiple
+	// replicas with securehttp and no user-provided TLS secret cannot work
+	// (the operator-generated certificate covers DNS names only, so
+	// inter-instance HTTPS forwarding fails TLS verification); reconciliation
+	// must be skipped with an explicit condition and no Deployment created.
+	Context("When reconciling replicas with securehttp and no user TLS secret", func() {
+		const SchemaRegistryName = "test-https-replicas"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		BeforeEach(func() {
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      SchemaRegistryName,
+					Namespace: SchemaRegistryName,
+					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+				},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:       true,
+					Listener:         "plain",
+					SecurityProtocol: "PLAINTEXT",
+					Replicas:         ptr.To(int32(2)),
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}})
+		})
+
+		It("should reject the combination and create no deployment", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+
+			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("ReplicasRequireUserTLSSecret"))
+			Expect(cond.Message).To(ContainSubstring("spec.replicas > 1 with securehttp"))
+			Expect(instance.Status.Status).To(Equal("InvalidSpec"))
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).
+				To(HaveOccurred(), "no Deployment must be created for the unsupported combination")
+		})
+	})
+
 	// Phase 2: arbitrary configuration escape hatch.
 	Context("When reconciling with spec.configuration", func() {
 		const SchemaRegistryName = "test-configuration"
@@ -3066,13 +3139,17 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(np.Spec.Ingress).To(HaveLen(1))
 			Expect(np.Spec.Ingress[0].Ports).To(HaveLen(1))
 			Expect(np.Spec.Ingress[0].Ports[0].Port.IntVal).To(Equal(int32(8081)))
-			Expect(np.Spec.Egress).To(HaveLen(2))
+			Expect(np.Spec.Egress).To(HaveLen(3))
 			Expect(np.Spec.Egress[0].To).To(HaveLen(1))
 			Expect(np.Spec.Egress[0].To[0].PodSelector.MatchLabels["strimzi.io/cluster"]).To(Equal("kafka-cluster"))
 			// DNS egress to kube-dns is required for bootstrap name resolution.
 			Expect(np.Spec.Egress[1].Ports).To(HaveLen(2))
 			Expect(np.Spec.Egress[1].Ports[0].Port.IntVal).To(Equal(int32(53)))
 			Expect(np.Spec.Egress[1].To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"]).To(Equal("kube-system"))
+			// Inter-instance egress is required for multi-replica peer
+			// forwarding: replicas advertise their own pod IP as host.name.
+			Expect(np.Spec.Egress[2].To[0].PodSelector.MatchLabels["app"]).To(Equal(SchemaRegistryName))
+			Expect(np.Spec.Egress[2].Ports[0].Port.IntVal).To(Equal(int32(8081)))
 		})
 	})
 
@@ -3290,8 +3367,10 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			By("Checking the derived JKS secret was created with the JKS contract")
 			derived := &corev1.Secret{}
+			// The derived secret is named per registry:
+			// <registry>-<tlssecretname>-jks.
 			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, derived)
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-" + UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, derived)
 			}, time.Minute, time.Second).Should(Succeed())
 			Expect(derived.Data).To(HaveKey("tls-keystore.jks"))
 			Expect(derived.Data).To(HaveKey("keystore_password"))
@@ -3312,7 +3391,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			for _, vol := range deployment.Spec.Template.Spec.Volumes {
 				if vol.Name == restAPITLSVolumeName && vol.Secret != nil {
 					volumeMounted = true
-					Expect(vol.Secret.SecretName).To(Equal(UserTLSSecretName + "-jks"))
+					Expect(vol.Secret.SecretName).To(Equal(SchemaRegistryName + "-" + UserTLSSecretName + "-jks"))
 				}
 			}
 			Expect(volumeMounted).To(BeTrue())
@@ -3322,7 +3401,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					if e.Name == envName {
 						found = true
 						Expect(e.ValueFrom).NotTo(BeNil())
-						Expect(e.ValueFrom.SecretKeyRef.Name).To(Equal(UserTLSSecretName + "-jks"))
+						Expect(e.ValueFrom.SecretKeyRef.Name).To(Equal(SchemaRegistryName + "-" + UserTLSSecretName + "-jks"))
 					}
 				}
 				Expect(found).To(BeTrue())
@@ -3334,7 +3413,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 			stable := &corev1.Secret{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, stable)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-" + UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, stable)).To(Succeed())
 			Expect(stable.ResourceVersion).To(Equal(derivedVersion))
 		})
 	})

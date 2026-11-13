@@ -41,6 +41,42 @@ supported versions).
 - A leader-election `Role`/`RoleBinding` in the release namespace.
 - Optionally a metrics `Service` (`metrics.enabled`, default `true`).
 
+## CRD lifecycle
+
+The CRD lives in the chart's [`crds/`](crds/) directory, not under
+`templates/`. Helm installs files from `crds/` before rendering templates and
+never upgrades or deletes them: uninstalling or upgrading the release leaves
+the CRD — and every `StrimziSchemaRegistry` custom resource — in place.
+
+- **Uninstall is safe.** `helm uninstall` removes the operator Deployment,
+  RBAC and Service, but the CRD and all CRs survive. Delete the CRD manually
+  (`kubectl delete crd strimzischemaregistries.strimziregistryoperator.randsw.code`)
+  only when you also want to remove every registry CR cluster-wide.
+- **CRD schema upgrades are manual.** When a chart release ships a newer CRD
+  schema, apply it yourself before upgrading the operator:
+
+  ```console
+  kubectl apply -f helm-chart/ssr-operator/crds/strimziregistryoperator.randsw.code_strimzischemaregistries.yaml
+  ```
+
+- **Migrating from chart versions that shipped the CRD under `templates/`**
+  (chart ≤ 0.0.30): on those releases the CRD was a release resource, so
+  `helm uninstall` deleted the CRD and all CRs. To move an existing release
+  to the new chart safely:
+
+  1. Back up every `StrimziSchemaRegistry` CR:
+     `kubectl get strimzischemaregistries -A -o yaml > cr-backup.yaml`
+  2. `helm uninstall <release>` (this deletes the old CRD and the CRs).
+  3. Install the new chart release (it creates the CRD from `crds/`).
+  4. Re-apply the CR backup: `kubectl apply -f cr-backup.yaml`. The operator
+     recreates its owned Deployments, Services and secrets from the CRs.
+
+  Alternatively, to avoid any CR downtime window, keep the old release until
+  you have re-applied the CRD from the new chart with
+  `kubectl apply --server-side --field-manager=<something-other-than-helm>`,
+  confirmed the CRD no longer belongs to the release
+  (`helm get manifest <release>` must not list it), and only then upgrade.
+
 ## RBAC scope
 
 By default the operator runs **cluster-scoped**: the manager RBAC is rendered
@@ -73,7 +109,7 @@ cluster they reference) must live in the release namespace.
 |---|---|---|
 | `replicaCount` | `1` | Operator replicas. |
 | `image.repository` | `ghcr.io/randsw/strimzi-schema-registry-operator` | Operator image. |
-| `image.tag` | `"latest"` | Operator image tag (defaults to the chart appVersion when unset). |
+| `image.tag` | *(unset)* | Operator image tag. Defaults to the chart `appVersion` (the operator version the chart was released with); override only to pin a different build, and avoid mutable tags such as `latest`. |
 | `metrics.enabled` | `true` | Create a `Service` for the operator metrics endpoint. |
 | `metrics.secure` | `false` | Serve metrics over HTTPS with authn/authz. |
 | `metrics.port` | `8080` | Port the metrics endpoint binds to. |

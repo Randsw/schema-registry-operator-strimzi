@@ -100,6 +100,22 @@ func clientAuthValidationError(instance *strimziregistryoperatorv1alpha1.Strimzi
 	return ""
 }
 
+// httpsMultiReplicaValidationError returns a non-empty message describing why
+// the spec combination "multiple replicas + securehttp with an
+// operator-generated REST API TLS certificate" is unsupported, or an empty
+// string when it is valid. The operator-generated certificate carries
+// DNS-name SANs only, while every replica advertises its own pod IP as
+// host.name, so inter-instance HTTPS forwarding between replicas fails TLS
+// verification. A user-provided TLS secret (spec.tlssecretname) may cover
+// the replica addresses and is therefore accepted.
+func httpsMultiReplicaValidationError(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+	if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName == "" &&
+		instance.Spec.Replicas != nil && *instance.Spec.Replicas > 1 {
+		return "spec.replicas > 1 with securehttp and no spec.tlssecretname is unsupported: the operator-generated REST API certificate covers DNS names only, while each replica advertises its pod IP as host.name, so inter-instance HTTPS forwarding fails TLS verification; provide spec.tlssecretname with a certificate covering the replica addresses, or set replicas to 1 or securehttp to false"
+	}
+	return ""
+}
+
 // userTLSSecretValidationError returns a non-empty message describing why the
 // user-provided REST API TLS secret (spec.tlssecretname) cannot be used, or an
 // empty string when it is valid. A nil secret means the secret does not exist.
@@ -217,6 +233,35 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			// a mere mTLS downgrade.
 			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "",
 				"reconciliation is skipped until the invalid spec.clientauth/spec.securehttp combination is fixed; an existing Deployment (if any) keeps running with its current configuration and is no longer reconciled")
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Validate that multiple replicas are not combined with an
+	// operator-generated REST API TLS certificate: inter-instance HTTPS
+	// forwarding between replicas fails TLS verification (the generated
+	// certificate covers DNS names only, not the per-pod addresses).
+	if msg := httpsMultiReplicaValidationError(instance); msg != "" {
+		logger.Info("Invalid multi-replica HTTPS configuration; skipping reconciliation")
+		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "ReplicasRequireUserTLSSecret",
+			Message:            msg,
+			ObservedGeneration: instance.Generation,
+		})
+		instance.Status.Status = "InvalidSpec"
+		if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
+			if err := r.Status().Update(ctx, instance); err != nil {
+				logger.Error(err, "Failed to update CR status")
+				monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+				return ctrl.Result{}, err
+			}
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReplicasRequireUserTLSSecret", "", "%s", msg)
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "",
+				"reconciliation is skipped until the unsupported spec.replicas/spec.securehttp/spec.tlssecretname combination is fixed; an existing Deployment (if any) keeps running with its current configuration and is no longer reconciled")
 		}
 		return ctrl.Result{}, nil
 	}
@@ -964,7 +1009,7 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 // Secret events are cluster-wide, so cheap pre-filters (B11) exit before any
 // CR List call:
 //  1. Secrets the operator itself owns — the <name>-jks and <name>-tls
-//     outputs and the derived <tlssecretname>-jks — are written by
+//     outputs and the derived <name>-<tlssecretname>-jks — are written by
 //     reconciliation, never inputs to it, so their events must not
 //     re-trigger reconciliation. The controller-owner check (rather than the
 //     bare name suffix) keeps user-provided TLS secrets that merely end with
@@ -1364,14 +1409,22 @@ func (r *StrimziSchemaRegistryReconciler) handleUserTLSSecretRotation(
 	if dep.Spec.Template.Annotations != nil {
 		current = dep.Spec.Template.Annotations[tlsVersionKey]
 	}
-	if current == userSecret.ResourceVersion {
+	expectedMount := restAPITLSMountSecretName(instance, userSecret)
+	currentMount := restAPITLSVolumeSecretName(dep)
+	// The mount check runs even when the tlsVersion annotation matches: an
+	// operator upgrade that changes the derived-secret naming (per-registry
+	// <name>-<tlssecretname>-jks) must repoint the mounts and roll the pods
+	// once even without a user-secret rotation. A deployment without a
+	// secret-backed rest-api-tls volume has no mount to repoint and must not
+	// be rolled on every reconcile (that would requeue forever).
+	if current == userSecret.ResourceVersion && (currentMount == "" || currentMount == expectedMount) {
 		return ctrl.Result{}, nil
 	}
 	// When the user secret shape changed (pre-built keystore ↔
 	// kubernetes.io/tls) the Deployment mounts the wrong secret; repoint the
 	// mounts and env refs at the expected one in the same update that rolls
 	// the pods, so the rollout never runs with stale mounts.
-	if expectedMount := restAPITLSMountSecretName(instance, userSecret); restAPITLSVolumeSecretName(dep) != expectedMount {
+	if currentMount != "" && currentMount != expectedMount {
 		fixRestAPITLSMount(dep, expectedMount)
 	}
 	if dep.Spec.Template.Annotations == nil {

@@ -72,7 +72,7 @@ type StrimziSchemaRegistrySpec struct {
 	//     PKCS12: tls-keystore.p12, keystore_password, key_password
 	//   - a standard kubernetes.io/tls secret (tls.crt + tls.key PEM, ca.crt
 	//     optional): the operator converts it to a JKS keystore and mounts the
-	//     derived <tlssecretname>-jks secret instead.
+	//     derived <registry-name>-<tlssecretname>-jks secret instead.
 	//
 	// The operator validates the secret before rendering the Deployment: an
 	// invalid secret sets Ready=False with reason InvalidTLSSecret (plus a

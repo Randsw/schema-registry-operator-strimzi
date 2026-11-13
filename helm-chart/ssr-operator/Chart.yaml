@@ -21,7 +21,10 @@ version: 0.0.30
 # incremented each time you make changes to the application. Versions are not expected to
 # follow Semantic Versioning. They should reflect the version the application is using.
 # It is recommended to use it with quotes.
-appVersion: 1.0.0
+# The appVersion is the operator image tag the chart installs by default
+# (values.yaml no longer overrides it with a mutable "latest" tag). Keep it
+# in sync with the released operator version.
+appVersion: "1.17.0"
 maintainers:
 - name: Randsw
   email: randsw06@gmail.com

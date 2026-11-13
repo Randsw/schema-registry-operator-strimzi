@@ -198,7 +198,13 @@ jobs:
             path: /tmp/e2e-diagnostics
             if-no-files-found: ignore
     Deploy:
-      if: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' && github.actor != 'dependabot[bot]' }}
+      # The explicit if must allow a skipped E2E: on feature/fix branch
+      # pushes E2E is intentionally skipped (e2e_gate), and without the
+      # needs.E2E.result == 'skipped' allowance a skipped dependency would
+      # skip this job too, so the branch image was never published. A failed
+      # E2E (result == 'failure') still blocks publication.
+      if: >-
+        ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' && github.actor != 'dependabot[bot]' && (needs.E2E.result == 'success' || needs.E2E.result == 'skipped') }}
       # Wait for the e2e tests as well: on PRs and main/develop pushes E2E
       # runs, and the image must not be published before it passes. On other
       # branch pushes E2E is skipped, which does not block dependents.

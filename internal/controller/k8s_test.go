@@ -59,6 +59,158 @@ func newTestKafkaCR(name, namespace string) *kafka.Kafka {
 	}
 }
 
+// TestHTTPSMultiReplicaValidationError is a table-driven test for the
+// unsupported-combination guard: multiple replicas combined with securehttp
+// and no user-provided TLS secret must be rejected (the operator-generated
+// certificate covers DNS names only, so inter-instance HTTPS forwarding
+// fails TLS verification), while every other combination stays valid.
+func TestHTTPSMultiReplicaValidationError(t *testing.T) {
+	cases := []struct {
+		name     string
+		replicas *int32
+		secure   bool
+		tlsName  string
+		wantErr  bool
+	}{
+		{name: "replicas=2 securehttp no user tls secret is rejected", replicas: ptr.To(int32(2)), secure: true, wantErr: true},
+		{name: "replicas=3 securehttp no user tls secret is rejected", replicas: ptr.To(int32(3)), secure: true, wantErr: true},
+		{name: "replicas=1 securehttp is valid", replicas: ptr.To(int32(1)), secure: true},
+		{name: "unset replicas (default 1) securehttp is valid", secure: true},
+		{name: "replicas=2 with user tls secret is valid", replicas: ptr.To(int32(2)), secure: true, tlsName: "user-tls"},
+		{name: "replicas=2 plain http is valid", replicas: ptr.To(int32(2))},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := newTestInstance()
+			inst.Spec.SecureHTTP = tc.secure
+			inst.Spec.TLSSecretName = tc.tlsName
+			inst.Spec.Replicas = tc.replicas
+
+			msg := httpsMultiReplicaValidationError(inst)
+			if tc.wantErr && msg == "" {
+				t.Error("expected a validation error, got none")
+			}
+			if !tc.wantErr && msg != "" {
+				t.Errorf("expected no validation error, got %q", msg)
+			}
+		})
+	}
+}
+
+// TestUpdateExistingDeploymentBootstrapDrift covers the live-input drift
+// fix: the Kafka bootstrap address is rendered into the deployment env from
+// the Kafka CR's status, which the CR spec hash cannot see. When the Kafka
+// listener is rebuilt (different bootstrap service or port) the deployment
+// must be updated even though the CR spec — and therefore the hash — is
+// unchanged; otherwise the pods keep the stale bootstrap address forever.
+func TestUpdateExistingDeploymentBootstrapDrift(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	// PLAINTEXT avoids any JKS/user-secret requirements; only the Kafka CR
+	// with status listeners is needed.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+		},
+	}
+
+	desiredHash, err := computeSpecHash(inst)
+	if err != nil {
+		t.Fatalf("failed to compute spec hash: %v", err)
+	}
+
+	// The Kafka CR exposes the current bootstrap address; the deployment
+	// under test may carry a stale one.
+	kafkaCR := newTestKafkaCR("kafka-cluster", inst.Namespace)
+	currentBootstrap := kafkaCR.Status.Listeners[0].BootstrapServers
+
+	newDeployment := func(hash, bootstrapEnv string) *apps.Deployment {
+		env := []corev1.EnvVar{}
+		if bootstrapEnv != "" {
+			env = append(env, corev1.EnvVar{Name: bootstrapServersEnv, Value: bootstrapEnv})
+		}
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1", Env: env},
+					}},
+				},
+			},
+		}
+	}
+
+	newReconciler := func(dep *apps.Deployment) *StrimziSchemaRegistryReconciler {
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, kafkaCR, dep).
+			Build()
+		return &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+	}
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+
+	t.Run("stale bootstrap address triggers a deployment update", func(t *testing.T) {
+		dep := newDeployment(desiredHash, "old-bootstrap:9092")
+		r := newReconciler(dep)
+
+		updated, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true when the bootstrap address drifted")
+		}
+		if got := deploymentBootstrapServers(updated); got != currentBootstrap {
+			t.Errorf("expected the deployment env to carry the current bootstrap %q, got %q", currentBootstrap, got)
+		}
+	})
+
+	t.Run("current bootstrap address stays in steady state", func(t *testing.T) {
+		dep := newDeployment(desiredHash, currentBootstrap)
+		r := newReconciler(dep)
+
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if specChanged {
+			t.Fatal("expected specChanged=false when the bootstrap address matches")
+		}
+	})
+
+	t.Run("drift update is idempotent", func(t *testing.T) {
+		dep := newDeployment(desiredHash, "old-bootstrap:9092")
+		r := newReconciler(dep)
+
+		updated, _, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error on the drift update: %v", err)
+		}
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, updated)
+		if err != nil {
+			t.Fatalf("unexpected error on the follow-up reconcile: %v", err)
+		}
+		if specChanged {
+			t.Fatal("expected specChanged=false once the bootstrap address is reconciled")
+		}
+	})
+}
+
 // TestUpdateExistingDeploymentConfigOverriddenEventSpam covers B2: the
 // ConfigKeyOverridden Warning events must be emitted only when the
 // deployment spec actually changed, not on every reconcile. A CR with
@@ -2053,8 +2205,8 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	if np.Spec.Ingress[0].Ports[0].Port.IntVal != 8081 {
 		t.Errorf("expected ingress on SR listener port 8081, got %d", np.Spec.Ingress[0].Ports[0].Port.IntVal)
 	}
-	if len(np.Spec.Egress) != 2 {
-		t.Fatalf("expected two egress rules (Kafka + DNS), got %v", np.Spec.Egress)
+	if len(np.Spec.Egress) != 3 {
+		t.Fatalf("expected three egress rules (Kafka + DNS + inter-instance), got %v", np.Spec.Egress)
 	}
 	if len(np.Spec.Egress[0].Ports) != 1 {
 		t.Fatalf("expected a single port on the Kafka egress rule, got %v", np.Spec.Egress[0].Ports)
@@ -2105,6 +2257,24 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	}
 	if dns.To[0].PodSelector.MatchLabels[dnsPodLabel] != dnsPodValue {
 		t.Errorf("expected DNS pod selector from constants %s=%s, got %v", dnsPodLabel, dnsPodValue, dns.To[0].PodSelector.MatchLabels)
+	}
+
+	// Inter-instance egress: replicas advertise their own pod IP as
+	// host.name, so peer forwarding connects pod-to-pod on the listener
+	// port. Without this rule a multi-replica registry with the policy
+	// enabled cannot forward requests between instances.
+	peers := np.Spec.Egress[2]
+	if len(peers.To) != 1 {
+		t.Fatalf("expected one peer on the inter-instance egress rule, got %v", peers.To)
+	}
+	if peers.To[0].PodSelector == nil || peers.To[0].PodSelector.MatchLabels["app"] != "test-sr" {
+		t.Errorf("expected inter-instance peer selector app=test-sr, got %v", peers.To[0].PodSelector)
+	}
+	if len(peers.Ports) != 1 || peers.Ports[0].Port.IntVal != 8081 {
+		t.Errorf("expected inter-instance egress on the listener port 8081, got %v", peers.Ports)
+	}
+	if peers.Ports[0].Protocol == nil || *peers.Ports[0].Protocol != corev1.ProtocolTCP {
+		t.Errorf("expected inter-instance egress protocol TCP, got %v", peers.Ports[0].Protocol)
 	}
 	if dnsNamespaceLabel != "kubernetes.io/metadata.name" || dnsNamespaceName != "kube-system" || dnsPodLabel != "k8s-app" || dnsPodValue != "kube-dns" {
 		t.Errorf("DNS egress constants changed; update the README NetworkPolicy section to match the new assumption: %s=%s in namespace %s (label %s)",

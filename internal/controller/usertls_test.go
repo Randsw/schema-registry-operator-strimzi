@@ -667,13 +667,23 @@ func TestValidateUserTLSSecret(t *testing.T) {
 			wantMentions: []string{"tls-keystore.jks"},
 		},
 		{
-			name: "derived secret name colliding with the operator-managed -jks secret is invalid",
-			// tlssecretname == CR name makes <tlssecretname>-jks equal the
-			// operator-managed KafkaStore secret <name>-jks.
-			instance:     newInstance("test-sr"),
+			name: "tlssecretname equal to the CR name no longer collides (per-registry derived name)",
+			// The derived secret is named <name>-<tlssecretname>-jks, so
+			// tlssecretname == CR name cannot collide with the
+			// operator-managed <name>-jks / <name>-tls secrets.
+			instance: newInstance("test-sr"),
+			secret:   &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": []byte("pem-key")}},
+		},
+		{
+			name: "derived secret name exceeding the 253-character limit is invalid",
+			instance: func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+				inst := newInstance("user-tls")
+				inst.Name = strings.Repeat("a", 241)
+				return inst
+			}(),
 			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": []byte("pem-key")}},
 			wantInvalid:  true,
-			wantMentions: []string{"test-sr-jks", "collides"},
+			wantMentions: []string{"253"},
 		},
 		{
 			name:     "JKS keystore contract still passes",
@@ -714,22 +724,23 @@ func TestValidateUserTLSSecret(t *testing.T) {
 	}
 }
 
-// TestDerivedSecretNameCollision unit-tests the collision guard for the
-// derived <tlssecretname>-jks secret name.
-func TestDerivedSecretNameCollision(t *testing.T) {
-	t.Run("tlssecretname equal to the CR name collides with <name>-jks", func(t *testing.T) {
+// TestDerivedSecretNameValid unit-tests the object-name limit guard for the
+// per-registry derived <name>-<tlssecretname>-jks secret name.
+func TestDerivedSecretNameValid(t *testing.T) {
+	t.Run("a normal name is valid", func(t *testing.T) {
 		inst := newTestInstance()
-		inst.Spec.TLSSecretName = inst.Name
-		if msg := derivedSecretNameCollision(inst); msg == "" {
-			t.Error("expected a collision message, got empty")
+		inst.Spec.TLSSecretName = "user-tls"
+		if msg := derivedSecretNameValid(inst); msg != "" {
+			t.Errorf("expected no validation message, got %q", msg)
 		}
 	})
 
-	t.Run("distinct tlssecretname does not collide", func(t *testing.T) {
+	t.Run("a name exceeding 253 characters is rejected", func(t *testing.T) {
 		inst := newTestInstance()
+		inst.Name = strings.Repeat("a", 241)
 		inst.Spec.TLSSecretName = "user-tls"
-		if msg := derivedSecretNameCollision(inst); msg != "" {
-			t.Errorf("expected no collision, got %q", msg)
+		if msg := derivedSecretNameValid(inst); msg == "" {
+			t.Error("expected a validation message, got empty")
 		}
 	})
 }
@@ -748,7 +759,8 @@ func TestEnsureDerivedJKSSecret(t *testing.T) {
 		inst.Spec.TLSSecretName = "user-tls"
 		return inst
 	}
-	derivedName := types.NamespacedName{Name: "user-tls-jks", Namespace: "default"}
+	// The derived secret is named per registry: <name>-<tlssecretname>-jks.
+	derivedName := types.NamespacedName{Name: "test-sr-user-tls-jks", Namespace: "default"}
 
 	t.Run("creates the derived secret with the JKS contract", func(t *testing.T) {
 		inst := newInstance()
@@ -840,6 +852,58 @@ func TestEnsureDerivedJKSSecret(t *testing.T) {
 			t.Error("expected the derived secret to be regenerated (resourceVersion bump)")
 		}
 	})
+
+	t.Run("refuses to adopt a secret controlled by another registry", func(t *testing.T) {
+		inst := newInstance()
+		other := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sr-user-tls-jks",
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					Kind:       "StrimziSchemaRegistry",
+					Name:       "other-sr",
+					UID:        "other-uid",
+					Controller: ptr.To(true),
+				}},
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, other).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+			Data:       realPEMSecretData(t),
+		}
+
+		err := reconciler.ensureDerivedJKSSecret(context.Background(), inst, userSecret, logr.Logger{})
+		if err == nil {
+			t.Fatal("expected an error for a derived secret controlled by another registry")
+		}
+		if !strings.Contains(err.Error(), "other-sr") {
+			t.Errorf("expected the error to name the controlling registry, got %q", err.Error())
+		}
+	})
+
+	t.Run("refuses to adopt an unowned secret", func(t *testing.T) {
+		inst := newInstance()
+		unowned := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-sr-user-tls-jks", Namespace: "default"},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, unowned).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+			Data:       realPEMSecretData(t),
+		}
+
+		err := reconciler.ensureDerivedJKSSecret(context.Background(), inst, userSecret, logr.Logger{})
+		if err == nil {
+			t.Fatal("expected an error for an unowned derived secret")
+		}
+		if !strings.Contains(err.Error(), "not controlled") {
+			t.Errorf("expected the error to explain the ownership problem, got %q", err.Error())
+		}
+	})
 }
 
 // newRestAPITLSDeployment builds a Deployment whose rest-api-tls volume and
@@ -894,7 +958,8 @@ func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
 		inst.Spec.TLSSecretName = "user-tls"
 		return inst
 	}
-	derivedName := types.NamespacedName{Name: "user-tls-jks", Namespace: "default"}
+	// The derived secret is named per registry: <name>-<tlssecretname>-jks.
+	derivedName := types.NamespacedName{Name: "test-sr-user-tls-jks", Namespace: "default"}
 	depName := types.NamespacedName{Name: "test-sr-deploy", Namespace: "default"}
 
 	t.Run("creates the derived secret and rolls once, then stays stable", func(t *testing.T) {
@@ -960,8 +1025,15 @@ func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
 		}
 		staleDerived := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:        "user-tls-jks",
-				Namespace:   "default",
+				Name:      "test-sr-user-tls-jks",
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					Kind:       "StrimziSchemaRegistry",
+					Name:       "test-sr",
+					UID:        "test-uid",
+					Controller: ptr.To(true),
+				}},
 				Annotations: map[string]string{userSecretVersionKey: "100"},
 			},
 			Data: map[string][]byte{
@@ -970,7 +1042,7 @@ func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
 				"key_password":      []byte("stale-password"),
 			},
 		}
-		dep := newRestAPITLSDeployment("user-tls-jks")
+		dep := newRestAPITLSDeployment("test-sr-user-tls-jks")
 		dep.Spec.Template.Annotations = map[string]string{tlsVersionKey: "100"}
 		client := fake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(inst, userSecret, staleDerived, dep).
@@ -1029,7 +1101,7 @@ func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
 		if err := client.Get(ctx, depName, dep); err != nil {
 			t.Fatalf("failed to get deployment: %v", err)
 		}
-		if got := restAPITLSVolumeSecretName(dep); got != "user-tls-jks" {
+		if got := restAPITLSVolumeSecretName(dep); got != "test-sr-user-tls-jks" {
 			t.Errorf("expected the rest-api-tls volume to mount the derived secret, got %q", got)
 		}
 		for _, envName := range []string{sslKeystorePasswordEnv, sslKeyPasswordEnv} {
@@ -1037,7 +1109,7 @@ func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
 			for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
 				if e.Name == envName {
 					found = true
-					if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil || e.ValueFrom.SecretKeyRef.Name != "user-tls-jks" {
+					if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil || e.ValueFrom.SecretKeyRef.Name != "test-sr-user-tls-jks" {
 						t.Errorf("expected %s to reference the derived secret, got %+v", envName, e.ValueFrom)
 					}
 				}

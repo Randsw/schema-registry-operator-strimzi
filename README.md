@@ -328,11 +328,13 @@ spec:
 
   **cert-manager note:** a plain `kubernetes.io/tls` secret (shape 3) now works without re-packing. The operator
   converts the PEM certificate and key into a JKS keystore itself and stores the result in an operator-managed
-  **derived secret** named `<tlssecretname>-jks`, which is what the Schema Registry pod mounts. The derived secret
-  is regenerated automatically whenever the user secret changes (tracked via the user secret's `resourceVersion`),
-  and the pod rollout keeps following the *user* secret's `resourceVersion`, so a cert-manager renewal rolls the
-  pods exactly once. The name `<tlssecretname>-jks` must not collide with the operator-managed `<name>-jks` or
-  `<name>-tls` secrets (i.e. `tlssecretname` must differ from the CR name); otherwise validation fails with
+  **derived secret** named `<registry-name>-<tlssecretname>-jks`, which is what the Schema Registry pod mounts. The
+  derived secret is scoped to the owning registry, so two registries referencing the same PEM secret each get
+  their own conversion output and deleting one registry never garbage-collects the other's TLS material. The
+  derived secret is regenerated automatically whenever the user secret changes (tracked via the user secret's
+  `resourceVersion`), and the pod rollout keeps following the *user* secret's `resourceVersion`, so a cert-manager
+  renewal rolls the pods exactly once. The combined name must fit the Kubernetes 253-character object-name limit;
+  otherwise validation fails with
   `InvalidTLSSecret`. If you prefer to manage the keystore yourself, re-pack cert-manager's output into the JKS
   contract instead:
 
@@ -505,7 +507,7 @@ Phase 3 fixes:
   listener, the Kafka cluster and the CR, and lists the listeners the Kafka CR
   exposes.
 - Secret watch events are pre-filtered: events for operator-owned secrets
-  (`<name>-jks`, `<name>-tls`, derived `<tlssecretname>-jks`) no longer
+  (`<name>-jks`, `<name>-tls`, derived `<name>-<tlssecretname>-jks`) no longer
   trigger CR list calls, and cluster CA cert events skip the
   `spec.tlssecretname` lookup.
 - The instance-count metric is now correctly spelled
@@ -568,11 +570,14 @@ spec:
 `securehttp: true` the inter-instance protocol is `https`, and the
 operator-managed REST TLS certificate SANs are DNS-only (the Service DNS
 name) while each replica advertises its pod IP as `host.name` — inter-instance
-HTTPS forwarding between replicas fails TLS verification. This was previously
-structurally enforced (no `replicas` field existed); it is now a documented
-limitation: do not combine `spec.replicas > 1` with `securehttp: true` unless
-you provide your own TLS secret whose certificate covers the replica
-addresses.
+HTTPS forwarding between replicas fails TLS verification. Combining
+`spec.replicas > 1` with `securehttp: true` and no `spec.tlssecretname` is
+therefore **rejected by the operator**: reconciliation is skipped with
+`Ready=False` (reason `ReplicasRequireUserTLSSecret`, `status.status:
+InvalidSpec`) and a Warning event, and no Deployment is created. To run
+multiple replicas over HTTPS, provide `spec.tlssecretname` with a
+certificate whose SANs cover the replica addresses (for example the pod
+IPs or a per-replica DNS identity).
 
 ### Arbitrary Schema Registry configuration
 
