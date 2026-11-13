@@ -39,7 +39,7 @@ permissions:
   contents: read
   packages: write
 env:
-  GO_VERSION: 1.26.0
+  GO_VERSION: 1.27.0
 # Superseded pull request runs are cancelled, pushes to long-lived branches
 # (e.g. main) always run to completion.
 concurrency:
@@ -83,6 +83,7 @@ jobs:
         - name: golangci-lint
           uses: golangci/golangci-lint-action@v9
           with:
+            version: v2.15.0
             args: --timeout 5m
             skip-cache: true
     # E2E tests are expensive, so they are only required for pull requests
@@ -149,7 +150,7 @@ jobs:
         - name: Set up Helm
           uses: azure/setup-helm@v5
         - name: Create kind cluster
-          uses: helm/kind-action@v1
+          uses: helm/kind-action@v1.15.2
           with:
             cluster_name: e2e-${{ matrix.scenario }}
             config: test/e2e/kind-config.yaml
@@ -255,7 +256,7 @@ jobs:
         - name: Setup NodeJS
           uses: actions/setup-node@v7
         - name: Setup package.json
-          run: echo '{"name":"semantic-release", "devDependencies":{"@semantic-release/changelog":"^6.0.1","@semantic-release/exec":"^6.0.3","@semantic-release/git":"^10.0.1","@semantic-release/release-notes-generator":"^10.0.3","conventional-changelog-conventionalcommits":"^5.0.0","semantic-release":"^21.0.2"}}' > package.json
+          run: echo '{"name":"semantic-release", "devDependencies":{"@semantic-release/changelog":"^7.0.0","@semantic-release/exec":"^7.1.0","@semantic-release/git":"^11.0.1","@semantic-release/release-notes-generator":"^14.1.1","conventional-changelog-conventionalcommits":"^10.4.1","semantic-release":"^25.0.9"}}' > package.json
         - name: Install dependencies
           run: npm install
         - name: Release
