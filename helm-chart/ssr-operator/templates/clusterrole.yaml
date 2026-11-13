@@ -1,13 +1,22 @@
+{{- $namespaceScoped := .Values.rbac.namespaceScoped }}
 {{- range .Values.cluster_roles }}
 ---
 {{- if eq .enabled true }}
+{{- /* Entries marked namespaced (the manager role) render as a Role in the
+       release namespace when rbac.namespaceScoped is true; entries that
+       authorize cluster-scoped or non-resource operations (proxy,
+       metrics-reader) always stay ClusterRoles. */}}
+{{- $namespaced := and $namespaceScoped .namespaced }}
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: {{ if $namespaced }}Role{{ else }}ClusterRole{{ end }}
 metadata:
   labels:
     {{- include "ssr-operator.labels" $ | nindent 4 }}
   name: {{ include "ssr-operator.name" $ }}-{{ .name }}
-rules: 
+  {{- if $namespaced }}
+  namespace: {{ $.Release.Namespace }}
+  {{- end }}
+rules:
 {{ toYaml .rules }}
 {{- end }}
 {{- end }}

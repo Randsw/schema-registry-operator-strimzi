@@ -39,6 +39,15 @@ spec:
             - --metrics-bind-address=0.0.0.0:{{ .Values.metrics.port }}
             - --metrics-secure={{ .Values.metrics.secure }}
             - --leader-elect
+          {{- if .Values.rbac.namespaceScoped }}
+          # Namespace-scoped mode (rbac.namespaceScoped=true): the operator
+          # restricts its manager cache and watches to this namespace.
+          env:
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: metrics

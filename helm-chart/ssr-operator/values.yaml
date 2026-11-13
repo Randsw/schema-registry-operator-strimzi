@@ -74,10 +74,25 @@ tolerations: []
 
 affinity: {}
 
+# RBAC scope for the operator (B21). When namespaceScoped is false (the
+# default) the manager RBAC is rendered as ClusterRole/ClusterRoleBinding and
+# the operator watches every namespace. When true, the manager RBAC is
+# rendered as namespaced Role/RoleBinding in the release namespace and the
+# operator watches only its own namespace (the chart injects WATCH_NAMESPACE,
+# which the operator maps onto its manager cache). The proxy and
+# metrics-reader roles stay cluster-scoped in both modes: TokenReview /
+# SubjectAccessReview creation and non-resource /metrics access are not
+# namespaced.
+rbac:
+  namespaceScoped: false
+
 # RBAC Configuration for operator
 cluster_roles:
   - enabled: true
     cluster_role_binding: true
+    # namespaced is only effective when rbac.namespaceScoped is true: the
+    # manager role is then rendered as a Role in the release namespace.
+    namespaced: true
     name: "manager-role"
     kind: "ServiceAccount"
     labels: {}
@@ -157,6 +172,8 @@ cluster_roles:
   - enabled: true
     name: "metrics-reader"
     cluster_role_binding: false
+    # non-resource /metrics access is not namespaced: always cluster-scoped.
+    namespaced: false
     kind: "ServiceAccount"
     labels: {}
     rules:
@@ -167,6 +184,9 @@ cluster_roles:
   - enabled: true
     name: "proxy-role"
     cluster_role_binding: true
+    # TokenReview/SubjectAccessReview creation is not namespaced: always
+    # cluster-scoped.
+    namespaced: false
     kind: "ServiceAccount"
     labels: {}
     rules:

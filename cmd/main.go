@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -30,6 +31,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -53,6 +55,29 @@ func init() {
 	utilruntime.Must(strimziregistryoperatorv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(kafka.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+// watchNamespace returns the namespace the manager should restrict its cache
+// and watches to, read from the WATCH_NAMESPACE environment variable. The
+// helm chart sets it when rbac.namespaceScoped=true so the operator only
+// watches its own namespace; an empty value (the default) means the operator
+// watches all namespaces (cluster-scoped mode).
+func watchNamespace() string {
+	return strings.TrimSpace(os.Getenv("WATCH_NAMESPACE"))
+}
+
+// managerCacheOptions returns the cache options restricting the manager to
+// the given namespace. An empty namespace returns zero options, leaving the
+// cache cluster-wide.
+func managerCacheOptions(namespace string) cache.Options {
+	if namespace == "" {
+		return cache.Options{}
+	}
+	return cache.Options{
+		DefaultNamespaces: map[string]cache.Config{
+			namespace: {},
+		},
+	}
 }
 
 func main() {
@@ -138,8 +163,20 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
+	// Namespace-scoped mode (B21): when WATCH_NAMESPACE is set (e.g. by the
+	// helm chart with rbac.namespaceScoped=true), the manager cache — and
+	// therefore every watch and list — is restricted to that namespace. All
+	// resources the reconciler touches (the CR, the Kafka CR, Secrets,
+	// Deployments, Services, NetworkPolicies) live in the CR's namespace, so
+	// a single-namespace cache is sufficient there.
+	watchNS := watchNamespace()
+	if watchNS != "" {
+		setupLog.Info("namespace-scoped mode enabled via WATCH_NAMESPACE", "namespace", watchNS)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
+		Cache:                  managerCacheOptions(watchNS),
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
