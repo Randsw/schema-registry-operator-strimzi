@@ -252,6 +252,23 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	podSpec.Spec.Containers[0].LivenessProbe = livenessProbe
 	podSpec.Spec.Containers[0].StartupProbe = startupProbe
 
+	// Declare the Schema Registry listener port explicitly (B19): the Service
+	// targetPort and the probes reference the numeric port, but the pod spec
+	// never declared it, leaving the port invisible to tooling
+	// (NetworkPolicies, service meshes, kubectl describe). User-declared
+	// ports from spec.template are preserved; an entry for the listener port
+	// itself is replaced by the operator-managed one.
+	portName := "http"
+	if scheme == v1.URISchemeHTTPS {
+		portName = "https"
+	}
+	listenerPorts := []v1.ContainerPort{{
+		Name:          portName,
+		ContainerPort: listenerPort,
+		Protocol:      v1.ProtocolTCP,
+	}}
+	podSpec.Spec.Containers[0].Ports = mergeContainerPorts(listenerPorts, podSpec.Spec.Containers[0].Ports)
+
 	resources := &podSpec.Spec.Containers[0].Resources
 	if resources.Requests == nil {
 		resources.Requests = v1.ResourceList{}
@@ -1267,6 +1284,38 @@ func mergeVolumeMounts(operator, user []v1.VolumeMount) []v1.VolumeMount {
 		takenNames[m.Name] = struct{}{}
 		takenPaths[m.MountPath] = struct{}{}
 		merged = append(merged, m)
+	}
+	return merged
+}
+
+// mergeContainerPorts merges operator-managed container ports with
+// user-declared ones: the operator wins on conflicting containerPort numbers
+// and names, user-only ports are appended in their original order.
+func mergeContainerPorts(operator, user []v1.ContainerPort) []v1.ContainerPort {
+	if len(operator) == 0 {
+		return user
+	}
+	takenNumbers := make(map[int32]struct{}, len(operator))
+	takenNames := make(map[string]struct{}, len(operator))
+	for _, p := range operator {
+		takenNumbers[p.ContainerPort] = struct{}{}
+		if p.Name != "" {
+			takenNames[p.Name] = struct{}{}
+		}
+	}
+	merged := append([]v1.ContainerPort{}, operator...)
+	for _, p := range user {
+		if _, exists := takenNumbers[p.ContainerPort]; exists {
+			continue
+		}
+		if p.Name != "" {
+			if _, exists := takenNames[p.Name]; exists {
+				continue
+			}
+			takenNames[p.Name] = struct{}{}
+		}
+		takenNumbers[p.ContainerPort] = struct{}{}
+		merged = append(merged, p)
 	}
 	return merged
 }

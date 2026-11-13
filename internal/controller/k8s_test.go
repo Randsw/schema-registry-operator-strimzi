@@ -1126,6 +1126,87 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+// TestBuildDeploymentSpecDeclaresContainerPort covers B19: the Schema
+// Registry listener port must be declared in the container spec (the Service
+// targetPort and the probes reference the numeric port), with the name
+// matching the Service port name (http/https), and user-declared ports from
+// spec.template must be preserved.
+func TestBuildDeploymentSpecDeclaresContainerPort(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	build := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+		t.Helper()
+		r := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+		dep, _, err := r.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "",
+			kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return dep
+	}
+
+	t.Run("plain HTTP declares port 8081 named http", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+		}
+		ports := build(t, inst).Spec.Template.Spec.Containers[0].Ports
+		if len(ports) != 1 {
+			t.Fatalf("expected exactly 1 container port, got %v", ports)
+		}
+		if ports[0].ContainerPort != 8081 || ports[0].Name != "http" || ports[0].Protocol != corev1.ProtocolTCP {
+			t.Errorf("expected container port 8081/TCP named http, got %v", ports[0])
+		}
+	})
+
+	t.Run("secure HTTP declares port 8085 named https", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+		}
+		ports := build(t, inst).Spec.Template.Spec.Containers[0].Ports
+		if len(ports) != 1 {
+			t.Fatalf("expected exactly 1 container port, got %v", ports)
+		}
+		if ports[0].ContainerPort != 8085 || ports[0].Name != "https" {
+			t.Errorf("expected container port 8085 named https, got %v", ports[0])
+		}
+	})
+
+	t.Run("user-declared ports are preserved alongside the listener port", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name:  "sr",
+				Image: "confluentinc/cp-schema-registry:8.4.1",
+				Ports: []corev1.ContainerPort{
+					{Name: "metrics", ContainerPort: 9090, Protocol: corev1.ProtocolTCP},
+					// Conflicts with the operator listener port: the
+					// operator-managed entry wins.
+					{Name: "custom", ContainerPort: 8081, Protocol: corev1.ProtocolTCP},
+				},
+			}}},
+		}
+		ports := build(t, inst).Spec.Template.Spec.Containers[0].Ports
+		if len(ports) != 2 {
+			t.Fatalf("expected 2 container ports (listener + user metrics), got %v", ports)
+		}
+		if ports[0].ContainerPort != 8081 || ports[0].Name != "http" {
+			t.Errorf("expected the operator listener port first, got %v", ports[0])
+		}
+		if ports[1].ContainerPort != 9090 || ports[1].Name != "metrics" {
+			t.Errorf("expected the user metrics port preserved, got %v", ports[1])
+		}
+	})
+}
+
 // TestMergeEnvVars is a table-driven test for the B3 env merge: the
 // operator-managed env comes first and wins on name conflicts, user-only vars
 // are appended in their original order, duplicates inside the user list are
