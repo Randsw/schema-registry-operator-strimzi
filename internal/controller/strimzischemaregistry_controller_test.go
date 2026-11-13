@@ -29,6 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	eventsfake "k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -3835,6 +3836,209 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			By("Accepting the empty HeapOpts (operator default applies)")
 			Expect(k8sClient.Create(ctx, newCR("sr-empty-heap", ""))).To(Succeed())
+		})
+	})
+
+	// F1 regression: the Deployment selector must contain stable identity
+	// labels only. Changing the container image (which drives the mutable
+	// app.kubernetes.io/version label) must update the Deployment in place,
+	// and a Deployment created before the fix (mutable selector) must be
+	// migrated by delete+re-create instead of failing with "spec.selector:
+	// field is immutable".
+	Context("When changing the container image of an existing Deployment", func() {
+		ctx := context.Background()
+		specCounter := 0
+
+		var (
+			namespaceName      string
+			typeNamespacedName types.NamespacedName
+		)
+
+		newCR := func(image string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+			return &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      namespaceName,
+					Namespace: namespaceName,
+					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+				},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP: false,
+					Listener:   "plain",
+					// PLAINTEXT keeps the scenario free of KafkaUser and
+					// CA-secret fixtures: the image change exercises the
+					// Deployment update path only.
+					SecurityProtocol: "PLAINTEXT",
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: image}}},
+					},
+				},
+			}
+		}
+
+		reconcileCR := func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		BeforeEach(func() {
+			// A unique namespace per spec: envtest has no namespace
+			// controller, so a deleted namespace stays terminating and a
+			// same-name create would fail in the next spec.
+			specCounter++
+			namespaceName = "test-image-change-" + strconv.Itoa(specCounter)
+			typeNamespacedName = types.NamespacedName{Name: namespaceName, Namespace: namespaceName}
+
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})).To(Succeed())
+
+			By("Creating strimzi kafka cluster with a plain listener")
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: namespaceName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: namespaceName}, updateCluster)).To(Succeed())
+			updateCluster.Status = &kafka.KafkaStatus{
+				ClusterId: "image-change-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap.image-change.svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+			Expect(k8sClient.Create(ctx, newCR("confluentinc/cp-schema-registry:7.6.1"))).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should update the Deployment in place when the image changes", func() {
+			deployName := types.NamespacedName{Name: namespaceName + "-deploy", Namespace: namespaceName}
+
+			By("Reconciling to create the Deployment with image A")
+			reconcileCR()
+			Eventually(func() error {
+				return k8sClient.Get(ctx, deployName, &appsv1.Deployment{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deployName, deployment)).To(Succeed())
+			Expect(deployment.Spec.Selector.MatchLabels).To(Equal(selectorLabelsForStrimziSchemaRegistryOperator(namespaceName)))
+			Expect(deployment.Spec.Template.Spec.Containers[0].Image).To(Equal("confluentinc/cp-schema-registry:7.6.1"))
+			originalUID := deployment.UID
+
+			By("Changing the CR image to B")
+			cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, cr)).To(Succeed())
+			cr.Spec.Template.Spec.Containers[0].Image = "confluentinc/cp-schema-registry:8.4.1"
+			Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+
+			By("Reconciling: the Deployment must update, not fail on the immutable selector")
+			reconcileCR()
+
+			updated := &appsv1.Deployment{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, deployName, updated); err != nil {
+					return ""
+				}
+				return updated.Spec.Template.Spec.Containers[0].Image
+			}, time.Minute, time.Second).Should(Equal("confluentinc/cp-schema-registry:8.4.1"))
+
+			Expect(k8sClient.Get(ctx, deployName, updated)).To(Succeed())
+			// Same UID: the Deployment was updated in place, not recreated.
+			Expect(updated.UID).To(Equal(originalUID))
+			Expect(updated.Spec.Selector.MatchLabels).To(Equal(selectorLabelsForStrimziSchemaRegistryOperator(namespaceName)))
+			// The mutable labels remain on the pod template (they drive the rollout).
+			Expect(updated.Spec.Template.Labels["app.kubernetes.io/version"]).To(Equal("8.4.1"))
+		})
+
+		It("should recreate a legacy-selector Deployment instead of failing on the immutable selector", func() {
+			deployName := types.NamespacedName{Name: namespaceName + "-deploy", Namespace: namespaceName}
+
+			By("Reconciling to create the Deployment")
+			reconcileCR()
+			Eventually(func() error {
+				return k8sClient.Get(ctx, deployName, &appsv1.Deployment{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			By("Replacing it with a pre-fix Deployment whose selector contains mutable labels")
+			legacySelector := map[string]string{
+				"app":                          namespaceName,
+				"strimzi-schema-registry":      namespaceName,
+				"app.kubernetes.io/instance":   namespaceName,
+				"app.kubernetes.io/name":       "strimzischemaregistry",
+				"app.kubernetes.io/managed-by": "strimzi-registry-operator",
+				"app.kubernetes.io/part-of":    namespaceName,
+				"app.kubernetes.io/version":    "7.6.1",
+				"strimzi.io/cluster":           "kafka-cluster",
+			}
+			legacy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deployName, legacy)).To(Succeed())
+			legacy.Spec.Selector = &metav1.LabelSelector{MatchLabels: legacySelector}
+			legacy.Spec.Template.Labels = legacySelector
+			// The selector is immutable, so the pre-fix object can only be
+			// produced by deleting and re-creating it.
+			Expect(k8sClient.Delete(ctx, legacy)).To(Succeed())
+			legacy.ResourceVersion = ""
+			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
+			legacyDeployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deployName, legacyDeployment)).To(Succeed())
+			legacyUID := legacyDeployment.UID
+
+			By("Changing the CR image to B")
+			cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, cr)).To(Succeed())
+			cr.Spec.Template.Spec.Containers[0].Image = "confluentinc/cp-schema-registry:8.4.1"
+			Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+
+			By("Reconciling with an event recorder: the legacy Deployment must be recreated")
+			recorder := eventsfake.NewFakeRecorder(16)
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: recorder}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the Deployment was recreated with the stable selector and image B")
+			migrated := &appsv1.Deployment{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, deployName, migrated); err != nil {
+					return ""
+				}
+				return migrated.Spec.Template.Spec.Containers[0].Image
+			}, time.Minute, time.Second).Should(Equal("confluentinc/cp-schema-registry:8.4.1"))
+			Expect(k8sClient.Get(ctx, deployName, migrated)).To(Succeed())
+			Expect(migrated.UID).NotTo(Equal(legacyUID))
+			Expect(migrated.Spec.Selector.MatchLabels).To(Equal(selectorLabelsForStrimziSchemaRegistryOperator(namespaceName)))
+			Expect(migrated.Spec.Selector.MatchLabels).NotTo(HaveKey("app.kubernetes.io/version"))
+			Expect(migrated.Spec.Selector.MatchLabels).NotTo(HaveKey("strimzi.io/cluster"))
+
+			By("Verifying the DeploymentRecreated event was emitted")
+			Eventually(func() string {
+				select {
+				case e := <-recorder.Events:
+					return e
+				default:
+					return ""
+				}
+			}, time.Minute, time.Second).Should(ContainSubstring("DeploymentRecreated"))
 		})
 	})
 })

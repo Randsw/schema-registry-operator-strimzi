@@ -41,7 +41,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	eventsfake "k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	sigsyaml "sigs.k8s.io/yaml"
 )
@@ -597,6 +599,251 @@ func TestUpdateExistingDeploymentAppliesCRReplicas(t *testing.T) {
 	if stored.Spec.Replicas == nil || *stored.Spec.Replicas != 3 {
 		t.Errorf("expected the CR replicas (3) to override the manually scaled 5, got %v", stored.Spec.Replicas)
 	}
+}
+
+// TestSelectorLabelsInvariance covers F1: the Deployment selector must be
+// built from stable identity labels only. app.kubernetes.io/version is
+// derived from the image tag and strimzi.io/cluster from the CR label; both
+// are mutable while the selector field is immutable at the API server, so the
+// selector must be invariant under image and cluster-label changes and must
+// stay contained in the full label set.
+func TestSelectorLabelsInvariance(t *testing.T) {
+	const name = "test-sr"
+	base := selectorLabelsForStrimziSchemaRegistryOperator(name)
+
+	cases := []struct {
+		image   string
+		cluster string
+	}{
+		{image: "confluentinc/cp-schema-registry:7.6.1", cluster: "kafka-cluster"},
+		{image: "confluentinc/cp-schema-registry:8.4.1", cluster: "other-cluster"},
+		{image: "confluentinc/cp-schema-registry", cluster: ""},
+	}
+
+	for _, tc := range cases {
+		full := labelsForStrimziSchemaRegistryOperator(name, tc.image, tc.cluster)
+		sel := selectorLabelsForStrimziSchemaRegistryOperator(name)
+		if !equality.Semantic.DeepEqual(sel, base) {
+			t.Errorf("selector changed for image %q cluster %q: %v", tc.image, tc.cluster, sel)
+		}
+		for _, mutable := range []string{"app.kubernetes.io/version", "strimzi.io/cluster"} {
+			if _, ok := sel[mutable]; ok {
+				t.Errorf("selector contains the mutable label %q", mutable)
+			}
+		}
+		for key, value := range sel {
+			if full[key] != value {
+				t.Errorf("selector label %q=%q is not contained in the full label set (got %q)", key, value, full[key])
+			}
+		}
+		// The mutable labels remain on the Deployment/pod labels.
+		if full["app.kubernetes.io/version"] == "" || full["strimzi.io/cluster"] != tc.cluster {
+			t.Errorf("expected the mutable labels on the full label set for image %q cluster %q: %v", tc.image, tc.cluster, full)
+		}
+	}
+}
+
+// TestBuildDeploymentSpecStableSelector covers F1: buildDeploymentSpec must
+// place the stable identity subset in Selector.MatchLabels while the pod
+// template keeps the full merged label set (the selector must stay contained
+// in the pod labels so matching holds).
+func TestBuildDeploymentSpecStableSelector(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+	}
+
+	r := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+	dep, _, err := r.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "",
+		kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}, logr.Logger{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)
+	if !equality.Semantic.DeepEqual(dep.Spec.Selector.MatchLabels, want) {
+		t.Errorf("expected the stable selector %v, got %v", want, dep.Spec.Selector.MatchLabels)
+	}
+	for _, mutable := range []string{"app.kubernetes.io/version", "strimzi.io/cluster"} {
+		if _, ok := dep.Spec.Selector.MatchLabels[mutable]; ok {
+			t.Errorf("selector contains the mutable label %q", mutable)
+		}
+	}
+	for key, value := range want {
+		if dep.Labels[key] != value {
+			t.Errorf("expected the Deployment label %q=%q, got %q", key, value, dep.Labels[key])
+		}
+		if dep.Spec.Template.Labels[key] != value {
+			t.Errorf("expected the pod template label %q=%q, got %q", key, value, dep.Spec.Template.Labels[key])
+		}
+	}
+	if dep.Spec.Template.Labels["app.kubernetes.io/version"] != "8.4.1" {
+		t.Errorf("expected the image-derived version label on the pod template, got %q", dep.Spec.Template.Labels["app.kubernetes.io/version"])
+	}
+	if dep.Spec.Template.Labels["strimzi.io/cluster"] != "kafka-cluster" {
+		t.Errorf("expected the cluster label on the pod template, got %q", dep.Spec.Template.Labels["strimzi.io/cluster"])
+	}
+}
+
+// TestUpdateExistingDeploymentRecreatesLegacySelector covers the F1
+// migration: a Deployment whose selector predates the stable-selector fix
+// cannot be updated in place (the selector field is immutable), so
+// updateExistingDeployment must delete and re-create it via the
+// createDeployment path, emit the DeploymentRecreated event, and leave
+// operator-created deployments (stable selector) on the normal update path.
+func TestUpdateExistingDeploymentRecreatesLegacySelector(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+	}
+	kafkaCR := newTestKafkaCR("kafka-cluster", inst.Namespace)
+
+	legacySelector := map[string]string{
+		"app":                          inst.Name,
+		"strimzi-schema-registry":      inst.Name,
+		"app.kubernetes.io/instance":   inst.Name,
+		"app.kubernetes.io/name":       "strimzischemaregistry",
+		"app.kubernetes.io/managed-by": "strimzi-registry-operator",
+		"app.kubernetes.io/part-of":    inst.Name,
+		// Mutable labels a pre-fix operator put into the selector.
+		"app.kubernetes.io/version": "7.6.1",
+		"strimzi.io/cluster":        "kafka-cluster",
+	}
+
+	newDeployment := func(selector map[string]string, hash string) *apps.Deployment {
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: selector},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: selector},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.1"}}},
+				},
+			},
+		}
+	}
+
+	// countDeploymentDeletes returns interceptor.Funcs counting Delete calls
+	// on Deployments, so tests can assert the migration (or its absence).
+	countDeploymentDeletes := func(deleted *int) interceptor.Funcs {
+		return interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if _, ok := obj.(*apps.Deployment); ok {
+					*deleted++
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}
+	}
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+
+	t.Run("legacy selector is deleted and re-created with the stable selector", func(t *testing.T) {
+		recorder := eventsfake.NewFakeRecorder(16)
+		dep := newDeployment(legacySelector, "stale-hash")
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, kafkaCR, dep).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}
+
+		updated, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if specChanged {
+			t.Error("expected specChanged=false: the re-created Deployment already matches the desired state")
+		}
+		if updated == nil || updated.Spec.Selector == nil {
+			t.Fatal("expected the re-created Deployment to be returned")
+		}
+		want := selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)
+		if !equality.Semantic.DeepEqual(updated.Spec.Selector.MatchLabels, want) {
+			t.Errorf("expected the re-created Deployment to carry the stable selector %v, got %v", want, updated.Spec.Selector.MatchLabels)
+		}
+		if img := updated.Spec.Template.Spec.Containers[0].Image; img != "confluentinc/cp-schema-registry:8.4.1" {
+			t.Errorf("expected the re-created Deployment to carry the desired image, got %q", img)
+		}
+
+		stored := &apps.Deployment{}
+		if err := client.Get(ctx, types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, stored); err != nil {
+			t.Fatalf("expected the re-created Deployment to exist: %v", err)
+		}
+		if !equality.Semantic.DeepEqual(stored.Spec.Selector.MatchLabels, want) {
+			t.Errorf("expected the stored Deployment to carry the stable selector, got %v", stored.Spec.Selector.MatchLabels)
+		}
+		select {
+		case e := <-recorder.Events:
+			if !strings.Contains(e, "DeploymentRecreated") {
+				t.Errorf("expected a DeploymentRecreated event, got %q", e)
+			}
+		default:
+			t.Error("expected a DeploymentRecreated event, got none")
+		}
+	})
+
+	t.Run("stable selector stays on the normal update path", func(t *testing.T) {
+		deletes := 0
+		dep := newDeployment(selectorLabelsForStrimziSchemaRegistryOperator(inst.Name), "stale-hash")
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, kafkaCR, dep).
+			WithInterceptorFuncs(countDeploymentDeletes(&deletes)).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true for a stale spec hash")
+		}
+		if deletes != 0 {
+			t.Errorf("expected no Deployment delete for a stable selector, got %d", deletes)
+		}
+	})
+
+	t.Run("steady state with a stable selector does nothing", func(t *testing.T) {
+		deletes := 0
+		desiredHash, err := computeSpecHash(inst)
+		if err != nil {
+			t.Fatalf("failed to compute spec hash: %v", err)
+		}
+		dep := newDeployment(selectorLabelsForStrimziSchemaRegistryOperator(inst.Name), desiredHash)
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, kafkaCR, dep).
+			WithInterceptorFuncs(countDeploymentDeletes(&deletes)).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if specChanged {
+			t.Error("expected specChanged=false in steady state")
+		}
+		if deletes != 0 {
+			t.Errorf("expected no Deployment delete in steady state, got %d", deletes)
+		}
+	})
 }
 
 // TestCRDManifestReplicasValidation guards the B20 CRD contract: the
