@@ -568,11 +568,14 @@ spec:
 `securehttp: true` the inter-instance protocol is `https`, and the
 operator-managed REST TLS certificate SANs are DNS-only (the Service DNS
 name) while each replica advertises its pod IP as `host.name` — inter-instance
-HTTPS forwarding between replicas fails TLS verification. This was previously
-structurally enforced (no `replicas` field existed); it is now a documented
-limitation: do not combine `spec.replicas > 1` with `securehttp: true` unless
-you provide your own TLS secret whose certificate covers the replica
-addresses.
+HTTPS forwarding between replicas fails TLS verification. Combining
+`spec.replicas > 1` with `securehttp: true` and no `spec.tlssecretname` is
+therefore **rejected by the operator**: reconciliation is skipped with
+`Ready=False` (reason `ReplicasRequireUserTLSSecret`, `status.status:
+InvalidSpec`) and a Warning event, and no Deployment is created. To run
+multiple replicas over HTTPS, provide `spec.tlssecretname` with a
+certificate whose SANs cover the replica addresses (for example the pod
+IPs or a per-replica DNS identity).
 
 ### Arbitrary Schema Registry configuration
 

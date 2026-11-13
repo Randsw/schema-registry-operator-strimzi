@@ -59,6 +59,45 @@ func newTestKafkaCR(name, namespace string) *kafka.Kafka {
 	}
 }
 
+// TestHTTPSMultiReplicaValidationError is a table-driven test for the
+// unsupported-combination guard: multiple replicas combined with securehttp
+// and no user-provided TLS secret must be rejected (the operator-generated
+// certificate covers DNS names only, so inter-instance HTTPS forwarding
+// fails TLS verification), while every other combination stays valid.
+func TestHTTPSMultiReplicaValidationError(t *testing.T) {
+	cases := []struct {
+		name     string
+		replicas *int32
+		secure   bool
+		tlsName  string
+		wantErr  bool
+	}{
+		{name: "replicas=2 securehttp no user tls secret is rejected", replicas: ptr.To(int32(2)), secure: true, wantErr: true},
+		{name: "replicas=3 securehttp no user tls secret is rejected", replicas: ptr.To(int32(3)), secure: true, wantErr: true},
+		{name: "replicas=1 securehttp is valid", replicas: ptr.To(int32(1)), secure: true},
+		{name: "unset replicas (default 1) securehttp is valid", secure: true},
+		{name: "replicas=2 with user tls secret is valid", replicas: ptr.To(int32(2)), secure: true, tlsName: "user-tls"},
+		{name: "replicas=2 plain http is valid", replicas: ptr.To(int32(2))},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := newTestInstance()
+			inst.Spec.SecureHTTP = tc.secure
+			inst.Spec.TLSSecretName = tc.tlsName
+			inst.Spec.Replicas = tc.replicas
+
+			msg := httpsMultiReplicaValidationError(inst)
+			if tc.wantErr && msg == "" {
+				t.Error("expected a validation error, got none")
+			}
+			if !tc.wantErr && msg != "" {
+				t.Errorf("expected no validation error, got %q", msg)
+			}
+		})
+	}
+}
+
 // TestUpdateExistingDeploymentBootstrapDrift covers the live-input drift
 // fix: the Kafka bootstrap address is rendered into the deployment env from
 // the Kafka CR's status, which the CR spec hash cannot see. When the Kafka
