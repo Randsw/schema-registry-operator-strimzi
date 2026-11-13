@@ -1,0 +1,23 @@
+The ssr-operator chart deploys the Schema Registry OPERATOR only
+(image {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}).
+
+The Confluent Schema Registry image is NOT part of this chart: it is supplied
+by the user via spec.template of a StrimziSchemaRegistry custom resource, e.g.
+
+  spec:
+    template:
+      spec:
+        containers:
+          - name: confluent-sr
+            image: confluentinc/cp-schema-registry:8.4.1
+
+Create a StrimziSchemaRegistry CR (see the operator README for the full CR
+reference) pointing at a Strimzi Kafka cluster to deploy Schema Registry.
+
+RBAC scope: {{ if .Values.rbac.namespaceScoped }}
+namespace-scoped (rbac.namespaceScoped=true): the operator watches only the
+release namespace {{ .Release.Namespace }}; StrimziSchemaRegistry CRs and the
+Kafka cluster they reference must live there.
+{{ else }}
+cluster-scoped (default): the operator watches every namespace.
+{{ end }}

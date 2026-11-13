@@ -65,6 +65,18 @@ helm repo update
 helm install ssr ssr-operator/ssr-operator --namespace <desired_namespace> --create-namespace
 ```
 
+:information_source: The chart deploys the **operator only** (image
+`ghcr.io/randsw/strimzi-schema-registry-operator`). The Confluent Schema
+Registry image is **not** part of the chart — it is supplied by you through
+`spec.template` of the `StrimziSchemaRegistry` CR (see the example below and
+the [chart README](helm-chart/ssr-operator/README.md)).
+
+By default the operator runs cluster-scoped (it watches every namespace). Set
+`--set rbac.namespaceScoped=true` to run it namespace-scoped: the manager RBAC
+is rendered as a namespaced `Role`/`RoleBinding` in the release namespace and
+the operator watches only that namespace (see the
+[chart README](helm-chart/ssr-operator/README.md) for details and caveats).
+
 ## 4. Deploy a Schema Registry
 
 ***
@@ -198,6 +210,7 @@ spec:
   kafkastoretopicreplicationfactor: 1
   schemaregistrygroupid: "schema-registry"
   mastereligibility: true
+  replicas: 1
   template:
     spec:
       containers:
@@ -460,6 +473,19 @@ was upgraded from a 32-bit to a 64-bit FNV digest, rewriting every stored value 
   deleted and recreated, closing the window in which restarting pods could not
   mount them.
 
+Phase 4 features:
+
+- `spec.replicas` is now available: the operator renders a multi-replica
+  Schema Registry Deployment when it is set (default 1). See
+  [Replicas and HA](#replicas-and-ha) for the supported combinations and the
+  `securehttp` caveat.
+- The helm chart gained `rbac.namespaceScoped` (default `false`): when true,
+  the operator's manager RBAC is rendered as namespaced `Role`/`RoleBinding`
+  and the operator watches only its own namespace (`WATCH_NAMESPACE`).
+- Because `spec.replicas` now exists, the manual-scale preservation above
+  applies only while the CR leaves `replicas` unset: once the CR sets
+  `spec.replicas`, the desired count wins on the next spec change.
+
 Phase 3 fixes:
 
 - Manual `kubectl scale` edits to the Deployment are preserved: a spec change
@@ -512,13 +538,41 @@ The former misspelled instance-count metric
 update dashboards and alerts to
 `strimzi_schema_registry_instance_current_count`.
 
-### Single replica support
+### Replicas and HA
 
-Only a **single replica** is supported. Running multiple replicas with `securehttp: true` is not supported
-because the generated REST TLS certificate SANs are DNS-only (the Service DNS name) while the Schema Registry
-`host.name` is set to the pod IP, so inter-instance HTTPS forwarding between replicas breaks.
-This limit is structurally enforced: the CRD exposes no `replicas` field and the operator always renders a
-single-replica Deployment.
+`spec.replicas` (optional, default `1`, minimum `1`) controls the number of
+Schema Registry replicas the operator renders:
+
+```yaml
+spec:
+  # ...
+  replicas: 2
+```
+
+- Every replica runs the same configuration rendered from the CR. Changing
+  `spec.replicas` changes the Deployment spec hash, so the Deployment is
+  updated (scaled) on the next reconcile.
+- **master.eligibility** (`spec.mastereligibility`, default `true`) keeps its
+  per-CR semantics: it applies to every replica of the CR, and Schema Registry
+  itself performs master election among the eligible instances. Set it to
+  `false` only if you want this CR's replicas to never become master.
+- **host.name is per pod**: the operator resolves it through the downward API
+  (`status.podIP`), so each replica advertises a unique address. The managed
+  Service selects the standard `app: <name>` label, so it load-balances across
+  all replicas.
+- While the CR sets `spec.replicas`, a manual `kubectl scale` is reverted on
+  the next spec change (the CR is the source of truth). While `replicas` is
+  unset, manual scaling is preserved (see [Behavior changes](#behavior-changes)).
+
+:warning: **Multi-replica is supported with `securehttp: false`.** With
+`securehttp: true` the inter-instance protocol is `https`, and the
+operator-managed REST TLS certificate SANs are DNS-only (the Service DNS
+name) while each replica advertises its pod IP as `host.name` — inter-instance
+HTTPS forwarding between replicas fails TLS verification. This was previously
+structurally enforced (no `replicas` field existed); it is now a documented
+limitation: do not combine `spec.replicas > 1` with `securehttp: true` unless
+you provide your own TLS secret whose certificate covers the replica
+addresses.
 
 ### Arbitrary Schema Registry configuration
 
