@@ -59,6 +59,119 @@ func newTestKafkaCR(name, namespace string) *kafka.Kafka {
 	}
 }
 
+// TestUpdateExistingDeploymentBootstrapDrift covers the live-input drift
+// fix: the Kafka bootstrap address is rendered into the deployment env from
+// the Kafka CR's status, which the CR spec hash cannot see. When the Kafka
+// listener is rebuilt (different bootstrap service or port) the deployment
+// must be updated even though the CR spec — and therefore the hash — is
+// unchanged; otherwise the pods keep the stale bootstrap address forever.
+func TestUpdateExistingDeploymentBootstrapDrift(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	// PLAINTEXT avoids any JKS/user-secret requirements; only the Kafka CR
+	// with status listeners is needed.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+		},
+	}
+
+	desiredHash, err := computeSpecHash(inst)
+	if err != nil {
+		t.Fatalf("failed to compute spec hash: %v", err)
+	}
+
+	// The Kafka CR exposes the current bootstrap address; the deployment
+	// under test may carry a stale one.
+	kafkaCR := newTestKafkaCR("kafka-cluster", inst.Namespace)
+	currentBootstrap := kafkaCR.Status.Listeners[0].BootstrapServers
+
+	newDeployment := func(hash, bootstrapEnv string) *apps.Deployment {
+		env := []corev1.EnvVar{}
+		if bootstrapEnv != "" {
+			env = append(env, corev1.EnvVar{Name: bootstrapServersEnv, Value: bootstrapEnv})
+		}
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1", Env: env},
+					}},
+				},
+			},
+		}
+	}
+
+	newReconciler := func(dep *apps.Deployment) *StrimziSchemaRegistryReconciler {
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, kafkaCR, dep).
+			Build()
+		return &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+	}
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+
+	t.Run("stale bootstrap address triggers a deployment update", func(t *testing.T) {
+		dep := newDeployment(desiredHash, "old-bootstrap:9092")
+		r := newReconciler(dep)
+
+		updated, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true when the bootstrap address drifted")
+		}
+		if got := deploymentBootstrapServers(updated); got != currentBootstrap {
+			t.Errorf("expected the deployment env to carry the current bootstrap %q, got %q", currentBootstrap, got)
+		}
+	})
+
+	t.Run("current bootstrap address stays in steady state", func(t *testing.T) {
+		dep := newDeployment(desiredHash, currentBootstrap)
+		r := newReconciler(dep)
+
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if specChanged {
+			t.Fatal("expected specChanged=false when the bootstrap address matches")
+		}
+	})
+
+	t.Run("drift update is idempotent", func(t *testing.T) {
+		dep := newDeployment(desiredHash, "old-bootstrap:9092")
+		r := newReconciler(dep)
+
+		updated, _, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error on the drift update: %v", err)
+		}
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, updated)
+		if err != nil {
+			t.Fatalf("unexpected error on the follow-up reconcile: %v", err)
+		}
+		if specChanged {
+			t.Fatal("expected specChanged=false once the bootstrap address is reconciled")
+		}
+	})
+}
+
 // TestUpdateExistingDeploymentConfigOverriddenEventSpam covers B2: the
 // ConfigKeyOverridden Warning events must be emitted only when the
 // deployment spec actually changed, not on every reconcile. A CR with

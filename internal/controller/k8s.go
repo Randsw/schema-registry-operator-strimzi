@@ -43,6 +43,12 @@ const (
 	sslKeystorePasswordEnv = "SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD"
 	sslKeyPasswordEnv      = "SCHEMA_REGISTRY_SSL_KEY_PASSWORD"
 
+	// bootstrapServersEnv is the operator-managed env var carrying the Kafka
+	// bootstrap address. Its value comes from the Kafka CR's status, not from
+	// the CR spec, so it is invisible to computeSpecHash and must be compared
+	// separately when detecting deployment drift.
+	bootstrapServersEnv = "SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS"
+
 	// DNS egress peer assumed by the rendered NetworkPolicy: the standard
 	// kube-dns pods in the kube-system namespace. Clusters running a custom
 	// DNS service (different namespace or pod labels, e.g. some CoreDNS
@@ -1867,14 +1873,31 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	}
 	existingHash := existingAnnotations[keyPrefix+"/specHash"]
 
-	// If hash matches, no spec change detected
+	// If hash matches, no spec change is detected from the CR alone. The
+	// rendered deployment also depends on live cluster inputs the spec hash
+	// cannot see: the Kafka bootstrap address comes from the Kafka CR's
+	// status. When the listener is rebuilt (for example the Kafka cluster was
+	// recreated with a different bootstrap service or port), only this env
+	// var changes; without the comparison below the pods would keep the
+	// stale bootstrap address forever, because the Kafka watch re-enqueues
+	// reconciliation but every pass short-circuits on the unchanged hash.
 	if existingHash == desiredHash {
-		// Steady state: do NOT emit ConfigKeyOverridden events here. The
-		// desired spec is rebuilt on every reconcile, so emitting on each
-		// pass would spam a Warning event per reserved configuration key
-		// per reconcile. The user was warned when the key was first
-		// applied (createDeployment and spec-change paths below).
-		return found, false, nil
+		// The comparison only applies when the deployment actually carries
+		// the operator-managed env var: an absent variable (a deployment
+		// predating the check, or stripped by hand) must not be treated as
+		// drift, which would roll pods on the very first reconcile after an
+		// operator upgrade.
+		if current := deploymentBootstrapServers(found); current != "" && current != kafkaBootstrapServer {
+			logger.Info("Kafka bootstrap servers changed, updating deployment",
+				"oldBootstrapServers", current, "newBootstrapServers", kafkaBootstrapServer)
+		} else {
+			// Steady state: do NOT emit ConfigKeyOverridden events here. The
+			// desired spec is rebuilt on every reconcile, so emitting on each
+			// pass would spam a Warning event per reserved configuration key
+			// per reconcile. The user was warned when the key was first
+			// applied (createDeployment and spec-change paths below).
+			return found, false, nil
+		}
 	}
 
 	logger.Info("Spec hash changed, updating deployment",
@@ -1909,6 +1932,22 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	found.Annotations[keyPrefix+"/specHash"] = desiredHash
 
 	return found, true, nil
+}
+
+// deploymentBootstrapServers returns the value of the operator-managed
+// SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS env var on the deployment's
+// first container, or an empty string when the container or the variable is
+// absent. It is used to detect bootstrap drift the spec hash cannot see.
+func deploymentBootstrapServers(dep *apps.Deployment) string {
+	if len(dep.Spec.Template.Spec.Containers) == 0 {
+		return ""
+	}
+	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == bootstrapServersEnv {
+			return e.Value
+		}
+	}
+	return ""
 }
 
 // mustParseQuantity parses a resource quantity string, panicking on failure.
