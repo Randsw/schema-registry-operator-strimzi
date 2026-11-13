@@ -1,3 +1,20 @@
+## [1.17.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.0...1.17.1) (2026-11-13)
+
+### 🛠 Fixes
+
+* **ci:** publish tested branch images when e2e is skipped ([66b1f22](https://github.com/Randsw/schema-registry-operator-strimzi/commit/66b1f22a3d955edf51aeb457963b2b8df01d1196))
+* **ci:** unblock semantic-release and make chart-releaser idempotent ([2054ffc](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2054ffc1fb3d91e6fbdd338f7dab6d23eeee8c07))
+* **controller:** isolate derived TLS secrets per registry ([fdf61a0](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fdf61a0a67ac9d30441a940522671667ad3c4de8))
+* **controller:** reconcile kafka bootstrap changes on unchanged spec ([fb252ab](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fb252abdbf0e75d4423055d9cbaf24794da0517e))
+* **controller:** reject multi-replica https with generated certificate ([8b94072](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8b9407298f987f146b77334477570f741e4b2f20))
+* **helm:** pin the default operator image version ([250e236](https://github.com/Randsw/schema-registry-operator-strimzi/commit/250e23678003cada54bc0cd7e3d14e7b16d0de9d))
+* **helm:** preserve registry CRD on uninstall ([534ff92](https://github.com/Randsw/schema-registry-operator-strimzi/commit/534ff9233c3c0b2c83db68e7278997c2b0eeab85))
+* **networkpolicy:** allow inter-instance traffic between replicas ([9a65456](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9a654564bd5364df12b0f619944063383ebbd821))
+
+### Other
+
+* bump tool versions (controller-gen, envtest, golangci-lint, opm, Go alignment, CI actions) ([66275ff](https://github.com/Randsw/schema-registry-operator-strimzi/commit/66275ff7b2746c1a86b5355e7f6a2c1ac969c6f4))
+
 ## [1.17.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.16.3...1.17.0) (2026-11-13)
 
 
