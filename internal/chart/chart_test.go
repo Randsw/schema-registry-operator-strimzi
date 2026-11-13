@@ -23,6 +23,7 @@ package chart
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	sigsyaml "sigs.k8s.io/yaml"
@@ -90,5 +91,58 @@ func TestCRDInstalledFromCrdsDirectory(t *testing.T) {
 	}
 	if len(matches) > 0 {
 		t.Errorf("CRD file(s) found under templates/crds (release resources, deleted on uninstall): %v", matches)
+	}
+}
+
+// TestValuesImageTagNotMutableLatest guards the reproducibility contract:
+// the default operator image tag must not be the mutable "latest", which
+// would make a chart install (or a pod replacement) run an operator binary
+// mismatched with the chart and its CRD. The template falls back to
+// .Chart.AppVersion when the tag is unset; an explicit override in the
+// user's values stays allowed, only the chart default is pinned.
+func TestValuesImageTagNotMutableLatest(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "helm-chart", "ssr-operator", "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+
+	var values struct {
+		Image struct {
+			Repository string `yaml:"repository"`
+			Tag        string `yaml:"tag"`
+		} `yaml:"image"`
+	}
+	if err := sigsyaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+
+	if strings.EqualFold(strings.TrimSpace(values.Image.Tag), "latest") {
+		t.Error("values.yaml image.tag defaults to the mutable \"latest\" tag; remove the default so the template falls back to .Chart.AppVersion")
+	}
+}
+
+// TestChartAppVersionIsPinned guards the image-pinning contract end to end:
+// the chart must carry a concrete appVersion (the operator image tag the
+// chart installs by default) and it must not be a mutable tag.
+func TestChartAppVersionIsPinned(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "helm-chart", "ssr-operator", "Chart.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read Chart.yaml: %v", err)
+	}
+
+	var chart struct {
+		AppVersion string `yaml:"appVersion"`
+	}
+	if err := sigsyaml.Unmarshal(data, &chart); err != nil {
+		t.Fatalf("failed to parse Chart.yaml: %v", err)
+	}
+
+	if strings.TrimSpace(chart.AppVersion) == "" {
+		t.Fatal("Chart.yaml appVersion is empty; the default operator image tag would be empty")
+	}
+	if strings.EqualFold(strings.TrimSpace(chart.AppVersion), "latest") {
+		t.Error("Chart.yaml appVersion is the mutable \"latest\"; pin it to the released operator version")
 	}
 }

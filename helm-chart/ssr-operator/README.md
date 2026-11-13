@@ -109,7 +109,7 @@ cluster they reference) must live in the release namespace.
 |---|---|---|
 | `replicaCount` | `1` | Operator replicas. |
 | `image.repository` | `ghcr.io/randsw/strimzi-schema-registry-operator` | Operator image. |
-| `image.tag` | `"latest"` | Operator image tag (defaults to the chart appVersion when unset). |
+| `image.tag` | *(unset)* | Operator image tag. Defaults to the chart `appVersion` (the operator version the chart was released with); override only to pin a different build, and avoid mutable tags such as `latest`. |
 | `metrics.enabled` | `true` | Create a `Service` for the operator metrics endpoint. |
 | `metrics.secure` | `false` | Serve metrics over HTTPS with authn/authz. |
 | `metrics.port` | `8080` | Port the metrics endpoint binds to. |

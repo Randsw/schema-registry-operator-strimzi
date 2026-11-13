@@ -7,8 +7,12 @@ replicaCount: 1
 image:
   repository: ghcr.io/randsw/strimzi-schema-registry-operator
   pullPolicy: Always
-  # Overrides the image tag whose default is the chart appVersion.
-  tag: "latest"
+  # The image tag defaults to the chart appVersion (the operator version the
+  # chart was released with). Override it here only to pin a different
+  # operator build; avoid mutable tags such as "latest", which make an
+  # install or a pod replacement run a binary mismatched with the chart and
+  # its CRD.
+  # tag: "1.17.0"
   resources:
     limits:
       cpu: 500m
