@@ -33,7 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// userSecretVersionKey annotates the derived <tlssecretname>-jks secret with
+// userSecretVersionKey annotates the derived <name>-<tlssecretname>-jks secret with
 // the resourceVersion of the user secret it was converted from, so the
 // conversion is regenerated only when the user secret actually changes
 // (idempotent, no reconcile loops).
@@ -65,22 +65,23 @@ func isPEMTLSSecret(secret *v1.Secret) bool {
 // derivedJKSSecretName returns the name of the operator-managed secret that
 // holds the JKS conversion of a PEM user TLS secret. The user secret is
 // mounted read-only, so the conversion output cannot be written back into it.
-func derivedJKSSecretName(tlsSecretName string) string {
-	return tlsSecretName + jksSecretSuffix
+// The name is scoped to the owning registry (<name>-<tlssecretname>-jks) so
+// two registries referencing the same PEM secret each get their own derived
+// secret: a shared, single-owner secret would be garbage-collected when the
+// owning registry is deleted, breaking every other registry still mounting
+// it.
+func derivedJKSSecretName(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+	return instance.Name + "-" + instance.Spec.TLSSecretName + jksSecretSuffix
 }
 
-// derivedSecretNameCollision returns a non-empty message when the derived
-// <tlssecretname>-jks secret name would collide with an operator-managed
-// secret (<name>-jks or <name>-tls), or an empty string otherwise. A
-// collision would make the operator overwrite KafkaStore or REST API TLS
-// material with the conversion output.
-func derivedSecretNameCollision(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
-	derived := derivedJKSSecretName(instance.Spec.TLSSecretName)
-	for _, managed := range []string{instance.Name + jksSecretSuffix, instance.Name + tlsSecretSuffix} {
-		if derived == managed {
-			return fmt.Sprintf("user-provided TLS secret %q would be converted into derived secret %q which collides with the operator-managed secret %q; choose a different spec.tlssecretname",
-				instance.Spec.TLSSecretName, derived, managed)
-		}
+// derivedSecretNameValid returns a non-empty message when the per-registry
+// derived secret name would exceed the Kubernetes object-name limit
+// (253 characters), or an empty string otherwise.
+func derivedSecretNameValid(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+	derived := derivedJKSSecretName(instance)
+	if len(derived) > 253 {
+		return fmt.Sprintf("user-provided TLS secret %q would be converted into derived secret %q whose name exceeds the Kubernetes 253-character object-name limit; choose a shorter spec.tlssecretname or CR name",
+			instance.Spec.TLSSecretName, derived)
 	}
 	return ""
 }
@@ -90,8 +91,8 @@ func derivedSecretNameCollision(instance *strimziregistryoperatorv1alpha1.Strimz
 // it is valid. It dispatches on the accepted secret shapes:
 //   - a standard kubernetes.io/tls secret (tls.crt + tls.key PEM, ca.crt
 //     optional): both keys must be non-empty and the derived
-//     <tlssecretname>-jks name must not collide with an operator-managed
-//     secret;
+//     <name>-<tlssecretname>-jks name must fit the Kubernetes object-name
+//     limit;
 //   - a pre-built keystore: validated by userTLSSecretValidationError
 //     following spec.keystoretype (tls-keystore.jks or tls-keystore.p12).
 func validateUserTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, secret *v1.Secret) string {
@@ -109,7 +110,7 @@ func validateUserTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSche
 			return fmt.Sprintf("user-provided TLS secret %q looks like a kubernetes.io/tls secret but is missing required key(s) or has empty values: %s",
 				instance.Spec.TLSSecretName, strings.Join(missing, ", "))
 		}
-		return derivedSecretNameCollision(instance)
+		return derivedSecretNameValid(instance)
 	}
 	return userTLSSecretValidationError(instance.Spec.TLSSecretName, secret, effectiveKeystoreType(instance))
 }
@@ -137,7 +138,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
 	}
 	derived := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      derivedJKSSecretName(instance.Spec.TLSSecretName),
+			Name:      derivedJKSSecretName(instance),
 			Namespace: instance.Namespace,
 			Labels: map[string]string{
 				"app":  "strimzi-schema-registry",
@@ -161,21 +162,31 @@ func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
 	return derived, nil
 }
 
-// ensureDerivedJKSSecret creates or updates the derived <tlssecretname>-jks
-// secret for a PEM user TLS secret. It is a no-op when the derived secret
-// exists and its user-secret-resourceVersion annotation matches the current
-// user secret version. The secret is updated in place when stale so it is
-// never absent for pods mounting it.
+// ensureDerivedJKSSecret creates or updates the derived
+// <name>-<tlssecretname>-jks secret for a PEM user TLS secret. It is a no-op
+// when the derived secret exists, is controlled by this registry, and its
+// user-secret-resourceVersion annotation matches the current user secret
+// version. The secret is updated in place when stale so it is never absent
+// for pods mounting it. An existing secret controlled by another
+// StrimziSchemaRegistry — or by nothing — is never adopted or overwritten:
+// overwriting another registry's conversion output would corrupt its REST
+// API TLS material, and adopting an unowned secret would silently take over
+// user-managed material.
 func (r *StrimziSchemaRegistryReconciler) ensureDerivedJKSSecret(
 	ctx context.Context,
 	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	userSecret *v1.Secret,
 	logger logr.Logger,
 ) error {
-	name := derivedJKSSecretName(instance.Spec.TLSSecretName)
+	name := derivedJKSSecretName(instance)
 	existing := &v1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, existing)
 	if err == nil {
+		if owner := metav1.GetControllerOf(existing); owner == nil {
+			return fmt.Errorf("derived TLS secret %q already exists but is not controlled by a StrimziSchemaRegistry; delete it so the operator can manage it", name)
+		} else if owner.Kind != "StrimziSchemaRegistry" || owner.Name != instance.Name {
+			return fmt.Errorf("derived TLS secret %q already exists and is controlled by %s %q; delete it or choose a different spec.tlssecretname", name, owner.Kind, owner.Name)
+		}
 		if existing.Annotations[userSecretVersionKey] == userSecret.ResourceVersion {
 			logger.V(1).Info("Derived JKS secret is up-to-date", "Secret.Name", name)
 			return nil
@@ -222,7 +233,7 @@ func restAPITLSMountSecretName(instance *strimziregistryoperatorv1alpha1.Strimzi
 		return instance.Name + tlsSecretSuffix
 	}
 	if isPEMTLSSecret(userSecret) {
-		return derivedJKSSecretName(instance.Spec.TLSSecretName)
+		return derivedJKSSecretName(instance)
 	}
 	return instance.Spec.TLSSecretName
 }

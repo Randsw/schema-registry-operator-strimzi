@@ -1009,7 +1009,7 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 // Secret events are cluster-wide, so cheap pre-filters (B11) exit before any
 // CR List call:
 //  1. Secrets the operator itself owns — the <name>-jks and <name>-tls
-//     outputs and the derived <tlssecretname>-jks — are written by
+//     outputs and the derived <name>-<tlssecretname>-jks — are written by
 //     reconciliation, never inputs to it, so their events must not
 //     re-trigger reconciliation. The controller-owner check (rather than the
 //     bare name suffix) keeps user-provided TLS secrets that merely end with
@@ -1409,14 +1409,22 @@ func (r *StrimziSchemaRegistryReconciler) handleUserTLSSecretRotation(
 	if dep.Spec.Template.Annotations != nil {
 		current = dep.Spec.Template.Annotations[tlsVersionKey]
 	}
-	if current == userSecret.ResourceVersion {
+	expectedMount := restAPITLSMountSecretName(instance, userSecret)
+	currentMount := restAPITLSVolumeSecretName(dep)
+	// The mount check runs even when the tlsVersion annotation matches: an
+	// operator upgrade that changes the derived-secret naming (per-registry
+	// <name>-<tlssecretname>-jks) must repoint the mounts and roll the pods
+	// once even without a user-secret rotation. A deployment without a
+	// secret-backed rest-api-tls volume has no mount to repoint and must not
+	// be rolled on every reconcile (that would requeue forever).
+	if current == userSecret.ResourceVersion && (currentMount == "" || currentMount == expectedMount) {
 		return ctrl.Result{}, nil
 	}
 	// When the user secret shape changed (pre-built keystore ↔
 	// kubernetes.io/tls) the Deployment mounts the wrong secret; repoint the
 	// mounts and env refs at the expected one in the same update that rolls
 	// the pods, so the rollout never runs with stale mounts.
-	if expectedMount := restAPITLSMountSecretName(instance, userSecret); restAPITLSVolumeSecretName(dep) != expectedMount {
+	if currentMount != "" && currentMount != expectedMount {
 		fixRestAPITLSMount(dep, expectedMount)
 	}
 	if dep.Spec.Template.Annotations == nil {

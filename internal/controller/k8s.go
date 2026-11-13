@@ -209,7 +209,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 				logger.Error(err, "Failed to ensure derived JKS secret for PEM user TLS secret", "Secret.Name", TLSSecretName)
 				return nil, err
 			}
-			TLSSecretName = derivedJKSSecretName(instance.Spec.TLSSecretName)
+			TLSSecretName = derivedJKSSecretName(instance)
 		}
 	}
 
@@ -1867,7 +1867,7 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 				if err := r.ensureDerivedJKSSecret(ctx, instance, userTLSSecret, logger); err != nil {
 					return nil, false, fmt.Errorf("failed to ensure derived JKS secret: %w", err)
 				}
-				TLSSecretName = derivedJKSSecretName(instance.Spec.TLSSecretName)
+				TLSSecretName = derivedJKSSecretName(instance)
 			}
 		} else {
 			TLSSecretName = instance.Name + tlsSecretSuffix

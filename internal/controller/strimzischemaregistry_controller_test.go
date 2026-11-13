@@ -3367,8 +3367,10 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			By("Checking the derived JKS secret was created with the JKS contract")
 			derived := &corev1.Secret{}
+			// The derived secret is named per registry:
+			// <registry>-<tlssecretname>-jks.
 			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, derived)
+				return k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-" + UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, derived)
 			}, time.Minute, time.Second).Should(Succeed())
 			Expect(derived.Data).To(HaveKey("tls-keystore.jks"))
 			Expect(derived.Data).To(HaveKey("keystore_password"))
@@ -3389,7 +3391,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			for _, vol := range deployment.Spec.Template.Spec.Volumes {
 				if vol.Name == restAPITLSVolumeName && vol.Secret != nil {
 					volumeMounted = true
-					Expect(vol.Secret.SecretName).To(Equal(UserTLSSecretName + "-jks"))
+					Expect(vol.Secret.SecretName).To(Equal(SchemaRegistryName + "-" + UserTLSSecretName + "-jks"))
 				}
 			}
 			Expect(volumeMounted).To(BeTrue())
@@ -3399,7 +3401,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					if e.Name == envName {
 						found = true
 						Expect(e.ValueFrom).NotTo(BeNil())
-						Expect(e.ValueFrom.SecretKeyRef.Name).To(Equal(UserTLSSecretName + "-jks"))
+						Expect(e.ValueFrom.SecretKeyRef.Name).To(Equal(SchemaRegistryName + "-" + UserTLSSecretName + "-jks"))
 					}
 				}
 				Expect(found).To(BeTrue())
@@ -3411,7 +3413,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 			stable := &corev1.Secret{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, stable)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-" + UserTLSSecretName + "-jks", Namespace: SchemaRegistryName}, stable)).To(Succeed())
 			Expect(stable.ResourceVersion).To(Equal(derivedVersion))
 		})
 	})
