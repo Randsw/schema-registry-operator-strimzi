@@ -1,3 +1,21 @@
+## [1.17.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.16.3...1.17.0) (2026-11-13)
+
+
+### 📔 Docs
+
+* document spec.replicas HA, namespace-scoped RBAC and the chart role ([3afec58](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3afec585b86ed10bcc297a4a37bf6ecc8a177f7a))
+
+
+### 🚀 Features
+
+* **helm:** add a namespace-scoped RBAC option ([5863687](https://github.com/Randsw/schema-registry-operator-strimzi/commit/586368700745edaa051a47755b2afedcc3877735))
+* **operator:** add spec.replicas for Schema Registry HA ([22e3639](https://github.com/Randsw/schema-registry-operator-strimzi/commit/22e36395c13e1b000bde8e39bcde816b97deae96))
+
+
+### 🛠 Fixes
+
+* **e2e:** make scenario waits Eventually-based and CR updates conflict-safe ([5743a66](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5743a6638dcc15494bce84fcdd573afd3193048e))
+
 ## [1.16.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.16.2...1.16.3) (2026-11-13)
 
 
