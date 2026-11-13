@@ -1,3 +1,15 @@
+## [1.17.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.1...1.17.2) (2026-11-13)
+
+### 🧪 Tests
+
+* **controller:** cover stable selector invariance and image-change rollout ([9548d06](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9548d066e3c4985feced8a8801e77d0462cf458e))
+* **controller:** cover TLS renewal on cluster CA rotation ([9e50c1a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9e50c1ad9a8c1365cf6d3addec0d39940b10a78d))
+
+### 🛠 Fixes
+
+* **controller:** renew REST API TLS certificate on cluster CA rotation in all modes ([85da049](https://github.com/Randsw/schema-registry-operator-strimzi/commit/85da04945be077e78d6f089eb547e9f5cab049b9))
+* **controller:** use stable identity labels in Deployment selector and recreate on legacy selector ([9e451ff](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9e451ff35b1e09ee161e5b4fe27cca9a930f5e8b))
+
 ## [1.17.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.0...1.17.1) (2026-11-13)
 
 ### 🛠 Fixes
