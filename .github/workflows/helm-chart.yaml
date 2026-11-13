@@ -46,7 +46,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: 3.11
+          python-version: 3.13
 
       - name: Set up chart-testing
         uses: helm/chart-testing-action@v2.9.0
@@ -65,7 +65,7 @@ jobs:
         if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true'
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1.15.1
+        uses: helm/kind-action@v1.15.2
         if: steps.changed-files-helm-chart.outputs.helm_any_changed == 'true'
 
       - name: Run chart-testing (install)
