@@ -151,6 +151,11 @@ func (in *StrimziSchemaRegistrySpec) DeepCopyInto(out *StrimziSchemaRegistrySpec
 		*out = new(bool)
 		**out = **in
 	}
+	if in.Replicas != nil {
+		in, out := &in.Replicas, &out.Replicas
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Configuration != nil {
 		in, out := &in.Configuration, &out.Configuration
 		*out = make(map[string]string, len(*in))

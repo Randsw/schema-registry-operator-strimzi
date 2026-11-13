@@ -18,6 +18,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +43,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	sigsyaml "sigs.k8s.io/yaml"
 )
 
 // newTestKafkaCR returns a Kafka CR whose status exposes a "tls" listener so
@@ -286,6 +290,238 @@ func TestUpdateExistingDeploymentPreservesManualReplicas(t *testing.T) {
 			t.Errorf("expected replicas to stay 5 in steady state, got %v", dep.Spec.Replicas)
 		}
 	})
+}
+
+// TestBuildDeploymentSpecReplicas covers B20: the desired replica count from
+// spec.replicas must be propagated to the Deployment, with an unset value
+// defaulting to 1 (the Deployment API default, so CRs created before the
+// field existed behave unchanged).
+func TestBuildDeploymentSpecReplicas(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	build := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+		t.Helper()
+		r := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+		dep, _, err := r.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "",
+			kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return dep
+	}
+
+	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.SecurityProtocol = "PLAINTEXT"
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+		}
+		return inst
+	}
+
+	t.Run("unset replicas default to 1", func(t *testing.T) {
+		dep := build(t, newInst())
+		if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 1 {
+			t.Errorf("expected the default replica count 1, got %v", dep.Spec.Replicas)
+		}
+	})
+
+	t.Run("explicit replicas are propagated", func(t *testing.T) {
+		inst := newInst()
+		inst.Spec.Replicas = ptr.To(int32(3))
+		dep := build(t, inst)
+		if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
+			t.Errorf("expected the CR replica count 3 on the Deployment, got %v", dep.Spec.Replicas)
+		}
+	})
+}
+
+// TestComputeSpecHashReplicas covers B20: changing spec.replicas must change
+// the spec hash so a replica change triggers a deployment update, while an
+// explicit 1 and an unset replicas (both meaning 1) must hash identically to
+// avoid a spurious rollout.
+func TestComputeSpecHashReplicas(t *testing.T) {
+	inst := newTestInstance()
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+	}
+
+	unset, err := computeSpecHash(inst)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	inst.Spec.Replicas = ptr.To(int32(1))
+	explicitOne, err := computeSpecHash(inst)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if explicitOne != unset {
+		t.Errorf("expected an explicit replicas=1 to hash like the unset default, got %s vs %s", explicitOne, unset)
+	}
+
+	inst.Spec.Replicas = ptr.To(int32(2))
+	explicitTwo, err := computeSpecHash(inst)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if explicitTwo == unset {
+		t.Error("expected a replicas change (1 -> 2) to change the spec hash")
+	}
+}
+
+// TestUpdateExistingDeploymentAppliesCRReplicas covers B20: when the CR sets
+// spec.replicas, the desired replica count must win over a manually scaled
+// Deployment on a spec change. The B6 preservation applies only when the CR
+// leaves replicas unset.
+func TestUpdateExistingDeploymentAppliesCRReplicas(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Replicas = ptr.To(int32(3))
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+	}
+
+	dep := &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        inst.Name + deploySuffix,
+			Namespace:   inst.Namespace,
+			Annotations: map[string]string{keyPrefix + "/specHash": "stale-hash"},
+		},
+		Spec: apps.DeploymentSpec{
+			// A manual `kubectl scale` left the Deployment at 5 replicas.
+			Replicas: ptr.To(int32(5)),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), dep).
+		Build()
+	stored := &apps.Deployment{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace}, stored); err != nil {
+		t.Fatalf("failed to get the seeded deployment: %v", err)
+	}
+
+	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+	_, specChanged, err := r.updateExistingDeployment(inst, context.Background(), logr.Logger{}, stored)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !specChanged {
+		t.Fatal("expected specChanged=true for a stale spec hash")
+	}
+	if stored.Spec.Replicas == nil || *stored.Spec.Replicas != 3 {
+		t.Errorf("expected the CR replicas (3) to override the manually scaled 5, got %v", stored.Spec.Replicas)
+	}
+}
+
+// TestCRDManifestReplicasValidation guards the B20 CRD contract: the
+// generated CRD must expose spec.replicas with the kubebuilder validation
+// (optional, default 1, minimum 1). Reading the generated manifest keeps the
+// regeneration step honest — dropping the markers from the type would fail
+// here.
+func TestCRDManifestReplicasValidation(t *testing.T) {
+	crdPath := filepath.Join("..", "..", "config", "crd", "bases",
+		"strimziregistryoperator.randsw.code_strimzischemaregistries.yaml")
+	data, err := os.ReadFile(crdPath)
+	if err != nil {
+		t.Fatalf("failed to read the generated CRD: %v", err)
+	}
+
+	var crd map[string]any
+	if err := sigsyaml.Unmarshal(data, &crd); err != nil {
+		t.Fatalf("failed to parse the generated CRD: %v", err)
+	}
+
+	replicas, err := crdSpecProperty(crd, "replicas")
+	if err != nil {
+		t.Fatalf("spec.replicas missing from the generated CRD: %v", err)
+	}
+
+	if got := replicas["type"]; got != "integer" {
+		t.Errorf("expected spec.replicas type integer, got %v", got)
+	}
+	if got := replicas["default"]; got != float64(1) {
+		t.Errorf("expected spec.replicas default 1, got %v", got)
+	}
+	minimum, ok := replicas["minimum"].(float64)
+	if !ok || minimum != 1 {
+		t.Errorf("expected spec.replicas minimum 1, got %v", replicas["minimum"])
+	}
+}
+
+// crdSpecProperty navigates a parsed CRD manifest down to
+// spec.versions[0].schema.openAPIV3Schema.properties.spec.properties[name].
+func crdSpecProperty(crd map[string]any, name string) (map[string]any, error) {
+	step := func(from any, key string) (any, error) {
+		m, ok := from.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("expected a map at key %q", key)
+		}
+		v, ok := m[key]
+		if !ok {
+			return nil, fmt.Errorf("key %q not found", key)
+		}
+		return v, nil
+	}
+
+	versions, err := step(crd, "spec")
+	if err != nil {
+		return nil, err
+	}
+	versions, err = step(versions, "versions")
+	if err != nil {
+		return nil, err
+	}
+	versionList, ok := versions.([]any)
+	if !ok || len(versionList) == 0 {
+		return nil, fmt.Errorf("expected a non-empty versions list")
+	}
+	schema, err := step(versionList[0], "schema")
+	if err != nil {
+		return nil, err
+	}
+	schema, err = step(schema, "openAPIV3Schema")
+	if err != nil {
+		return nil, err
+	}
+	schema, err = step(schema, "properties")
+	if err != nil {
+		return nil, err
+	}
+	schema, err = step(schema, "spec")
+	if err != nil {
+		return nil, err
+	}
+	schema, err = step(schema, "properties")
+	if err != nil {
+		return nil, err
+	}
+	props, ok := schema.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("expected a map of spec properties")
+	}
+	prop, ok := props[name].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("property %q not found", name)
+	}
+	return prop, nil
 }
 
 // newTestInstance creates a minimal StrimziSchemaRegistry for testing.
@@ -1778,15 +2014,17 @@ func TestComputeSpecHashServiceNetworkPolicy(t *testing.T) {
 
 	// Known-answer test pinning the FNV-64a algorithm: the digest of the
 	// default test instance must not change unless the hashing scheme is
-	// deliberately replaced. The value exceeds math.MaxUint32, which also
-	// proves the former FNV-32 digest is gone.
+	// deliberately changed. The value exceeds math.MaxUint32, which also
+	// proves the former FNV-32 digest is gone. The digest changed when
+	// spec.replicas joined the hashed inputs (B20) — a one-time rewrite of
+	// every stored hash that triggers a single rollout on operator upgrade.
 	t.Run("known FNV-64a digest for the default test instance", func(t *testing.T) {
 		hash, err := computeSpecHash(newTestInstance())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if hash != "8252382037386917762" {
-			t.Errorf("expected the FNV-64a digest 8252382037386917762, got %q", hash)
+		if hash != "6521916336062871651" {
+			t.Errorf("expected the FNV-64a digest 6521916336062871651, got %q", hash)
 		}
 	})
 }

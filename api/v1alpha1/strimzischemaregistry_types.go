@@ -128,6 +128,19 @@ type StrimziSchemaRegistrySpec struct {
 	// +kubebuilder:default=true
 	MasterEligibility *bool `json:"mastereligibility,omitempty"`
 
+	// Replicas is the desired number of Schema Registry replicas. Every
+	// replica runs the same configuration rendered from this CR; master
+	// election among the replicas is performed by Schema Registry itself
+	// (instances whose master.eligibility is true compete, and
+	// spec.mastereligibility applies to every replica of this CR). The
+	// advertised host.name is resolved per pod through the downward API
+	// (status.podIP), so each replica advertises a unique address.
+	// Defaults to 1.
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	Replicas *int32 `json:"replicas,omitempty"`
+
 	// Configuration holds arbitrary Confluent Schema Registry properties in
 	// dotted form (e.g. "kafkastore.timeout.ms"). Each key is converted to a
 	// SCHEMA_REGISTRY_* environment variable. Operator-managed settings cannot
