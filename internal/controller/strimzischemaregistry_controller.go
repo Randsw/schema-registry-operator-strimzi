@@ -173,6 +173,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err = r.migrateFinalizer(ctx, instance, logger); err != nil {
 		logger.Error(err, "Failed to migrate finalizer")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
@@ -209,6 +210,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if r.Recorder != nil {
 			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ClientAuthRequiresSecureHTTP", "",
 				"spec.clientauth is set but spec.securehttp is false; mutual TLS on the REST API will not be enabled")
+			// B12: reconciliation is skipped entirely for this invalid
+			// combination, so a previously created Deployment keeps serving
+			// with its current configuration and is no longer reconciled.
+			// Say so explicitly — the validation event above alone read like
+			// a mere mTLS downgrade.
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "",
+				"reconciliation is skipped until the invalid spec.clientauth/spec.securehttp combination is fixed; an existing Deployment (if any) keeps running with its current configuration and is no longer reconciled")
 		}
 		return ctrl.Result{}, nil
 	}
@@ -263,6 +271,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		logger.Error(err, "Failed to get strimzi cluster name from labels")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -270,6 +279,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	result, err := r.handleSecretRotation(ctx, instance, logger, strimziClusterName)
 	if err != nil {
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return result, err
 	}
 	if result.RequeueAfter > 0 {
@@ -283,6 +293,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	result, tlsRecheck, err := r.handleTLSCertExpiry(ctx, instance, logger, strimziClusterName)
 	if err != nil {
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return result, err
 	}
 	if result.RequeueAfter > 0 {
@@ -294,6 +305,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	result, err = r.handleUserTLSSecretRotation(ctx, instance, logger)
 	if err != nil {
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return result, err
 	}
 	if result.RequeueAfter > 0 {
@@ -309,12 +321,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to create deployment")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		err = r.Create(ctx, deployment)
 		if err != nil {
 			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		// Deployment created successfully - return and requeue
@@ -323,6 +337,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	} else if err != nil {
 		logger.Error(err, "Failed to get Deployment")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -331,6 +346,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		logger.Error(err, "Failed to reconcile deployment spec changes")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 	if specChanged {
@@ -338,13 +354,21 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to update deployment after spec change")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		monitoring.StrimziSchemaRegistryDeploymentUpdateTotal.Inc()
 		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	condition := readyCondition(found.Status.Replicas, found.Status.ReadyReplicas, instance.Generation)
+	// The Deployment's effective desired replica count: Spec.Replicas when
+	// set (e.g. by a manual kubectl scale, which B6 preserves), else the
+	// operator default of 1.
+	desiredReplicas := int32(1)
+	if found.Spec.Replicas != nil {
+		desiredReplicas = *found.Spec.Replicas
+	}
+	condition := readyCondition(desiredReplicas, found.Status.Replicas, found.Status.ReadyReplicas, instance.Generation)
 	meta.SetStatusCondition(&instance.Status.Conditions, condition)
 	if condition.Status == metav1.ConditionTrue {
 		instance.Status.Status = "Ok"
@@ -356,6 +380,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to update CR Status")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 	}
@@ -367,12 +392,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to create service")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		err = r.Create(ctx, svc)
 		if err != nil {
 			logger.Error(err, "Failed to create new Service", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		// Service created successfully - return and requeue
@@ -381,6 +408,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	} else if err != nil {
 		logger.Error(err, "Failed to get Service")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -389,6 +417,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		logger.Error(err, "Failed to create desired service spec")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -433,6 +462,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to update service after spec change")
 			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
 		logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
@@ -443,6 +473,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if err = r.reconcileNetworkPolicy(ctx, instance, logger); err != nil {
 		logger.Error(err, "Failed to reconcile NetworkPolicy")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
 	}
 
@@ -456,12 +487,51 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	return ctrl.Result{}, nil
 }
 
+// setReconcileErrorStatus marks the CR as failing reconciliation: a
+// Ready=False condition with a distinct ReconcileError reason carrying the
+// error message, plus status.status=ReconcileError for the printcolumn.
+// Without it, terminal-ish failures (a missing KafkaUser, a missing
+// bootstrap listener, a missing cluster CA secret, ...) returned errors with
+// backoff while the Ready condition stayed stale, leaving nothing on the CR
+// to explain why nothing is happening (B7). The write is skipped when
+// nothing changed, and write failures are logged instead of returned: the
+// original reconcile error is the one that matters. A later successful
+// reconcile overwrites the condition via readyCondition, clearing the error
+// state.
+func (r *StrimziSchemaRegistryReconciler) setReconcileErrorStatus(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	origStatus *strimziregistryoperatorv1alpha1.StrimziSchemaRegistryStatus,
+	logger logr.Logger,
+	reconcileErr error,
+) {
+	meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "ReconcileError",
+		Message:            reconcileErr.Error(),
+		ObservedGeneration: instance.Generation,
+	})
+	instance.Status.Status = "ReconcileError"
+	if equality.Semantic.DeepEqual(origStatus, instance.Status) {
+		return
+	}
+	if err := r.Status().Update(ctx, instance); err != nil {
+		logger.Error(err, "Failed to update CR status with the reconcile error")
+	}
+}
+
 // readyCondition builds the Ready status condition for the Schema Registry
-// Deployment. The Deployment is only Ready when it has at least one replica
-// and all of them are ready: immediately after creation Replicas and
-// ReadyReplicas are both 0, which must not be reported as Ready.
-func readyCondition(replicas, readyReplicas int32, generation int64) metav1.Condition {
-	if replicas > 0 && readyReplicas == replicas {
+// Deployment. The Deployment is only Ready when it has converged on the
+// desired replica count: exactly the desired number of replicas exist and
+// all of them are ready. Immediately after creation Replicas and
+// ReadyReplicas are both 0, which must not be reported as Ready; and
+// comparing Status.Replicas with ReadyReplicas alone reported Ready
+// prematurely during scale-down windows, while surplus replicas from a
+// previous scale were still terminating (B14). desiredReplicas is the
+// Deployment's Spec.Replicas (1 when unset, the operator default).
+func readyCondition(desiredReplicas, replicas, readyReplicas int32, generation int64) metav1.Condition {
+	if desiredReplicas > 0 && replicas == desiredReplicas && readyReplicas == desiredReplicas {
 		return metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionTrue,
@@ -471,10 +541,11 @@ func readyCondition(replicas, readyReplicas int32, generation int64) metav1.Cond
 		}
 	}
 	return metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             "NotReady",
-		Message:            fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready", readyReplicas, replicas),
+		Type:   "Ready",
+		Status: metav1.ConditionFalse,
+		Reason: "NotReady",
+		Message: fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready (%d running, %d desired)",
+			readyReplicas, desiredReplicas, replicas, desiredReplicas),
 		ObservedGeneration: generation,
 	}
 }
@@ -889,7 +960,28 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 //     typically carry no Strimzi label, so they are matched by name instead.
 //
 // A CR matching both paths is enqueued once.
+//
+// Secret events are cluster-wide, so cheap pre-filters (B11) exit before any
+// CR List call:
+//  1. Secrets the operator itself owns — the <name>-jks and <name>-tls
+//     outputs and the derived <tlssecretname>-jks — are written by
+//     reconciliation, never inputs to it, so their events must not
+//     re-trigger reconciliation. The controller-owner check (rather than the
+//     bare name suffix) keeps user-provided TLS secrets that merely end with
+//     -tls/-jks (e.g. the documented schema-registry-tls name) flowing to
+//     the matching paths below.
+//  2. Cluster CA cert secrets (<cluster>-cluster-ca-cert) can only match
+//     through the label path: no CR can reference one via spec.tlssecretname
+//     (the user TLS secret validation requires keystore material the CA
+//     secret does not carry), so the namespace-wide name-path List is
+//     skipped for them.
 func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Context, obj client.Object) []reconcile.Request {
+	if owner := metav1.GetControllerOf(obj); owner != nil && owner.Kind == "StrimziSchemaRegistry" {
+		return nil
+	}
+	// Cluster CA cert secrets never match the name path (see above).
+	isClusterCA := strings.HasSuffix(obj.GetName(), clusterCASuffix)
+
 	requests := make([]reconcile.Request, 0, 1)
 	seen := make(map[types.NamespacedName]struct{}, 1)
 	add := func(name, namespace string) {
@@ -930,13 +1022,17 @@ func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Contex
 
 	// Name path: user-provided REST API TLS secrets referenced via
 	// spec.tlssecretname. Namespace-scoped so unrelated secrets only pay the
-	// cost of listing the (typically few) CRs in their own namespace.
-	tlsReferencing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
-	if err := r.List(ctx, tlsReferencing, client.InNamespace(obj.GetNamespace())); err == nil {
-		for i := range tlsReferencing.Items {
-			item := &tlsReferencing.Items[i]
-			if item.Spec.TLSSecretName != "" && item.Spec.TLSSecretName == obj.GetName() {
-				add(item.Name, item.Namespace)
+	// cost of listing the (typically few) CRs in their own namespace. Skipped
+	// entirely for cluster CA cert secrets, which can only match via the
+	// label path (B11).
+	if !isClusterCA {
+		tlsReferencing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+		if err := r.List(ctx, tlsReferencing, client.InNamespace(obj.GetNamespace())); err == nil {
+			for i := range tlsReferencing.Items {
+				item := &tlsReferencing.Items[i]
+				if item.Spec.TLSSecretName != "" && item.Spec.TLSSecretName == obj.GetName() {
+					add(item.Name, item.Namespace)
+				}
 			}
 		}
 	}

@@ -3398,6 +3398,130 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 	})
 
+	// Phase 3 (B7): reconcile errors must be surfaced on the CR status. A
+	// missing KafkaUser for the SSL security protocol fails reconciliation
+	// with backoff; the CR must show Ready=False/ReconcileError carrying the
+	// error message so `kubectl get strimzischemaregistry` explains why
+	// nothing is happening instead of leaving the Ready condition stale.
+	Context("When the KafkaUser is missing for an SSL Schema Registry", func() {
+		const SchemaRegistryName = "test-missing-kafkauser"
+
+		ctx := context.Background()
+
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+
+		BeforeEach(func() {
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+
+			By("Creating a strimzi kafka cluster with a tls listener")
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "kafka-cluster",
+					Namespace: SchemaRegistryName,
+				},
+				Spec: &kafka.KafkaSpec{
+					EntityOperator: &kafka.EntityOperatorSpec{
+						TopicOperator: &kafka.EntityTopicOperatorSpec{},
+						UserOperator:  &kafka.EntityUserOperatorSpec{},
+					},
+					Kafka: &kafka.KafkaClusterSpec{
+						Authorization: &kafka.KafkaAuthorization{
+							SuperUsers: []string{"CN=root"},
+							Type:       kafka.KafkaAuthorizationType(kafka.SIMPLE_KAFKAUSERAUTHORIZATIONTYPE),
+						},
+						Config: kafka.MapStringObject{
+							"apple":   5,
+							"lettuce": 7,
+						},
+						Listeners: []kafka.GenericKafkaListener{
+							{
+								Name: "tls",
+								Port: 9093,
+								Tls:  true,
+								Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+								Authentication: &kafka.KafkaListenerAuthentication{
+									Type: kafka.TLS_KAFKALISTENERAUTHENTICATIONTYPE,
+								},
+							},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			status := &kafka.KafkaStatus{
+				ClusterId: "Ypb68J1GSu-jqq0N0ama0w",
+				Listeners: []kafka.ListenerStatus{
+					{
+						Addresses: []kafka.ListenerAddress{
+							{
+								Host: "kafka-cluster-kafka-bootstrap.kafka.svc",
+								Port: ptr.To(int32(9093)),
+							},
+						},
+						BootstrapServers: "kafka-cluster-kafka-bootstrap.kafka.svc:9093",
+						Name:             "tls",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updatedCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updatedCluster)).To(Succeed())
+			updatedCluster.Status = status
+			Expect(k8sClient.Status().Update(ctx, updatedCluster)).To(Succeed())
+
+			By("Creating a StrimziSchemaRegistry with the SSL protocol and no KafkaUser")
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      SchemaRegistryName,
+					Namespace: SchemaRegistryName,
+					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+				},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					Listener:           "tls",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "SSL",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+				if len(found.Finalizers) > 0 {
+					found.Finalizers = []string{}
+					_ = k8sClient.Update(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, namespace)
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should set Ready=False with the ReconcileError reason and the error message", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(HaveOccurred())
+
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+
+			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("ReconcileError"))
+			Expect(cond.Message).To(ContainSubstring("KafkaUser"))
+			Expect(instance.Status.Status).To(Equal("ReconcileError"))
+
+			By("Verifying no Deployment was created")
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).NotTo(Succeed())
+		})
+	})
+
 	// Phase 1: user-provided TLS secret validation. A missing or incomplete
 	// user TLS secret must surface as Ready=False/InvalidTLSSecret and block
 	// Deployment creation; fixing the secret lets reconciliation proceed.

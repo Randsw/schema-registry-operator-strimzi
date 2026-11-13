@@ -201,7 +201,13 @@ type StrimziSchemaRegistryStatus struct {
 	// +patchStrategy=merge
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
-	// Status of the Schema Registry deployment (Ok, Not Ready, etc.)
+	// Status of the Schema Registry deployment. One of Ok (the Deployment is
+	// ready), NotReady (starting or not converged), InvalidSpec (the spec
+	// combination is invalid, e.g. clientauth without securehttp),
+	// InvalidTLSSecret (the user-provided TLS secret is missing or invalid)
+	// or ReconcileError (the last reconciliation failed; see the Ready
+	// condition message for the cause).
+	// +kubebuilder:validation:Enum=Ok;NotReady;InvalidSpec;InvalidTLSSecret;ReconcileError
 	Status string `json:"status"`
 }
 

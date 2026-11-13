@@ -30,7 +30,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -485,6 +488,107 @@ func TestMapSecretToRequests(t *testing.T) {
 			Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
 		}}
 		expectRequests(t, reconciler.mapSecretToRequests(ctx, secret), "sr-name")
+	})
+
+	// B11 pre-filters: Secret events are cluster-wide, so irrelevant events
+	// must exit before any CR List call. These subtests count List calls with
+	// a fake-client interceptor.
+	srTLSSuffixed := newTestInstance()
+	srTLSSuffixed.Name = "sr-tls-suffixed"
+	srTLSSuffixed.Spec.TLSSecretName = "schema-registry-tls"
+
+	// operatorOwnedSecret returns a secret carrying a controller owner
+	// reference to a StrimziSchemaRegistry, as the operator's own output
+	// secrets (<name>-jks, <name>-tls, derived <tlssecretname>-jks) do.
+	operatorOwnedSecret := func(name string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					Kind:       "StrimziSchemaRegistry",
+					Name:       "sr-name",
+					UID:        "test-uid",
+					Controller: ptr.To(true),
+				}},
+			},
+		}
+	}
+
+	newCountingReconciler := func(t *testing.T, listCalls *int, objs ...crclient.Object) *StrimziSchemaRegistryReconciler {
+		t.Helper()
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(objs...).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, cl crclient.WithWatch, list crclient.ObjectList, opts ...crclient.ListOption) error {
+					*listCalls++
+					return cl.List(ctx, list, opts...)
+				},
+			}).
+			Build()
+		return &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+	}
+
+	t.Run("operator-owned jks secret is skipped before any List call", func(t *testing.T) {
+		listCalls := 0
+		r := newCountingReconciler(t, &listCalls, srName, srUserTLS, srOther, srLabeled)
+		if reqs := r.mapSecretToRequests(ctx, operatorOwnedSecret("sr-name-jks")); len(reqs) != 0 {
+			t.Errorf("expected no requests for an operator-owned -jks secret, got %v", reqs)
+		}
+		if listCalls != 0 {
+			t.Errorf("expected zero List calls for an operator-owned -jks secret, got %d", listCalls)
+		}
+	})
+
+	t.Run("operator-owned managed TLS secret is skipped before any List call", func(t *testing.T) {
+		listCalls := 0
+		r := newCountingReconciler(t, &listCalls, srName, srUserTLS, srOther, srLabeled)
+		if reqs := r.mapSecretToRequests(ctx, operatorOwnedSecret("sr-name-tls")); len(reqs) != 0 {
+			t.Errorf("expected no requests for an operator-owned -tls secret, got %v", reqs)
+		}
+		if listCalls != 0 {
+			t.Errorf("expected zero List calls for an operator-owned -tls secret, got %d", listCalls)
+		}
+	})
+
+	t.Run("derived user TLS jks secret is skipped before any List call", func(t *testing.T) {
+		listCalls := 0
+		r := newCountingReconciler(t, &listCalls, srName, srUserTLS, srOther, srLabeled)
+		if reqs := r.mapSecretToRequests(ctx, operatorOwnedSecret("user-tls-secret-jks")); len(reqs) != 0 {
+			t.Errorf("expected no requests for the derived -jks secret, got %v", reqs)
+		}
+		if listCalls != 0 {
+			t.Errorf("expected zero List calls for the derived -jks secret, got %d", listCalls)
+		}
+	})
+
+	t.Run("user TLS secret ending with -tls is still matched", func(t *testing.T) {
+		// The README documents user TLS secrets named e.g.
+		// schema-registry-tls; the owner-based skip must not swallow them.
+		listCalls := 0
+		r := newCountingReconciler(t, &listCalls, srTLSSuffixed)
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "schema-registry-tls", Namespace: "default"}}
+		expectRequests(t, r.mapSecretToRequests(ctx, secret), "sr-tls-suffixed")
+		if listCalls != 1 {
+			t.Errorf("expected exactly 1 List call (the name path), got %d", listCalls)
+		}
+	})
+
+	t.Run("cluster CA secret skips the name-path List", func(t *testing.T) {
+		// A CA cert secret can only match via the label path, so the
+		// namespace-wide spec.tlssecretname List must not run for it.
+		listCalls := 0
+		r := newCountingReconciler(t, &listCalls, srName, srLabeled)
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name:      "kafka-cluster-cluster-ca-cert",
+			Namespace: "default",
+			Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+		}}
+		expectRequests(t, r.mapSecretToRequests(ctx, secret), "sr-name", "sr-labeled")
+		if listCalls != 1 {
+			t.Errorf("expected exactly 1 List call (the label path) for a CA secret, got %d", listCalls)
+		}
 	})
 }
 

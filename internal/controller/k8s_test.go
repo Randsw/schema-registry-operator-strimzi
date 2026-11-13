@@ -29,6 +29,7 @@ import (
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,7 +37,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	eventsfake "k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // newTestKafkaCR returns a Kafka CR whose status exposes a "tls" listener so
@@ -179,6 +182,108 @@ func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
 			if !found {
 				t.Errorf("expected a ConfigKeyOverridden event naming %q, events: %v", key, got)
 			}
+		}
+	})
+}
+
+// TestUpdateExistingDeploymentPreservesManualReplicas covers B6: a spec
+// change must not reset a manually scaled Deployment. The CR exposes no
+// replicas field, so the operator never desires a specific replica count and
+// the live Spec.Replicas (set by `kubectl scale`) must survive the update;
+// a Deployment left at the default (nil) must stay nil.
+func TestUpdateExistingDeploymentPreservesManualReplicas(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	// PLAINTEXT avoids any JKS/user-secret requirements; only the Kafka CR
+	// with status listeners is needed.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+		},
+	}
+
+	desiredHash, err := computeSpecHash(inst)
+	if err != nil {
+		t.Fatalf("failed to compute spec hash: %v", err)
+	}
+
+	newDeployment := func(hash string, replicas *int32) *apps.Deployment {
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Replicas: replicas,
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+				},
+			},
+		}
+	}
+
+	newReconciler := func(dep *apps.Deployment) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), dep).
+			Build()
+		stored := &apps.Deployment{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace}, stored); err != nil {
+			t.Fatalf("failed to get the seeded deployment: %v", err)
+		}
+		return &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}, stored
+	}
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+
+	t.Run("manually scaled replicas survive a spec change", func(t *testing.T) {
+		r, dep := newReconciler(newDeployment("stale-hash", ptr.To(int32(3))))
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true for a stale spec hash")
+		}
+		if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
+			t.Errorf("expected the manually scaled replicas (3) to survive the spec update, got %v", dep.Spec.Replicas)
+		}
+	})
+
+	t.Run("unset replicas stay unset across a spec change", func(t *testing.T) {
+		r, dep := newReconciler(newDeployment("stale-hash", nil))
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true for a stale spec hash")
+		}
+		if dep.Spec.Replicas != nil {
+			t.Errorf("expected replicas to stay unset, got %d", *dep.Spec.Replicas)
+		}
+	})
+
+	t.Run("steady-state reconcile leaves replicas untouched", func(t *testing.T) {
+		r, dep := newReconciler(newDeployment(desiredHash, ptr.To(int32(5))))
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if specChanged {
+			t.Fatal("expected specChanged=false for an unchanged spec hash")
+		}
+		if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 5 {
+			t.Errorf("expected replicas to stay 5 in steady state, got %v", dep.Spec.Replicas)
 		}
 	})
 }
@@ -1021,6 +1126,87 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+// TestBuildDeploymentSpecDeclaresContainerPort covers B19: the Schema
+// Registry listener port must be declared in the container spec (the Service
+// targetPort and the probes reference the numeric port), with the name
+// matching the Service port name (http/https), and user-declared ports from
+// spec.template must be preserved.
+func TestBuildDeploymentSpecDeclaresContainerPort(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	build := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+		t.Helper()
+		r := &StrimziSchemaRegistryReconciler{Scheme: scheme}
+		dep, _, err := r.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "",
+			kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}, logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return dep
+	}
+
+	t.Run("plain HTTP declares port 8081 named http", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+		}
+		ports := build(t, inst).Spec.Template.Spec.Containers[0].Ports
+		if len(ports) != 1 {
+			t.Fatalf("expected exactly 1 container port, got %v", ports)
+		}
+		if ports[0].ContainerPort != 8081 || ports[0].Name != "http" || ports[0].Protocol != corev1.ProtocolTCP {
+			t.Errorf("expected container port 8081/TCP named http, got %v", ports[0])
+		}
+	})
+
+	t.Run("secure HTTP declares port 8085 named https", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+		}
+		ports := build(t, inst).Spec.Template.Spec.Containers[0].Ports
+		if len(ports) != 1 {
+			t.Fatalf("expected exactly 1 container port, got %v", ports)
+		}
+		if ports[0].ContainerPort != 8085 || ports[0].Name != "https" {
+			t.Errorf("expected container port 8085 named https, got %v", ports[0])
+		}
+	})
+
+	t.Run("user-declared ports are preserved alongside the listener port", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name:  "sr",
+				Image: "confluentinc/cp-schema-registry:8.4.1",
+				Ports: []corev1.ContainerPort{
+					{Name: "metrics", ContainerPort: 9090, Protocol: corev1.ProtocolTCP},
+					// Conflicts with the operator listener port: the
+					// operator-managed entry wins.
+					{Name: "custom", ContainerPort: 8081, Protocol: corev1.ProtocolTCP},
+				},
+			}}},
+		}
+		ports := build(t, inst).Spec.Template.Spec.Containers[0].Ports
+		if len(ports) != 2 {
+			t.Fatalf("expected 2 container ports (listener + user metrics), got %v", ports)
+		}
+		if ports[0].ContainerPort != 8081 || ports[0].Name != "http" {
+			t.Errorf("expected the operator listener port first, got %v", ports[0])
+		}
+		if ports[1].ContainerPort != 9090 || ports[1].Name != "metrics" {
+			t.Errorf("expected the user metrics port preserved, got %v", ports[1])
+		}
+	})
+}
+
 // TestMergeEnvVars is a table-driven test for the B3 env merge: the
 // operator-managed env comes first and wins on name conflicts, user-only vars
 // are appended in their original order, duplicates inside the user list are
@@ -1348,33 +1534,40 @@ func TestBuildDeploymentSpecMergesUserTemplateFields(t *testing.T) {
 
 // TestReadyCondition is a table-driven test for the Ready condition helper: a
 // Deployment with zero replicas (as observed immediately after creation) must
-// not be reported as Ready, and partial readiness must report NotReady.
+// not be reported as Ready, partial readiness must report NotReady, and a
+// scale-down in progress (surplus replicas still running) must not report
+// Ready prematurely (B14).
 func TestReadyCondition(t *testing.T) {
 	tests := []struct {
-		name          string
-		replicas      int32
-		readyReplicas int32
-		wantStatus    metav1.ConditionStatus
-		wantReason    string
+		name            string
+		desiredReplicas int32
+		replicas        int32
+		readyReplicas   int32
+		wantStatus      metav1.ConditionStatus
+		wantReason      string
 	}{
-		{name: "0/0 replicas (fresh Deployment) is NotReady", replicas: 0, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
-		{name: "1/2 replicas is NotReady", replicas: 2, readyReplicas: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
-		{name: "2/2 replicas is Ready", replicas: 2, readyReplicas: 2, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
-		{name: "1/1 replica is Ready", replicas: 1, readyReplicas: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
-		{name: "0 ready of 1 replica is NotReady", replicas: 1, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "0/0 replicas (fresh Deployment) is NotReady", desiredReplicas: 1, replicas: 0, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "1/2 replicas is NotReady", desiredReplicas: 2, replicas: 2, readyReplicas: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "2/2 replicas is Ready", desiredReplicas: 2, replicas: 2, readyReplicas: 2, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
+		{name: "1/1 replica is Ready", desiredReplicas: 1, replicas: 1, readyReplicas: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
+		{name: "0 ready of 1 replica is NotReady", desiredReplicas: 1, replicas: 1, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		// B14: during a scale-down from 3 to 1 the old replicas are still
+		// running and ready; the deployment has not converged on the desired
+		// count and must not be reported as Ready.
+		{name: "scale-down in progress (3 running/ready, 1 desired) is NotReady", desiredReplicas: 1, replicas: 3, readyReplicas: 3, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cond := readyCondition(tt.replicas, tt.readyReplicas, 7)
+			cond := readyCondition(tt.desiredReplicas, tt.replicas, tt.readyReplicas, 7)
 			if cond.Type != "Ready" {
 				t.Errorf("expected condition type Ready, got %q", cond.Type)
 			}
 			if cond.Status != tt.wantStatus {
-				t.Errorf("replicas=%d readyReplicas=%d: expected status %v, got %v", tt.replicas, tt.readyReplicas, tt.wantStatus, cond.Status)
+				t.Errorf("desired=%d replicas=%d readyReplicas=%d: expected status %v, got %v", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.wantStatus, cond.Status)
 			}
 			if cond.Reason != tt.wantReason {
-				t.Errorf("replicas=%d readyReplicas=%d: expected reason %q, got %q", tt.replicas, tt.readyReplicas, tt.wantReason, cond.Reason)
+				t.Errorf("desired=%d replicas=%d readyReplicas=%d: expected reason %q, got %q", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.wantReason, cond.Reason)
 			}
 			if cond.ObservedGeneration != 7 {
 				t.Errorf("expected ObservedGeneration 7, got %d", cond.ObservedGeneration)
@@ -1678,6 +1871,191 @@ func TestBuildNetworkPolicy(t *testing.T) {
 	if dnsNamespaceLabel != "kubernetes.io/metadata.name" || dnsNamespaceName != "kube-system" || dnsPodLabel != "k8s-app" || dnsPodValue != "kube-dns" {
 		t.Errorf("DNS egress constants changed; update the README NetworkPolicy section to match the new assumption: %s=%s in namespace %s (label %s)",
 			dnsPodLabel, dnsPodValue, dnsNamespaceName, dnsNamespaceLabel)
+	}
+}
+
+// TestReconcileNetworkPolicyPreservesAnnotations covers B8: updating an
+// existing NetworkPolicy must not wipe annotations set on it. The operator
+// never sets annotations and the desired spec carries none, so the previous
+// existing.Annotations = desired.Annotations assignment destroyed any
+// user-managed annotations on every spec change.
+func TestReconcileNetworkPolicyPreservesAnnotations(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+	_ = networkingv1.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	// PLAINTEXT avoids any JKS/user-secret requirements; only the Kafka CR
+	// with status listeners is needed.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
+
+	existing := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      inst.Name + networkPolicySuffix,
+			Namespace: inst.Namespace,
+			Annotations: map[string]string{
+				"example.com/owner": "platform-team",
+			},
+		},
+		// A stale spec (no egress rules) so the update path runs.
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": inst.Name}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), existing).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+	if err := r.reconcileNetworkPolicy(context.Background(), inst, logr.Logger{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &networkingv1.NetworkPolicy{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name + networkPolicySuffix, Namespace: inst.Namespace}, updated); err != nil {
+		t.Fatalf("failed to get the updated NetworkPolicy: %v", err)
+	}
+	if updated.Annotations["example.com/owner"] != "platform-team" {
+		t.Errorf("expected the existing annotation to be preserved, got %v", updated.Annotations)
+	}
+	// The spec must still be reconciled to the desired state.
+	if len(updated.Spec.Egress) == 0 {
+		t.Error("expected the spec to be updated with the desired egress rules")
+	}
+}
+
+// TestGetKafkaBootstrapServersError covers B10: the bootstrap lookup error
+// must be actionable — it names the requested listener, the Kafka cluster
+// and the requesting CR, and lists the listeners the Kafka CR exposes.
+func TestGetKafkaBootstrapServersError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	newInstance := func(listener string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.Listener = listener
+		inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+		return inst
+	}
+
+	t.Run("missing listener names the request and the available listeners", func(t *testing.T) {
+		// The Kafka CR exposes only the "plain" listener; the CR asks for "tls".
+		kafkaCR := newTestKafkaCR("kafka-cluster", "default")
+		kafkaCR.Status.Listeners[0].Name = "plain"
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(newInstance("tls"), kafkaCR).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, _, err := r.getKafkaBootstrapServers(newInstance("tls"), context.Background(), logr.Logger{})
+		if err == nil {
+			t.Fatal("expected an error for a missing listener")
+		}
+		for _, want := range []string{`"tls"`, "kafka-cluster", "test-sr", "plain"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("expected the error to contain %q, got: %s", want, err.Error())
+			}
+		}
+	})
+
+	t.Run("no listeners at all is reported explicitly", func(t *testing.T) {
+		kafkaCR := newTestKafkaCR("kafka-cluster", "default")
+		kafkaCR.Status.Listeners = nil
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(newInstance("tls"), kafkaCR).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, _, err := r.getKafkaBootstrapServers(newInstance("tls"), context.Background(), logr.Logger{})
+		if err == nil {
+			t.Fatal("expected an error when the Kafka CR has no listeners")
+		}
+		if !strings.Contains(err.Error(), "no status.listeners") {
+			t.Errorf("expected the error to mention the missing status.listeners, got: %s", err.Error())
+		}
+	})
+}
+
+// TestReconcileSkipsInvalidClientAuthCombination covers B12: when
+// spec.clientauth is enabled without spec.securehttp, reconciliation is
+// skipped and a previously created Deployment keeps serving unreconciled.
+// The skip must be announced with a ReconciliationSkipped Warning event so
+// the stale-deployment situation is visible, not just the validation error.
+func TestReconcileSkipsInvalidClientAuthCombination(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	recorder := eventsfake.NewFakeRecorder(16)
+	events := recorder.Events
+
+	inst := newTestInstance()
+	inst.Spec.ClientAuth = true
+	inst.Spec.SecureHTTP = false
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst).
+		WithStatusSubresource(inst).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for the skipped reconciliation, got %v", result.RequeueAfter)
+	}
+
+	drainEvents := func() []string {
+		var got []string
+		for {
+			select {
+			case e := <-events:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+	got := drainEvents()
+	var hasValidation, hasSkip bool
+	for _, e := range got {
+		if strings.Contains(e, "ClientAuthRequiresSecureHTTP") {
+			hasValidation = true
+		}
+		if strings.Contains(e, "ReconciliationSkipped") {
+			hasSkip = true
+		}
+	}
+	if !hasValidation {
+		t.Errorf("expected a ClientAuthRequiresSecureHTTP event, got %v", got)
+	}
+	if !hasSkip {
+		t.Errorf("expected a ReconciliationSkipped event announcing the skipped reconciliation, got %v", got)
+	}
+
+	// The CR status must still report the invalid spec.
+	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
+		t.Fatalf("failed to get the updated CR: %v", err)
+	}
+	if updated.Status.Status != "InvalidSpec" {
+		t.Errorf("expected status.status InvalidSpec, got %q", updated.Status.Status)
 	}
 }
 

@@ -27,6 +27,14 @@ import (
 // tests can shorten it.
 var execCommandTimeout = 5 * time.Minute
 
+// rsaKeyBits is the RSA key size used for the REST API server certificate
+// key generated on every renewal (generateCSR). The default is 2048 bits:
+// fast enough to generate on every certificate renewal and sufficient for a
+// cluster-internal certificate (B18; the previous hardcoded 4096 made each
+// renewal noticeably slower). It is a variable so deployments that want a
+// larger key can raise it (e.g. 3072 or 4096) and so tests can pin it.
+var rsaKeyBits = 2048
+
 // withExecDeadline returns a context that enforces execCommandTimeout when
 // the incoming context has no deadline; a context that already carries one
 // (for example the reconcile context) is passed through unchanged. The caller
@@ -638,18 +646,21 @@ func (cp *CertProcessor) KeystoreCertExpiry(ctx context.Context, keystore []byte
 }
 
 func (cp *CertProcessor) generateCSR(cn string) (*rsa.PrivateKey, *x509.CertificateRequest, error) {
-	// Generate server private key
-	serverKey, err := rsa.GenerateKey(cryptorand.Reader, 4096)
+	// Generate server private key. The key size is the package-level
+	// rsaKeyBits (2048 by default, B18) instead of a hardcoded 4096.
+	serverKey, err := rsa.GenerateKey(cryptorand.Reader, rsaKeyBits)
 	if err != nil {
 		return nil, nil, err
 	}
-	// Create CSR template
+	// Create CSR template. The DNS names cover the standard Kubernetes
+	// service DNS forms; the non-standard <cn>.svc.cluster entry is not
+	// included (B22) — it is not a resolvable name and only added noise.
 	csrTemplate := &x509.CertificateRequest{
 		Subject: pkix.Name{
 			Organization: []string{"Schema Registry"},
 			CommonName:   strings.Split(cn, ".")[0],
 		},
-		DNSNames: []string{strings.Split(cn, ".")[0], cn, cn + ".svc", cn + ".svc.cluster", cn + ".svc.cluster.local"},
+		DNSNames: []string{strings.Split(cn, ".")[0], cn, cn + ".svc", cn + ".svc.cluster.local"},
 	}
 	// Create CSR
 	csrDER, err := x509.CreateCertificateRequest(cryptorand.Reader, csrTemplate, serverKey)
@@ -669,12 +680,14 @@ func signCSR(caCert *x509.Certificate, caKey *rsa.PrivateKey, csr *x509.Certific
 	if err != nil {
 		return nil, err
 	}
-	// Create server certificate template
+	// Create server certificate template. NotBefore carries a 5 minute
+	// back-dated skew margin (B9): clients and kubelets with slightly fast
+	// clocks would otherwise reject the fresh certificate as not yet valid.
 	serverTemplate := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject:      csr.Subject,
 		DNSNames:     csr.DNSNames,
-		NotBefore:    time.Now(),
+		NotBefore:    time.Now().Add(-5 * time.Minute),
 		NotAfter:     time.Now().AddDate(1, 0, 0), // 1 year
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},

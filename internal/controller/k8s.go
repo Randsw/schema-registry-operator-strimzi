@@ -252,6 +252,23 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	podSpec.Spec.Containers[0].LivenessProbe = livenessProbe
 	podSpec.Spec.Containers[0].StartupProbe = startupProbe
 
+	// Declare the Schema Registry listener port explicitly (B19): the Service
+	// targetPort and the probes reference the numeric port, but the pod spec
+	// never declared it, leaving the port invisible to tooling
+	// (NetworkPolicies, service meshes, kubectl describe). User-declared
+	// ports from spec.template are preserved; an entry for the listener port
+	// itself is replaced by the operator-managed one.
+	portName := "http"
+	if scheme == v1.URISchemeHTTPS {
+		portName = "https"
+	}
+	listenerPorts := []v1.ContainerPort{{
+		Name:          portName,
+		ContainerPort: listenerPort,
+		Protocol:      v1.ProtocolTCP,
+	}}
+	podSpec.Spec.Containers[0].Ports = mergeContainerPorts(listenerPorts, podSpec.Spec.Containers[0].Ports)
+
 	resources := &podSpec.Spec.Containers[0].Resources
 	if resources.Requests == nil {
 		resources.Requests = v1.ResourceList{}
@@ -778,7 +795,21 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 		}
 	}
 	logger.V(1).Info("No listeners found. Check CR config", "Listener", kafkaListener)
-	return "", "", go_err.New("cant find bootstrap address")
+	// Actionable error (B10): name the requested listener, the Kafka cluster
+	// and the CR that requested it, and the listeners the Kafka CR actually
+	// exposes, so the operator log and the CR status (B7) say what to fix.
+	available := make([]string, 0, len(kafkaCluster.Status.Listeners))
+	for _, listener := range kafkaCluster.Status.Listeners {
+		available = append(available, listener.Name)
+	}
+	if len(available) == 0 {
+		return "", "", fmt.Errorf(
+			"listener %q not found on Kafka cluster %s/%s: the Kafka CR exposes no status.listeners yet; requested by StrimziSchemaRegistry %s/%s",
+			kafkaListener, kafkaCluster.Name, kafkaCluster.Namespace, instance.Name, instance.Namespace)
+	}
+	return "", "", fmt.Errorf(
+		"listener %q not found on Kafka cluster %s/%s: available listeners are [%s]; check spec.listener on StrimziSchemaRegistry %s/%s",
+		kafkaListener, kafkaCluster.Name, kafkaCluster.Namespace, strings.Join(available, ", "), instance.Name, instance.Namespace)
 }
 
 // createSecret creates or returns an up-to-date JKS secret for the Schema Registry.
@@ -1257,6 +1288,38 @@ func mergeVolumeMounts(operator, user []v1.VolumeMount) []v1.VolumeMount {
 	return merged
 }
 
+// mergeContainerPorts merges operator-managed container ports with
+// user-declared ones: the operator wins on conflicting containerPort numbers
+// and names, user-only ports are appended in their original order.
+func mergeContainerPorts(operator, user []v1.ContainerPort) []v1.ContainerPort {
+	if len(operator) == 0 {
+		return user
+	}
+	takenNumbers := make(map[int32]struct{}, len(operator))
+	takenNames := make(map[string]struct{}, len(operator))
+	for _, p := range operator {
+		takenNumbers[p.ContainerPort] = struct{}{}
+		if p.Name != "" {
+			takenNames[p.Name] = struct{}{}
+		}
+	}
+	merged := append([]v1.ContainerPort{}, operator...)
+	for _, p := range user {
+		if _, exists := takenNumbers[p.ContainerPort]; exists {
+			continue
+		}
+		if p.Name != "" {
+			if _, exists := takenNames[p.Name]; exists {
+				continue
+			}
+			takenNames[p.Name] = struct{}{}
+		}
+		takenNumbers[p.ContainerPort] = struct{}{}
+		merged = append(merged, p)
+	}
+	return merged
+}
+
 // networkPolicyEnabled reports whether the optional NetworkPolicy should be
 // created for the Schema Registry pods.
 func networkPolicyEnabled(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) bool {
@@ -1380,8 +1443,9 @@ func portFromBootstrapServer(bootstrap string) (int32, error) {
 }
 
 // networkPoliciesEqual reports whether the existing NetworkPolicy matches the
-// desired state (spec and labels only; annotations are operator-managed only
-// when present, and no passthrough exists for them yet).
+// desired state (spec and labels only). Annotations are user-managed — the
+// operator never sets any and preserves the existing ones on update (B8) —
+// so they are deliberately excluded from the comparison.
 func networkPoliciesEqual(existing, desired *networkingv1.NetworkPolicy) bool {
 	if !equality.Semantic.DeepEqual(existing.Spec, desired.Spec) {
 		return false
@@ -1436,7 +1500,9 @@ func (r *StrimziSchemaRegistryReconciler) reconcileNetworkPolicy(
 	if !networkPoliciesEqual(existing, desired) {
 		existing.Spec = desired.Spec
 		existing.Labels = desired.Labels
-		existing.Annotations = desired.Annotations
+		// Annotations are user-managed and preserved: assigning the desired
+		// (always nil) annotations wiped any annotations set on the existing
+		// policy (B8).
 		logger.Info("NetworkPolicy changed, updating", "NetworkPolicy.Name", name.Name)
 		return r.Update(ctx, existing)
 	}
@@ -1794,8 +1860,15 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	// ignored while building the desired spec (B2).
 	r.emitConfigOverriddenEvents(instance, configOverridden)
 
-	// Update the deployment spec to match desired state
+	// Update the deployment spec to match desired state. The CR exposes no
+	// replicas field yet, so the operator never desires a specific replica
+	// count: the live Spec.Replicas — which manual `kubectl scale` edits —
+	// must survive the update instead of being reset to the desired spec's
+	// nil (which defaults back to 1) (B6). When spec.replicas support lands,
+	// this becomes "preserve only when the CR leaves replicas unset".
+	replicas := found.Spec.Replicas
 	found.Spec = desired.Spec
+	found.Spec.Replicas = replicas
 
 	// Update annotations to trigger rollout
 	if found.Spec.Template.Annotations == nil {

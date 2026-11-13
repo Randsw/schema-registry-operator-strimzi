@@ -250,8 +250,11 @@ spec:
   If `securehttp` is disabled the associated service points to `8081` port in Schema Registry pod. If enabled - to `8085` port.
 - `clientauth` enables mutual TLS (mTLS) on the Schema Registry REST API endpoint. Default is `false`.
   It is only valid when `securehttp` is `true`: setting it without `securehttp` marks the CR
-  `Ready=False` with reason `ClientAuthRequiresSecureHTTP` and emits a `Warning` event, while reconciliation
-  still succeeds. When enabled, clients must present a certificate signed by the Kafka cluster CA. The operator
+  `Ready=False` with reason `ClientAuthRequiresSecureHTTP` (status `InvalidSpec`) and skips reconciliation
+  entirely, announced by `ClientAuthRequiresSecureHTTP` and `ReconciliationSkipped` Warning events.
+  **Note:** while the combination is invalid, a previously created Deployment keeps running with its current
+  configuration and is no longer reconciled — fix the spec to resume reconciliation. When enabled, clients must
+  present a certificate signed by the Kafka cluster CA. The operator
   reuses the cluster-CA truststore and sets `SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION=REQUIRED` (the
   non-deprecated `ssl.client.authentication` property) together with
   `SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION` and `SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD`. For
@@ -424,8 +427,19 @@ spec:
 ### CR status
 
 The operator reports the CR as `Ready=True` (`status.status: "Ok"`) only once the Schema Registry Deployment
-has at least one ready replica. While the Deployment is starting or unavailable, the CR shows `Ready=False`
-with reason `NotReady`.
+has converged on its desired replica count: exactly the desired number of replicas exist and all of them are
+ready. While the Deployment is starting, unavailable, or still converging (e.g. during a scale-down, while
+surplus replicas terminate), the CR shows `Ready=False` with reason `NotReady`.
+
+`status.status` is one of:
+
+| Value             | Meaning                                                                    |
+|-------------------|----------------------------------------------------------------------------|
+| `Ok`              | The Deployment is ready.                                                    |
+| `NotReady`        | The Deployment is starting, unavailable or not yet converged.               |
+| `InvalidSpec`     | The spec combination is invalid (e.g. `clientauth` without `securehttp`).   |
+| `InvalidTLSSecret`| The user-provided TLS secret is missing or does not match the contract.     |
+| `ReconcileError`  | The last reconciliation failed; the `Ready` condition message has the cause.|
 
 Upgrading the operator may trigger a one-time rollout of existing Schema Registry deployments even when the
 spec is unchanged: the spec hash recorded in the `strimziregistryoperator.randsw.code/specHash` annotation
@@ -445,6 +459,58 @@ was upgraded from a 32-bit to a 64-bit FNV digest, rewriting every stored value 
 - Stale JKS secrets are updated in place during rotation; they are no longer
   deleted and recreated, closing the window in which restarting pods could not
   mount them.
+
+Phase 3 fixes:
+
+- Manual `kubectl scale` edits to the Deployment are preserved: a spec change
+  no longer resets the replica count to 1 (the CR exposes no `replicas` field,
+  so the operator never desires a specific count).
+- Reconcile errors (missing KafkaUser, missing bootstrap listener, missing
+  cluster CA secret, ...) are surfaced on the CR as `Ready=False` with reason
+  `ReconcileError` and the error message, instead of leaving the `Ready`
+  condition stale while reconciliation retries with backoff.
+- The `Ready` condition now converges on the Deployment's desired replica
+  count, so a scale-down in progress no longer reports `Ready` prematurely.
+  `status.status` is validated against an enum (`Ok`, `NotReady`,
+  `InvalidSpec`, `InvalidTLSSecret`, `ReconcileError`).
+- NetworkPolicy annotations set by users are preserved on updates instead of
+  being wiped.
+- The bootstrap server lookup error is actionable: it names the requested
+  listener, the Kafka cluster and the CR, and lists the listeners the Kafka CR
+  exposes.
+- Secret watch events are pre-filtered: events for operator-owned secrets
+  (`<name>-jks`, `<name>-tls`, derived `<tlssecretname>-jks`) no longer
+  trigger CR list calls, and cluster CA cert events skip the
+  `spec.tlssecretname` lookup.
+- The instance-count metric is now correctly spelled
+  `strimzi_schema_registry_instance_current_count`; the old misspelled
+  `strimzi_schema_register_instance_current_count` metric was **removed** —
+  update dashboards and alerts (see [Operator metrics](#operator-metrics)).
+- REST API certificates are back-dated by a 5 minute clock-skew margin
+  (`NotBefore`), so clients with slightly fast clocks do not reject fresh
+  certificates. The RSA key size for generated certificates is a
+  package-level variable in the operator source (`certprocessor.rsaKeyBits`,
+  default 2048 for fast renewals) instead of a hardcoded 4096.
+- Generated certificates no longer carry the non-standard `<cn>.svc.cluster`
+  DNS SAN.
+- The Schema Registry listener port (8081/http or 8085/https) is now declared
+  in the container spec.
+
+### Operator metrics
+
+The operator exposes the following Prometheus metrics on its metrics endpoint:
+
+| Metric                                              | Type    | Description                                             |
+|-----------------------------------------------------|---------|---------------------------------------------------------|
+| `strimzi_schema_registry_instance_current_count`    | Gauge   | Current number of StrimziSchemaRegistry instances.      |
+| `strimzi_schema_registry_reconcile_errors_total`    | Counter | Total number of reconciliation errors.                  |
+| `strimzi_schema_registry_secret_rotation_total`     | Counter | Total number of secret rotation events.                 |
+| `strimzi_schema_registry_deployment_update_total`   | Counter | Total number of deployment updates.                     |
+
+The former misspelled instance-count metric
+`strimzi_schema_register_instance_current_count` was removed in this release;
+update dashboards and alerts to
+`strimzi_schema_registry_instance_current_count`.
 
 ### Single replica support
 
