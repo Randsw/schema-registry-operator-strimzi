@@ -1,3 +1,16 @@
+## [1.17.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.2...1.17.3) (2026-11-14)
+
+### 🛠 Fixes
+
+* **chart:** grant events create/patch to manager role ([9d59d43](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9d59d43f6f5b5342856d25d6d50cf097b2f30a1d))
+* **chart:** harden pod securityContext for PSS restricted ([9ab3128](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9ab31283ea649375d32f2d3e3189aef19b0a6138))
+* **chart:** remove dead autoscaling values and deployment guard ([3f4efec](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3f4efec4a5a80d07e5f0fba91db3179128db199e))
+* **chart:** remove dead manager-config ConfigMap ([8873034](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8873034275b77a828ea6f5890aa0a3a09981f38f))
+
+### Other
+
+* **chart:** bump chart version ([4754b2c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4754b2cc1431f19a122cb7f6227189153def97b6))
+
 ## [1.17.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.1...1.17.2) (2026-11-13)
 
 ### 🧪 Tests
