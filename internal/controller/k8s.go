@@ -1961,7 +1961,7 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 		// drift, which would roll pods on the very first reconcile after an
 		// operator upgrade.
 		if current := deploymentBootstrapServers(found); current != "" && current != kafkaBootstrapServer {
-			logger.Info("Kafka bootstrap servers changed, updating deployment",
+			logger.Info(deploymentUpdateReason(existingHash, desiredHash),
 				"oldBootstrapServers", current, "newBootstrapServers", kafkaBootstrapServer)
 		} else {
 			// Steady state: do NOT emit ConfigKeyOverridden events here. The
@@ -1971,10 +1971,10 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 			// applied (createDeployment and spec-change paths below).
 			return found, false, nil
 		}
+	} else {
+		logger.Info(deploymentUpdateReason(existingHash, desiredHash),
+			"oldHash", existingHash, "newHash", desiredHash)
 	}
-
-	logger.Info("Spec hash changed, updating deployment",
-		"oldHash", existingHash, "newHash", desiredHash)
 
 	// The spec actually changed: warn about operator-managed keys that were
 	// ignored while building the desired spec (B2).
@@ -2059,6 +2059,19 @@ func (r *StrimziSchemaRegistryReconciler) recreateDeploymentForLegacySelector(
 			"Deployment %s had a selector containing mutable labels (e.g. app.kubernetes.io/version, strimzi.io/cluster); the selector field is immutable, so it was deleted and re-created with the stable identity selector as a one-time migration (Schema Registry is stateless)", dep.Name)
 	}
 	return dep, false, nil
+}
+
+// deploymentUpdateReason returns the log message describing why an existing
+// Deployment is being updated. The CR spec hash is the primary change
+// detector; when it is unchanged the update is driven by the Kafka bootstrap
+// address drift the hash cannot see (the address is rendered from the Kafka
+// CR's status). Branching the message keeps the log truthful: logging a hash
+// change with equal old/new hashes would be misleading (F4).
+func deploymentUpdateReason(existingHash, desiredHash string) string {
+	if existingHash != desiredHash {
+		return "Spec hash changed, updating deployment"
+	}
+	return "Kafka bootstrap address changed, updating deployment"
 }
 
 // deploymentBootstrapServers returns the value of the operator-managed

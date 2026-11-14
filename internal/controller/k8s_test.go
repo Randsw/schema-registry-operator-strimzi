@@ -3807,3 +3807,23 @@ func TestImageVersionLabel(t *testing.T) {
 		t.Errorf("expected the version label to be capped at %d chars, got %d (%q)", maxLabelValueLength, len(version), version)
 	}
 }
+
+// TestDeploymentUpdateReason covers F4: the update log message must match the
+// actual trigger. When the CR spec hash changed the message reports the hash
+// change; when the hash is equal the update is driven by the Kafka bootstrap
+// address drift the hash cannot see, and reporting a hash change with equal
+// hashes would be misleading.
+func TestDeploymentUpdateReason(t *testing.T) {
+	t.Run("different hashes report the spec hash change", func(t *testing.T) {
+		got := deploymentUpdateReason("old-hash", "new-hash")
+		if got != "Spec hash changed, updating deployment" {
+			t.Errorf("expected the hash-change message, got %q", got)
+		}
+	})
+	t.Run("equal hashes report the bootstrap address change", func(t *testing.T) {
+		got := deploymentUpdateReason("same-hash", "same-hash")
+		if got != "Kafka bootstrap address changed, updating deployment" {
+			t.Errorf("expected the bootstrap-change message, got %q", got)
+		}
+	})
+}
