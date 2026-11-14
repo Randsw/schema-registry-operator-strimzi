@@ -220,3 +220,70 @@ func TestReleasercSyncsChartAppVersion(t *testing.T) {
 		t.Error("@semantic-release/git assets must include helm-chart/ssr-operator/Chart.yaml so the appVersion sync is committed with the release")
 	}
 }
+
+// workflowSteps is the subset of the GitHub Actions workflow schema needed
+// to inspect job steps.
+type workflowSteps struct {
+	Jobs map[string]struct {
+		Steps []struct {
+			Name string `yaml:"name"`
+			Uses string `yaml:"uses"`
+			With struct {
+				Flavor string `yaml:"flavor"`
+			} `yaml:"with"`
+		} `yaml:"steps"`
+	} `yaml:"jobs"`
+}
+
+func loadWorkflowSteps(t *testing.T, name string) workflowSteps {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", name))
+	if err != nil {
+		t.Fatalf("failed to read workflow %s: %v", name, err)
+	}
+	var wf workflowSteps
+	if err := sigsyaml.Unmarshal(data, &wf); err != nil {
+		t.Fatalf("failed to parse workflow %s: %v", name, err)
+	}
+	return wf
+}
+
+// metadataFlavor returns the docker/metadata-action flavor of the given
+// job, failing the test if the job has no metadata step.
+func metadataFlavor(t *testing.T, wf workflowSteps, job string) string {
+	t.Helper()
+	j, ok := wf.Jobs[job]
+	if !ok {
+		t.Fatalf("job %s missing from workflow", job)
+	}
+	for _, s := range j.Steps {
+		if strings.Contains(s.Uses, "docker/metadata-action") {
+			return s.With.Flavor
+		}
+	}
+	t.Fatalf("job %s has no docker/metadata-action step", job)
+	return ""
+}
+
+// TestDeployJobDoesNotOverwriteLatestTag guards the mutable-tag contract:
+// the Deploy job of test-release.yaml runs on every feature/fix branch push,
+// so it must not publish the mutable "latest" tag — otherwise any branch
+// push overwrites ghcr.io/randsw/strimzi-schema-registry-operator:latest
+// with unreviewed code. Branch tags (type=ref,event=branch) remain.
+func TestDeployJobDoesNotOverwriteLatestTag(t *testing.T) {
+	wf := loadWorkflowSteps(t, "test-release.yaml")
+	if flavor := metadataFlavor(t, wf, "Deploy"); flavor != "latest=false" {
+		t.Errorf("test-release.yaml Deploy job metadata flavor = %q, want latest=false; branch builds must not overwrite the mutable latest tag", flavor)
+	}
+}
+
+// TestBuildWorkflowKeepsLatestTag guards the intended latest publisher: the
+// tag-triggered build workflow is the only place that publishes the mutable
+// "latest" tag (version-tag builds), so its metadata flavor must stay
+// latest=true.
+func TestBuildWorkflowKeepsLatestTag(t *testing.T) {
+	wf := loadWorkflowSteps(t, "build.yaml")
+	if flavor := metadataFlavor(t, wf, "Deploy"); flavor != "latest=true" {
+		t.Errorf("build.yaml Deploy job metadata flavor = %q, want latest=true; the tag-triggered build is the intended latest publisher", flavor)
+	}
+}

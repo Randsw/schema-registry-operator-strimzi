@@ -219,7 +219,12 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/randsw/strimzi-schema-registry-operator
-          flavor: latest=true
+          # Branch builds must not publish the mutable "latest" tag: any
+          # feature/fix branch push would otherwise overwrite
+          # ghcr.io/randsw/strimzi-schema-registry-operator:latest with
+          # unreviewed code. Branch tags (type=ref,event=branch) remain.
+          # "latest" is published only by the tag-triggered build workflow.
+          flavor: latest=false
           tags: |
             type=ref,event=branch
             type=ref,event=pr
