@@ -81,6 +81,31 @@ func selectorLabelsForStrimziSchemaRegistryOperator(name string) map[string]stri
 	}
 }
 
+// maxLabelValueLength is the Kubernetes limit for label values: a valid
+// label value must be 63 characters or fewer.
+const maxLabelValueLength = 63
+
+// imageVersionLabel derives the app.kubernetes.io/version label value from
+// the container image reference: the substring after the last ':' when it is
+// a tag rather than part of a registry host, "latest" when the image carries
+// no tag. A digest-pinned image (image@sha256:<64 hex chars>) yields a
+// 64-character value that exceeds the 63-character Kubernetes label limit,
+// so the digest is truncated (F3). The label is no longer part of the
+// Deployment selector (F1) but remains a pod label and must stay valid.
+func imageVersionLabel(image string) string {
+	parts := strings.Split(image, ":")
+	if len(parts) > 1 {
+		last := parts[len(parts)-1]
+		if !strings.Contains(last, "/") {
+			if len(last) > maxLabelValueLength {
+				return last[:maxLabelValueLength]
+			}
+			return last
+		}
+	}
+	return "latest"
+}
+
 // labelsForStrimziSchemaRegistryOperator returns the standard set of labels
 // for resources managed by the Schema Registry operator. It extends the
 // stable selector subset with the mutable app.kubernetes.io/version (derived
@@ -88,16 +113,7 @@ func selectorLabelsForStrimziSchemaRegistryOperator(name string) map[string]stri
 // must never be used in a Deployment selector (F1).
 func labelsForStrimziSchemaRegistryOperator(name, image, kafkaClusterName string) map[string]string {
 	ls := selectorLabelsForStrimziSchemaRegistryOperator(name)
-	ls["app.kubernetes.io/version"] = func() string {
-		parts := strings.Split(image, ":")
-		if len(parts) > 1 {
-			last := parts[len(parts)-1]
-			if !strings.Contains(last, "/") {
-				return last
-			}
-		}
-		return "latest"
-	}()
+	ls["app.kubernetes.io/version"] = imageVersionLabel(image)
 	ls["strimzi.io/cluster"] = kafkaClusterName
 	return ls
 }
@@ -1945,7 +1961,7 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 		// drift, which would roll pods on the very first reconcile after an
 		// operator upgrade.
 		if current := deploymentBootstrapServers(found); current != "" && current != kafkaBootstrapServer {
-			logger.Info("Kafka bootstrap servers changed, updating deployment",
+			logger.Info(deploymentUpdateReason(existingHash, desiredHash),
 				"oldBootstrapServers", current, "newBootstrapServers", kafkaBootstrapServer)
 		} else {
 			// Steady state: do NOT emit ConfigKeyOverridden events here. The
@@ -1955,10 +1971,10 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 			// applied (createDeployment and spec-change paths below).
 			return found, false, nil
 		}
+	} else {
+		logger.Info(deploymentUpdateReason(existingHash, desiredHash),
+			"oldHash", existingHash, "newHash", desiredHash)
 	}
-
-	logger.Info("Spec hash changed, updating deployment",
-		"oldHash", existingHash, "newHash", desiredHash)
 
 	// The spec actually changed: warn about operator-managed keys that were
 	// ignored while building the desired spec (B2).
@@ -2043,6 +2059,19 @@ func (r *StrimziSchemaRegistryReconciler) recreateDeploymentForLegacySelector(
 			"Deployment %s had a selector containing mutable labels (e.g. app.kubernetes.io/version, strimzi.io/cluster); the selector field is immutable, so it was deleted and re-created with the stable identity selector as a one-time migration (Schema Registry is stateless)", dep.Name)
 	}
 	return dep, false, nil
+}
+
+// deploymentUpdateReason returns the log message describing why an existing
+// Deployment is being updated. The CR spec hash is the primary change
+// detector; when it is unchanged the update is driven by the Kafka bootstrap
+// address drift the hash cannot see (the address is rendered from the Kafka
+// CR's status). Branching the message keeps the log truthful: logging a hash
+// change with equal old/new hashes would be misleading (F4).
+func deploymentUpdateReason(existingHash, desiredHash string) string {
+	if existingHash != desiredHash {
+		return "Spec hash changed, updating deployment"
+	}
+	return "Kafka bootstrap address changed, updating deployment"
 }
 
 // deploymentBootstrapServers returns the value of the operator-managed

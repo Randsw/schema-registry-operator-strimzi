@@ -21,14 +21,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
+	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -878,6 +881,69 @@ func TestCRDManifestReplicasValidation(t *testing.T) {
 	minimum, ok := replicas["minimum"].(float64)
 	if !ok || minimum != 1 {
 		t.Errorf("expected spec.replicas minimum 1, got %v", replicas["minimum"])
+	}
+}
+
+// TestCRDManifestHeapOptsValidation guards the F7 CRD contract: the
+// generated CRD must validate the documented heapopts forms — "-Xms<size>",
+// "-Xmx<size>", or both in the common "-Xms ... -Xmx" order, with k/K/m/M/g/G
+// units and flexible spacing — while still rejecting garbage, unit-less and
+// hex-letter sizes, and the reversed option order. The pattern is compiled
+// from the generated manifest, so dropping or mistyping the kubebuilder
+// marker fails here.
+func TestCRDManifestHeapOptsValidation(t *testing.T) {
+	crdPath := filepath.Join("..", "..", "config", "crd", "bases",
+		"strimziregistryoperator.randsw.code_strimzischemaregistries.yaml")
+	data, err := os.ReadFile(crdPath)
+	if err != nil {
+		t.Fatalf("failed to read the generated CRD: %v", err)
+	}
+
+	var crd map[string]any
+	if err := sigsyaml.Unmarshal(data, &crd); err != nil {
+		t.Fatalf("failed to parse the generated CRD: %v", err)
+	}
+
+	heapopts, err := crdSpecProperty(crd, "heapopts")
+	if err != nil {
+		t.Fatalf("spec.heapopts missing from the generated CRD: %v", err)
+	}
+	pattern, ok := heapopts["pattern"].(string)
+	if !ok || pattern == "" {
+		t.Fatalf("expected spec.heapopts to carry a pattern, got %v", heapopts["pattern"])
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("spec.heapopts pattern does not compile: %v", err)
+	}
+
+	accepted := []string{
+		"",
+		"-Xms512M -Xmx512M",
+		"-Xmx1g",
+		"-Xms512m",
+		"-Xms512m -Xmx2g",
+		"-Xms1K  -Xmx2048k", // multiple spaces, k/K units
+		"-Xmx1024k",
+	}
+	for _, v := range accepted {
+		if !re.MatchString(v) {
+			t.Errorf("expected %q to be accepted by the heapopts pattern", v)
+		}
+	}
+	rejected := []string{
+		"foo",
+		"12a",
+		"-Xms12aM -Xmx12aM",
+		"-XmsabcM -XmxabcM",
+		"-Xmx1024",         // unit-less
+		"-Xmx1g -Xms512m",  // reversed order
+		"-Xms512m -Xmx2g ", // trailing space
+	}
+	for _, v := range rejected {
+		if re.MatchString(v) {
+			t.Errorf("expected %q to be rejected by the heapopts pattern", v)
+		}
 	}
 }
 
@@ -3766,4 +3832,383 @@ func dropKey(m map[string][]byte, key string) map[string][]byte {
 		}
 	}
 	return out
+}
+
+// TestImageVersionLabel covers F3: the app.kubernetes.io/version label is
+// derived from the substring after the last ':' of the image reference. A
+// digest-pinned image (image@sha256:<64 hex chars>) yields a 64-character
+// value that exceeds the 63-character Kubernetes label limit, so the digest
+// must be truncated; normal tags and tag-less images keep the existing
+// behavior.
+func TestImageVersionLabel(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	cases := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{name: "tagged image", image: "confluentinc/cp-schema-registry:8.4.1", want: "8.4.1"},
+		{name: "registry with port", image: "registry.example:5000/team/image:1.0.0", want: "1.0.0"},
+		{name: "image without tag", image: "confluentinc/cp-schema-registry", want: "latest"},
+		{name: "digest-pinned image is truncated to 63 chars", image: "confluentinc/cp-schema-registry@sha256:" + digest, want: digest[:maxLabelValueLength]},
+		{name: "tag plus digest is truncated to 63 chars", image: "confluentinc/cp-schema-registry:7.6.1@sha256:" + digest, want: digest[:maxLabelValueLength]},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := imageVersionLabel(tc.image)
+			if got != tc.want {
+				t.Errorf("imageVersionLabel(%q) = %q, want %q", tc.image, got, tc.want)
+			}
+			if len(got) > maxLabelValueLength {
+				t.Errorf("label value %q exceeds the %d-char Kubernetes limit", got, maxLabelValueLength)
+			}
+		})
+	}
+
+	// The digest-pinned value must also be a valid label value end to end:
+	// hex characters are within the allowed set and the length is capped.
+	ls := labelsForStrimziSchemaRegistryOperator("test-sr", "confluentinc/cp-schema-registry@sha256:"+digest, "kafka")
+	version := ls["app.kubernetes.io/version"]
+	if len(version) != maxLabelValueLength {
+		t.Errorf("expected the version label to be capped at %d chars, got %d (%q)", maxLabelValueLength, len(version), version)
+	}
+}
+
+// TestDeploymentUpdateReason covers F4: the update log message must match the
+// actual trigger. When the CR spec hash changed the message reports the hash
+// change; when the hash is equal the update is driven by the Kafka bootstrap
+// address drift the hash cannot see, and reporting a hash change with equal
+// hashes would be misleading.
+func TestDeploymentUpdateReason(t *testing.T) {
+	t.Run("different hashes report the spec hash change", func(t *testing.T) {
+		got := deploymentUpdateReason("old-hash", "new-hash")
+		if got != "Spec hash changed, updating deployment" {
+			t.Errorf("expected the hash-change message, got %q", got)
+		}
+	})
+	t.Run("equal hashes report the bootstrap address change", func(t *testing.T) {
+		got := deploymentUpdateReason("same-hash", "same-hash")
+		if got != "Kafka bootstrap address changed, updating deployment" {
+			t.Errorf("expected the bootstrap-change message, got %q", got)
+		}
+	})
+}
+
+// TestReconcileServiceOwnership covers F5: a pre-existing Service named after
+// the CR must not be silently taken over. A Service controlled by another
+// controller is a hard conflict: reconciliation fails with a ReconcileError
+// and the Service is left untouched. An unowned Service is adopted (the
+// controller reference is set exactly like createService does for
+// operator-created Services), announced with a ServiceAdopted Warning event
+// and updated; an already owned Service is updated normally with no adoption
+// event.
+func TestReconcileServiceOwnership(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+
+	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.UID = "cr-uid"
+		inst.Spec.SecurityProtocol = "PLAINTEXT"
+		inst.Spec.Listener = "tls"
+		inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+			},
+		}
+		return inst
+	}
+
+	// desiredService builds the Service the operator wants (without the
+	// controller reference) so fixtures can start from the desired shape.
+	desiredService := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *corev1.Service {
+		t.Helper()
+		emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		r0 := &StrimziSchemaRegistryReconciler{Client: emptyClient, Scheme: scheme}
+		svc, err := r0.createService(inst, logger)
+		if err != nil {
+			t.Fatalf("failed to build the desired service: %v", err)
+		}
+		svc.OwnerReferences = nil
+		return svc
+	}
+
+	// A Deployment in its desired shape (stable selector, current spec hash,
+	// current bootstrap env) so reconciliation reaches the Service block.
+	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+		t.Helper()
+		hash, err := computeSpecHash(inst)
+		if err != nil {
+			t.Fatalf("failed to compute spec hash: %v", err)
+		}
+		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1",
+							Env: []corev1.EnvVar{{Name: bootstrapServersEnv, Value: bootstrap}}},
+					}},
+				},
+			},
+		}
+	}
+
+	reconcile := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, svc *corev1.Service) (client.Client, *eventsfake.FakeRecorder, reconcile.Result, error) {
+		t.Helper()
+		recorder := eventsfake.NewFakeRecorder(16)
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), newDeployment(t, inst), svc).
+			WithStatusSubresource(inst).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme, Recorder: recorder}
+		result, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+		})
+		return c, recorder, result, err
+	}
+
+	drainEvents := func(recorder *eventsfake.FakeRecorder) []string {
+		var got []string
+		for {
+			select {
+			case e := <-recorder.Events:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+
+	t.Run("foreign-owned Service is refused and left untouched", func(t *testing.T) {
+		inst := newInst()
+		svc := desiredService(t, inst)
+		svc.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "example.com/v1",
+			Kind:       "ForeignResource",
+			Name:       "someone-else",
+			UID:        "foreign-uid",
+			Controller: ptr.To(true),
+		}}
+		// Diverge the spec too: the ownership check must fire before any
+		// update would happen.
+		svc.Spec.Ports[0].Port = 9999
+
+		c, recorder, _, err := reconcile(t, inst, svc)
+		if err == nil {
+			t.Fatal("expected an error for a foreign-owned Service")
+		}
+		if !strings.Contains(err.Error(), "controlled by") {
+			t.Errorf("expected the error to name the conflicting controller, got: %s", err.Error())
+		}
+
+		fetched := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, fetched); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		if fetched.Spec.Ports[0].Port != 9999 {
+			t.Errorf("expected the foreign-owned Service spec to be untouched, got port %d", fetched.Spec.Ports[0].Port)
+		}
+		if len(fetched.OwnerReferences) != 1 || fetched.OwnerReferences[0].UID != "foreign-uid" {
+			t.Errorf("expected the foreign owner reference to be preserved, got %v", fetched.OwnerReferences)
+		}
+		for _, e := range drainEvents(recorder) {
+			if strings.Contains(e, "ServiceAdopted") {
+				t.Error("expected no ServiceAdopted event for a foreign-owned Service")
+			}
+		}
+
+		updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
+			t.Fatalf("failed to get the updated CR: %v", err)
+		}
+		if updated.Status.Status != "ReconcileError" {
+			t.Errorf("expected status.status ReconcileError, got %q", updated.Status.Status)
+		}
+	})
+
+	t.Run("unowned Service is adopted with an event and updated", func(t *testing.T) {
+		inst := newInst()
+		svc := desiredService(t, inst)
+		svc.Spec.Ports[0].Port = 9999
+
+		c, recorder, result, err := reconcile(t, inst, svc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != time.Second {
+			t.Errorf("expected the Service-update early return (RequeueAfter=1s), got %v", result.RequeueAfter)
+		}
+
+		fetched := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, fetched); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		if fetched.Spec.Ports[0].Port == 9999 {
+			t.Error("expected the adopted Service spec to be updated to the desired state")
+		}
+		owner := metav1.GetControllerOf(fetched)
+		if owner == nil || owner.UID != inst.UID {
+			t.Errorf("expected the Service to be adopted by the CR (uid %s), got %v", inst.UID, owner)
+		}
+		var adopted bool
+		for _, e := range drainEvents(recorder) {
+			if strings.Contains(e, "ServiceAdopted") {
+				adopted = true
+			}
+		}
+		if !adopted {
+			t.Error("expected a ServiceAdopted Warning event for the adopted Service")
+		}
+	})
+
+	t.Run("unowned Service matching the desired spec is still adopted", func(t *testing.T) {
+		inst := newInst()
+		svc := desiredService(t, inst)
+
+		c, recorder, _, err := reconcile(t, inst, svc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		fetched := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, fetched); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		owner := metav1.GetControllerOf(fetched)
+		if owner == nil || owner.UID != inst.UID {
+			t.Errorf("expected the controller reference to be persisted on adoption, got %v", owner)
+		}
+		var adopted bool
+		for _, e := range drainEvents(recorder) {
+			if strings.Contains(e, "ServiceAdopted") {
+				adopted = true
+			}
+		}
+		if !adopted {
+			t.Error("expected a ServiceAdopted Warning event for the adopted Service")
+		}
+	})
+
+	t.Run("already-owned Service is updated normally", func(t *testing.T) {
+		inst := newInst()
+		svc := desiredService(t, inst)
+		svc.Spec.Ports[0].Port = 9999
+		svc.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: strimziregistryoperatorv1alpha1.GroupVersion.String(),
+			Kind:       "StrimziSchemaRegistry",
+			Name:       inst.Name,
+			UID:        inst.UID,
+			Controller: ptr.To(true),
+		}}
+
+		c, recorder, result, err := reconcile(t, inst, svc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != time.Second {
+			t.Errorf("expected the Service-update early return (RequeueAfter=1s), got %v", result.RequeueAfter)
+		}
+
+		fetched := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, fetched); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		if fetched.Spec.Ports[0].Port == 9999 {
+			t.Error("expected the owned Service spec to be updated to the desired state")
+		}
+		owner := metav1.GetControllerOf(fetched)
+		if owner == nil || owner.UID != inst.UID {
+			t.Errorf("expected the owner reference to be preserved, got %v", owner)
+		}
+		for _, e := range drainEvents(recorder) {
+			if strings.Contains(e, "ServiceAdopted") {
+				t.Error("expected no ServiceAdopted event for an already owned Service")
+			}
+		}
+	})
+}
+
+// TestReconcileUpdatesInstanceCountGaugeOnCreatePath covers F6: the
+// instance-count gauge must already reflect the instance count on the
+// early-return paths (after the Deployment/Service create or update), not
+// only on the final reconcile path, so it is correct on the first reconcile.
+func TestReconcileUpdatesInstanceCountGaugeOnCreatePath(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+		},
+	}
+	// A second CR that is never reconciled: the gauge counts all CRs.
+	other := newTestInstance()
+	other.Name = "other-sr"
+	other.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	other.Spec.Template = inst.Spec.Template
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, other, newTestKafkaCR("kafka-cluster", inst.Namespace)).
+		WithStatusSubresource(inst, other).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The early return after the Deployment create is reached.
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("expected the Deployment-create early return (RequeueAfter=1s), got %v", result.RequeueAfter)
+	}
+	dep := &apps.Deployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err != nil {
+		t.Fatalf("expected the Deployment to be created: %v", err)
+	}
+
+	// Read the gauge the same way the metrics package tests do: register the
+	// collector into a fresh registry and gather its value.
+	registry := prometheus.NewRegistry()
+	if err := registry.Register(monitoring.StrimziSchemaRegistryCurrentInstanceCount); err != nil {
+		t.Fatalf("failed to register the instance count gauge: %v", err)
+	}
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+	value := -1.0
+	for _, mf := range families {
+		if mf.GetName() != "strimzi_schema_registry_instance_current_count" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			value = m.GetGauge().GetValue()
+		}
+	}
+	if value != 2 {
+		t.Errorf("expected the gauge to expose 2 instances on the create early-return path, got %v", value)
+	}
 }

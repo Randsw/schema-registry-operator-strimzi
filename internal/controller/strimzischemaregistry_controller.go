@@ -378,6 +378,9 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		// Deployment created successfully - return and requeue
 		logger.Info("Deployment created successfully", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
+		// F6: update the gauge before the early return so it is correct on
+		// the first reconcile instead of lagging one reconcile behind.
+		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	} else if err != nil {
 		logger.Error(err, "Failed to get Deployment")
@@ -404,6 +407,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		monitoring.StrimziSchemaRegistryDeploymentUpdateTotal.Inc()
 		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		// F6: keep the gauge correct on the early-return path too.
+		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	// The Deployment's effective desired replica count: Spec.Replicas when
@@ -451,12 +456,45 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		// Service created successfully - return and requeue
 		logger.Info("Service created successfully", "Service.Name", svc.Name, "Service.Namespace", svc.Namespace)
+		// F6: keep the gauge correct on the early-return path too.
+		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	} else if err != nil {
 		logger.Error(err, "Failed to get Service")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
+	}
+
+	// F5: a pre-existing Service named after the CR must not be silently
+	// taken over from another controller. A foreign-owned Service is a hard
+	// conflict: reconciliation fails with a ReconcileError and the Service is
+	// left untouched. An unowned Service is adopted explicitly — the
+	// controller reference is set exactly like createService does for
+	// operator-created Services — and the adoption is announced with a
+	// Warning event. An already owned Service is updated normally below.
+	if owner := metav1.GetControllerOf(foundSvc); owner != nil && owner.UID != instance.UID {
+		err = fmt.Errorf("service %s/%s is controlled by %s %q (uid %s); refusing to adopt or modify it — rename the Service or the StrimziSchemaRegistry so the operator can manage its own",
+			foundSvc.Namespace, foundSvc.Name, owner.Kind, owner.Name, owner.UID)
+		logger.Error(err, "Refusing to adopt a Service owned by another controller")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+		return ctrl.Result{}, err
+	}
+	serviceAdopted := false
+	if owner := metav1.GetControllerOf(foundSvc); owner == nil {
+		if err := ctrl.SetControllerReference(instance, foundSvc, r.Scheme); err != nil {
+			logger.Error(err, "Failed to set the controller reference on the adopted Service")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+			return ctrl.Result{}, err
+		}
+		serviceAdopted = true
+		if r.Recorder != nil {
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ServiceAdopted", "",
+				"Service %s/%s already existed without a controller owner; the operator adopted it and set its controller reference",
+				instance.Namespace, instance.Name)
+		}
 	}
 
 	// Service exists — reconcile spec changes (e.g., SecureHTTP changed)
@@ -495,9 +533,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		serviceChanged = true
 	}
 
-	if serviceChanged {
-		logger.Info("Service changed, updating service",
-			"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+	if serviceAdopted || serviceChanged {
+		if serviceChanged {
+			logger.Info("Service changed, updating service",
+				"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		}
 		// Preserve API-server-allocated node ports when the desired spec does
 		// not pin one and the target type still uses node ports, so updating
 		// the service does not drop the allocation.
@@ -512,7 +552,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
-		logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		if serviceAdopted {
+			logger.Info("Service adopted and updated", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		} else {
+			logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		}
+		// F6: keep the gauge correct on the early-return path too.
+		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
@@ -1114,8 +1160,11 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 // updateInstanceCountMetric recomputes the instance count gauge from the list
 // of StrimziSchemaRegistry CRs. Recomputing (instead of inc/dec bookkeeping)
 // keeps the metric correct across operator restarts, CR deletions and missed
-// events. It is called on every reconcile completion and on the deletion
-// paths; a List error is logged and ignored so it never fails reconciliation.
+// events. It is called on every reconcile completion, on the early-return
+// paths after creating or updating the Deployment/Service (F6: without it
+// the gauge lagged one reconcile behind after CR creation), and on the
+// deletion paths; a List error is logged and ignored so it never fails
+// reconciliation.
 func (r *StrimziSchemaRegistryReconciler) updateInstanceCountMetric(ctx context.Context) {
 	list := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
 	if err := r.List(ctx, list); err != nil {

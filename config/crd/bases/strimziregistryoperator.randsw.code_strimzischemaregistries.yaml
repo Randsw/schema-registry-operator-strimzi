@@ -50,7 +50,7 @@ spec:
                   type: string
                 type: object
               heapopts:
-                pattern: ^(-Xms[0-9]+(m|M|g|G) -Xmx[0-9]+(m|M|g|G))?$
+                pattern: ^(-Xms[0-9]+[kKmMgG](\s+-Xmx[0-9]+[kKmMgG])?|-Xmx[0-9]+[kKmMgG])?$
                 type: string
               kafkastoretopic:
                 default: registry-schemas
