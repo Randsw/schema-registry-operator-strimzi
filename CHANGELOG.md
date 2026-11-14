@@ -1,3 +1,17 @@
+## [1.17.5](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.4...1.17.5) (2026-11-14)
+
+### 📔 Docs
+
+* document RSA-only cluster CA key requirement ([3fe49af](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3fe49af86908b8f4f495f4dfed97d4789f7c13d6)), closes [PKCS#1](https://github.com/Randsw/PKCS/issues/1) [PKCS#8](https://github.com/Randsw/PKCS/issues/8)
+
+### 🛠 Fixes
+
+* **api:** loosen heapopts validation pattern and document accepted form ([860a28a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/860a28aec85188b31f4fca1b8248c8a6ed012787))
+* **controller:** correct update log when only the bootstrap address changed ([2ea8619](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2ea86192a0a76756ea2f6f0daa0ae04eddfcc05d))
+* **controller:** refuse to adopt a Service owned by another controller ([377695a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/377695abf670be849ca1ee93937e637757394b12))
+* **controller:** sanitize version label for digest-pinned images ([0de4f97](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0de4f97f792f799a6cd0245b18cffa2091a98f11))
+* **controller:** update instance count metric on early-return paths ([67db152](https://github.com/Randsw/schema-registry-operator-strimzi/commit/67db1526ee29939417fd35ed7ed4493daf3bd0f6))
+
 ## [1.17.4](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.3...1.17.4) (2026-11-14)
 
 ### 🦊 CI/CD
