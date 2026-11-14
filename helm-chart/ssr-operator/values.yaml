@@ -22,9 +22,11 @@ image:
       memory: 64Mi
   securityContext:
     allowPrivilegeEscalation: false
-    # capabilities:
-    #   drop:
-    #   - ALL
+    # The operator needs no Linux capabilities (it only execs keytool/openssl
+    # as child processes); dropping ALL satisfies the PSS restricted standard.
+    capabilities:
+      drop:
+      - ALL
     # readOnlyRootFilesystem: true
     # runAsNonRoot: true
     # runAsUser: 1000
@@ -47,6 +49,10 @@ podAnnotations:
 
 podSecurityContext:
   runAsNonRoot: true
+  # RuntimeDefault seccomp profile: required by the PSS restricted standard
+  # (the operator image has no custom seccomp requirements).
+  seccompProfile:
+    type: RuntimeDefault
 
 service:
   type: ClusterIP
@@ -64,13 +70,6 @@ metrics:
   port: 8080
 
 terminationGracePeriodSeconds: 10
-
-autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 100
-  targetCPUUtilizationPercentage: 80
-  # targetMemoryUtilizationPercentage: 80
 
 nodeSelector: {}
 
@@ -101,6 +100,17 @@ cluster_roles:
     kind: "ServiceAccount"
     labels: {}
     rules:
+      # Operator events (Recorder.Eventf) are created in the CR's namespace,
+      # which in the default cluster-scoped mode can be any namespace: the
+      # manager role must grant events create/patch cluster-wide (mirrors
+      # config/rbac/role.yaml).
+      - apiGroups:
+        - ""
+        resources:
+        - events
+        verbs:
+        - create
+        - patch
       - apiGroups:
         - "apps"
         resources:
