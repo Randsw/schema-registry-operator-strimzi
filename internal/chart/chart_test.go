@@ -21,6 +21,7 @@ limitations under the License.
 package chart
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -618,5 +619,153 @@ func TestRenderedChartHasNoManagerConfigConfigMap(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestChartCRDMatchesGeneratedCRD guards the CRD-sync contract: the chart's
+// crds/ copy must be byte-identical to the generated CRD in
+// config/crd/bases. A drifted copy ships a chart whose CRD schema disagrees
+// with the operator binary (new spec fields silently dropped or validation
+// mismatched). `make manifests` syncs the copy via helm-crd-sync; this test
+// fails the unit suite if the copy is ever left stale.
+func TestChartCRDMatchesGeneratedCRD(t *testing.T) {
+	root := repoRoot(t)
+	genPath := filepath.Join(root, "config", "crd", "bases", crdFileName)
+	chartPath := filepath.Join(root, "helm-chart", "ssr-operator", "crds", crdFileName)
+
+	gen, err := os.ReadFile(genPath)
+	if err != nil {
+		t.Fatalf("failed to read generated CRD %s: %v", genPath, err)
+	}
+	chartCRD, err := os.ReadFile(chartPath)
+	if err != nil {
+		t.Fatalf("failed to read chart CRD %s: %v", chartPath, err)
+	}
+	if !bytes.Equal(gen, chartCRD) {
+		t.Errorf("chart CRD %s differs from the generated CRD %s; run 'make helm-crd-sync' to refresh the chart copy", chartPath, genPath)
+	}
+}
+
+// TestMakefileSyncsChartCRD guards the CRD-sync contract at the build
+// level: the Makefile must provide a helm-crd-sync target that copies the
+// generated CRD into the chart's crds/ directory, and the manifests target
+// (which regenerates config/crd/bases) must invoke it so a regeneration
+// always syncs the chart copy.
+func TestMakefileSyncsChartCRD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("failed to read Makefile: %v", err)
+	}
+	src := string(data)
+
+	if !strings.Contains(src, "helm-crd-sync:") {
+		t.Error("Makefile must define a helm-crd-sync target that syncs the chart CRD copy")
+	}
+	if !strings.Contains(src, "cp config/crd/bases/$(CRD_FILE) helm-chart/ssr-operator/crds/$(CRD_FILE)") {
+		t.Error("Makefile helm-crd-sync target must copy config/crd/bases into helm-chart/ssr-operator/crds")
+	}
+
+	// Extract the manifests recipe (target line plus its tab-indented
+	// recipe lines) and require the sync invocation in it.
+	var recipe []string
+	inManifests := false
+	for _, line := range strings.Split(src, "\n") {
+		if strings.HasPrefix(line, "manifests: controller-gen") {
+			inManifests = true
+			recipe = append(recipe, line)
+			continue
+		}
+		if inManifests {
+			if strings.HasPrefix(line, "\t") {
+				recipe = append(recipe, line)
+				continue
+			}
+			break
+		}
+	}
+	if len(recipe) == 0 {
+		t.Fatal("Makefile manifests target not found")
+	}
+	if !strings.Contains(strings.Join(recipe, "\n"), "helm-crd-sync") {
+		t.Error("Makefile manifests target must invoke helm-crd-sync after regenerating the CRD so the chart copy always matches")
+	}
+}
+
+// rbacRuleKey renders a decoded RBAC rule as a canonical,
+// order-insensitive string so rules can be compared as sets.
+func rbacRuleKey(t *testing.T, rule any) string {
+	t.Helper()
+	m, ok := rule.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected RBAC rule shape: %#v", rule)
+	}
+	join := func(field string) string {
+		list, _ := m[field].([]any)
+		parts := make([]string, 0, len(list))
+		for _, v := range list {
+			if s, ok := v.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		slices.Sort(parts)
+		return strings.Join(parts, ",")
+	}
+	return fmt.Sprintf("apiGroups=[%s] nonResourceURLs=[%s] resources=[%s] verbs=[%s]",
+		join("apiGroups"), join("nonResourceURLs"), join("resources"), join("verbs"))
+}
+
+// TestChartManagerRoleMatchesGeneratedRBAC guards the RBAC parity contract:
+// the chart's rendered manager ClusterRole (default values) must mirror
+// config/rbac/role.yaml — the generated role is what controller-gen produces
+// from the kubebuilder markers, and the chart must never silently drift from
+// it (the events rule was missing from the chart exactly this way). Rules
+// are compared as order-insensitive sets in both directions. The chart's
+// manager role currently mirrors the generated role exactly; if a
+// legitimate intentional difference ever appears (for example a chart-only
+// rule), document it here with a comment and an explicit allowlist instead
+// of weakening the comparison silently.
+func TestChartManagerRoleMatchesGeneratedRBAC(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+
+	// Generated role (source of truth).
+	genData, err := os.ReadFile(filepath.Join(repoRoot(t), "config", "rbac", "role.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read config/rbac/role.yaml: %v", err)
+	}
+	var generated struct {
+		Rules []any `yaml:"rules"`
+	}
+	if err := sigsyaml.Unmarshal(genData, &generated); err != nil {
+		t.Fatalf("failed to parse config/rbac/role.yaml: %v", err)
+	}
+	if len(generated.Rules) == 0 {
+		t.Fatal("config/rbac/role.yaml has no rules")
+	}
+
+	// Chart manager ClusterRole (default values).
+	docs := renderedDocs(t, renderChart(t))
+	role := findRendered(t, docs, "ClusterRole", "-manager-role")
+	rules, _ := role["rules"].([]any)
+
+	chartRules := make(map[string]bool, len(rules))
+	for _, r := range rules {
+		chartRules[rbacRuleKey(t, r)] = true
+	}
+	genRules := make(map[string]bool, len(generated.Rules))
+	for _, r := range generated.Rules {
+		genRules[rbacRuleKey(t, r)] = true
+	}
+
+	for key := range genRules {
+		if !chartRules[key] {
+			t.Errorf("chart manager role is missing a rule granted by config/rbac/role.yaml: %s", key)
+		}
+	}
+	for key := range chartRules {
+		if !genRules[key] {
+			t.Errorf("chart manager role grants a rule config/rbac/role.yaml does not (keep the chart in sync with the generated role, or document the intentional difference here): %s", key)
+		}
 	}
 }
