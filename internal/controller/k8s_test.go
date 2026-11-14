@@ -26,9 +26,11 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
+	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -4074,4 +4076,75 @@ func TestReconcileServiceOwnership(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestReconcileUpdatesInstanceCountGaugeOnCreatePath covers F6: the
+// instance-count gauge must already reflect the instance count on the
+// early-return paths (after the Deployment/Service create or update), not
+// only on the final reconcile path, so it is correct on the first reconcile.
+func TestReconcileUpdatesInstanceCountGaugeOnCreatePath(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+		},
+	}
+	// A second CR that is never reconciled: the gauge counts all CRs.
+	other := newTestInstance()
+	other.Name = "other-sr"
+	other.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	other.Spec.Template = inst.Spec.Template
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, other, newTestKafkaCR("kafka-cluster", inst.Namespace)).
+		WithStatusSubresource(inst, other).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The early return after the Deployment create is reached.
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("expected the Deployment-create early return (RequeueAfter=1s), got %v", result.RequeueAfter)
+	}
+	dep := &apps.Deployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err != nil {
+		t.Fatalf("expected the Deployment to be created: %v", err)
+	}
+
+	// Read the gauge the same way the metrics package tests do: register the
+	// collector into a fresh registry and gather its value.
+	registry := prometheus.NewRegistry()
+	if err := registry.Register(monitoring.StrimziSchemaRegistryCurrentInstanceCount); err != nil {
+		t.Fatalf("failed to register the instance count gauge: %v", err)
+	}
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+	value := -1.0
+	for _, mf := range families {
+		if mf.GetName() != "strimzi_schema_registry_instance_current_count" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			value = m.GetGauge().GetValue()
+		}
+	}
+	if value != 2 {
+		t.Errorf("expected the gauge to expose 2 instances on the create early-return path, got %v", value)
+	}
 }

@@ -378,6 +378,9 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		// Deployment created successfully - return and requeue
 		logger.Info("Deployment created successfully", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
+		// F6: update the gauge before the early return so it is correct on
+		// the first reconcile instead of lagging one reconcile behind.
+		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	} else if err != nil {
 		logger.Error(err, "Failed to get Deployment")
@@ -404,6 +407,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		monitoring.StrimziSchemaRegistryDeploymentUpdateTotal.Inc()
 		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		// F6: keep the gauge correct on the early-return path too.
+		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	// The Deployment's effective desired replica count: Spec.Replicas when
@@ -451,6 +456,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		// Service created successfully - return and requeue
 		logger.Info("Service created successfully", "Service.Name", svc.Name, "Service.Namespace", svc.Namespace)
+		// F6: keep the gauge correct on the early-return path too.
+		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	} else if err != nil {
 		logger.Error(err, "Failed to get Service")
@@ -550,6 +557,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		} else {
 			logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
 		}
+		// F6: keep the gauge correct on the early-return path too.
+		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
@@ -1151,8 +1160,11 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 // updateInstanceCountMetric recomputes the instance count gauge from the list
 // of StrimziSchemaRegistry CRs. Recomputing (instead of inc/dec bookkeeping)
 // keeps the metric correct across operator restarts, CR deletions and missed
-// events. It is called on every reconcile completion and on the deletion
-// paths; a List error is logged and ignored so it never fails reconciliation.
+// events. It is called on every reconcile completion, on the early-return
+// paths after creating or updating the Deployment/Service (F6: without it
+// the gauge lagged one reconcile behind after CR creation), and on the
+// deletion paths; a List error is logged and ignored so it never fails
+// reconciliation.
 func (r *StrimziSchemaRegistryReconciler) updateInstanceCountMetric(ctx context.Context) {
 	list := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
 	if err := r.List(ctx, list); err != nil {
