@@ -287,3 +287,67 @@ func TestBuildWorkflowKeepsLatestTag(t *testing.T) {
 		t.Errorf("build.yaml Deploy job metadata flavor = %q, want latest=true; the tag-triggered build is the intended latest publisher", flavor)
 	}
 }
+
+// TestHelmChartWorkflowInstallsStrimziCRDsBeforeInstall guards the ct
+// install contract: the chart install test runs on a bare kind cluster, and
+// the operator watches kafka.strimzi.io Kafkas/KafkaUsers — without the
+// Strimzi CRDs its informers can never sync, so ct install would pass while
+// validating only template rendering (an idle controller with reflector
+// errors). A Strimzi CRD install step (pinned version) must exist before
+// the ct install step, gated by the same changed-helm-files condition.
+func TestHelmChartWorkflowInstallsStrimziCRDsBeforeInstall(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "helm-chart.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read workflow helm-chart.yaml: %v", err)
+	}
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Name string `yaml:"name"`
+				Run  string `yaml:"run"`
+				If   string `yaml:"if"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := sigsyaml.Unmarshal(data, &wf); err != nil {
+		t.Fatalf("failed to parse workflow helm-chart.yaml: %v", err)
+	}
+	job, ok := wf.Jobs["Lint-test"]
+	if !ok {
+		t.Fatal("Lint-test job missing from helm-chart.yaml")
+	}
+
+	ctInstallIdx, crdIdx := -1, -1
+	var ctInstallIf string
+	for i, s := range job.Steps {
+		if strings.Contains(s.Run, "ct install") {
+			ctInstallIdx = i
+			ctInstallIf = s.If
+		}
+		if strings.Contains(s.Run, "helm show crds") &&
+			strings.Contains(s.Run, "strimzi-kafka-operator") &&
+			strings.Contains(s.Run, "kubectl apply") {
+			crdIdx = i
+		}
+	}
+	if ctInstallIdx < 0 {
+		t.Fatal("helm-chart.yaml has no ct install step")
+	}
+	if crdIdx < 0 {
+		t.Fatal("helm-chart.yaml has no Strimzi CRD install step (helm show crds oci://quay.io/strimzi-helm/strimzi-kafka-operator | kubectl apply); without the Strimzi CRDs the operator informers can never sync and ct install validates only template rendering")
+	}
+	if crdIdx > ctInstallIdx {
+		t.Errorf("Strimzi CRD install step (index %d) must run before the ct install step (index %d)", crdIdx, ctInstallIdx)
+	}
+
+	// The CRDs must be pinned so the install test is reproducible.
+	crdStep := job.Steps[crdIdx]
+	if !strings.Contains(crdStep.Run, "--version") {
+		t.Error("Strimzi CRD install step must pin the chart version (--version) so the install test is reproducible")
+	}
+	// Same gating as the install test: no CRD install (and no failure) when
+	// the install test itself is skipped.
+	if ctInstallIf != "" && !strings.Contains(crdStep.If, "helm_any_changed") {
+		t.Error("Strimzi CRD install step must be gated by the same changed-helm-files condition as the ct install step")
+	}
+}
