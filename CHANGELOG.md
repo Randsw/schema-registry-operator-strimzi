@@ -1,3 +1,19 @@
+## [1.17.4](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.3...1.17.4) (2026-11-14)
+
+### 🦊 CI/CD
+
+* **chart:** sync chart CRD from generated CRD and add RBAC parity test ([f273524](https://github.com/Randsw/schema-registry-operator-strimzi/commit/f27352464b8a8f012418650705ce91f3e2765a5b))
+* **chart:** install Strimzi CRDs before ct install ([8a0dfc9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8a0dfc9a303dfaf01a1d5972d7400166fd6f1133))
+
+### 🛠 Fixes
+
+* **ci:** stop feature-branch builds from overwriting the latest image tag ([8506e5a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8506e5aac1c14331097fa5da30510c8bb58c677a))
+* **release:** keep chart appVersion in sync with the operator release ([d5e3f4f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d5e3f4f27ee84dd9fbf5bea4746480763f7c4e09))
+
+### Other
+
+* **deps:** remove dependabot docker entry for chart directory ([b1c9f25](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b1c9f2573873b28a929cda8f756f5afa80752330))
+
 ## [1.17.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.2...1.17.3) (2026-11-14)
 
 ### 🛠 Fixes
