@@ -277,6 +277,10 @@ spec:
   REST API. Must be in the same namespace as the `StrimziSchemaRegistry` CR.
   If this field is omitted or an empty string, the SSR operator automatically creates a TLS certificate and private key pair in JKS format, signs them with the Strimzi Kafka cluster CA(stored in the `<kafka-clustername>-cluster-ca` and `<kafka-clustername>-cluster-ca-cert` secrets)
   and mounts the secret to the Schema Registry pod.
+  The cluster CA key must be **RSA**: the operator signs the generated certificate with the CA private key and
+  parses only RSA keys (PKCS#1 `RSA PRIVATE KEY` or PKCS#8 containing an RSA key). Strimzi's own cluster CA is
+  RSA, so the default setup is unaffected; a user-replaced cluster CA with an EC (or other non-RSA) key fails
+  certificate generation with a key-parse error.
   Operator-generated certificates are valid for one year and are renewed automatically when fewer than 30 days remain
   before expiry: the secret is updated in place, a `TLSCertificateRenewed` event is emitted and the Schema Registry
   pods are rolled so the new keystore is loaded. Certificates you provide yourself via `tlssecretName` are never
