@@ -3827,3 +3827,251 @@ func TestDeploymentUpdateReason(t *testing.T) {
 		}
 	})
 }
+
+// TestReconcileServiceOwnership covers F5: a pre-existing Service named after
+// the CR must not be silently taken over. A Service controlled by another
+// controller is a hard conflict: reconciliation fails with a ReconcileError
+// and the Service is left untouched. An unowned Service is adopted (the
+// controller reference is set exactly like createService does for
+// operator-created Services), announced with a ServiceAdopted Warning event
+// and updated; an already owned Service is updated normally with no adoption
+// event.
+func TestReconcileServiceOwnership(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+
+	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.UID = "cr-uid"
+		inst.Spec.SecurityProtocol = "PLAINTEXT"
+		inst.Spec.Listener = "tls"
+		inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+			},
+		}
+		return inst
+	}
+
+	// desiredService builds the Service the operator wants (without the
+	// controller reference) so fixtures can start from the desired shape.
+	desiredService := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *corev1.Service {
+		t.Helper()
+		emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		r0 := &StrimziSchemaRegistryReconciler{Client: emptyClient, Scheme: scheme}
+		svc, err := r0.createService(inst, logger)
+		if err != nil {
+			t.Fatalf("failed to build the desired service: %v", err)
+		}
+		svc.OwnerReferences = nil
+		return svc
+	}
+
+	// A Deployment in its desired shape (stable selector, current spec hash,
+	// current bootstrap env) so reconciliation reaches the Service block.
+	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+		t.Helper()
+		hash, err := computeSpecHash(inst)
+		if err != nil {
+			t.Fatalf("failed to compute spec hash: %v", err)
+		}
+		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1",
+							Env: []corev1.EnvVar{{Name: bootstrapServersEnv, Value: bootstrap}}},
+					}},
+				},
+			},
+		}
+	}
+
+	reconcile := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, svc *corev1.Service) (client.Client, *eventsfake.FakeRecorder, reconcile.Result, error) {
+		t.Helper()
+		recorder := eventsfake.NewFakeRecorder(16)
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), newDeployment(t, inst), svc).
+			WithStatusSubresource(inst).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme, Recorder: recorder}
+		result, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+		})
+		return c, recorder, result, err
+	}
+
+	drainEvents := func(recorder *eventsfake.FakeRecorder) []string {
+		var got []string
+		for {
+			select {
+			case e := <-recorder.Events:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+
+	t.Run("foreign-owned Service is refused and left untouched", func(t *testing.T) {
+		inst := newInst()
+		svc := desiredService(t, inst)
+		svc.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "example.com/v1",
+			Kind:       "ForeignResource",
+			Name:       "someone-else",
+			UID:        "foreign-uid",
+			Controller: ptr.To(true),
+		}}
+		// Diverge the spec too: the ownership check must fire before any
+		// update would happen.
+		svc.Spec.Ports[0].Port = 9999
+
+		c, recorder, _, err := reconcile(t, inst, svc)
+		if err == nil {
+			t.Fatal("expected an error for a foreign-owned Service")
+		}
+		if !strings.Contains(err.Error(), "controlled by") {
+			t.Errorf("expected the error to name the conflicting controller, got: %s", err.Error())
+		}
+
+		fetched := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, fetched); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		if fetched.Spec.Ports[0].Port != 9999 {
+			t.Errorf("expected the foreign-owned Service spec to be untouched, got port %d", fetched.Spec.Ports[0].Port)
+		}
+		if len(fetched.OwnerReferences) != 1 || fetched.OwnerReferences[0].UID != "foreign-uid" {
+			t.Errorf("expected the foreign owner reference to be preserved, got %v", fetched.OwnerReferences)
+		}
+		for _, e := range drainEvents(recorder) {
+			if strings.Contains(e, "ServiceAdopted") {
+				t.Error("expected no ServiceAdopted event for a foreign-owned Service")
+			}
+		}
+
+		updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
+			t.Fatalf("failed to get the updated CR: %v", err)
+		}
+		if updated.Status.Status != "ReconcileError" {
+			t.Errorf("expected status.status ReconcileError, got %q", updated.Status.Status)
+		}
+	})
+
+	t.Run("unowned Service is adopted with an event and updated", func(t *testing.T) {
+		inst := newInst()
+		svc := desiredService(t, inst)
+		svc.Spec.Ports[0].Port = 9999
+
+		c, recorder, result, err := reconcile(t, inst, svc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != time.Second {
+			t.Errorf("expected the Service-update early return (RequeueAfter=1s), got %v", result.RequeueAfter)
+		}
+
+		fetched := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, fetched); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		if fetched.Spec.Ports[0].Port == 9999 {
+			t.Error("expected the adopted Service spec to be updated to the desired state")
+		}
+		owner := metav1.GetControllerOf(fetched)
+		if owner == nil || owner.UID != inst.UID {
+			t.Errorf("expected the Service to be adopted by the CR (uid %s), got %v", inst.UID, owner)
+		}
+		var adopted bool
+		for _, e := range drainEvents(recorder) {
+			if strings.Contains(e, "ServiceAdopted") {
+				adopted = true
+			}
+		}
+		if !adopted {
+			t.Error("expected a ServiceAdopted Warning event for the adopted Service")
+		}
+	})
+
+	t.Run("unowned Service matching the desired spec is still adopted", func(t *testing.T) {
+		inst := newInst()
+		svc := desiredService(t, inst)
+
+		c, recorder, _, err := reconcile(t, inst, svc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		fetched := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, fetched); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		owner := metav1.GetControllerOf(fetched)
+		if owner == nil || owner.UID != inst.UID {
+			t.Errorf("expected the controller reference to be persisted on adoption, got %v", owner)
+		}
+		var adopted bool
+		for _, e := range drainEvents(recorder) {
+			if strings.Contains(e, "ServiceAdopted") {
+				adopted = true
+			}
+		}
+		if !adopted {
+			t.Error("expected a ServiceAdopted Warning event for the adopted Service")
+		}
+	})
+
+	t.Run("already-owned Service is updated normally", func(t *testing.T) {
+		inst := newInst()
+		svc := desiredService(t, inst)
+		svc.Spec.Ports[0].Port = 9999
+		svc.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: strimziregistryoperatorv1alpha1.GroupVersion.String(),
+			Kind:       "StrimziSchemaRegistry",
+			Name:       inst.Name,
+			UID:        inst.UID,
+			Controller: ptr.To(true),
+		}}
+
+		c, recorder, result, err := reconcile(t, inst, svc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter != time.Second {
+			t.Errorf("expected the Service-update early return (RequeueAfter=1s), got %v", result.RequeueAfter)
+		}
+
+		fetched := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, fetched); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		if fetched.Spec.Ports[0].Port == 9999 {
+			t.Error("expected the owned Service spec to be updated to the desired state")
+		}
+		owner := metav1.GetControllerOf(fetched)
+		if owner == nil || owner.UID != inst.UID {
+			t.Errorf("expected the owner reference to be preserved, got %v", owner)
+		}
+		for _, e := range drainEvents(recorder) {
+			if strings.Contains(e, "ServiceAdopted") {
+				t.Error("expected no ServiceAdopted event for an already owned Service")
+			}
+		}
+	})
+}

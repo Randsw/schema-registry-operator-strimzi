@@ -459,6 +459,37 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// F5: a pre-existing Service named after the CR must not be silently
+	// taken over from another controller. A foreign-owned Service is a hard
+	// conflict: reconciliation fails with a ReconcileError and the Service is
+	// left untouched. An unowned Service is adopted explicitly — the
+	// controller reference is set exactly like createService does for
+	// operator-created Services — and the adoption is announced with a
+	// Warning event. An already owned Service is updated normally below.
+	if owner := metav1.GetControllerOf(foundSvc); owner != nil && owner.UID != instance.UID {
+		err = fmt.Errorf("service %s/%s is controlled by %s %q (uid %s); refusing to adopt or modify it — rename the Service or the StrimziSchemaRegistry so the operator can manage its own",
+			foundSvc.Namespace, foundSvc.Name, owner.Kind, owner.Name, owner.UID)
+		logger.Error(err, "Refusing to adopt a Service owned by another controller")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+		return ctrl.Result{}, err
+	}
+	serviceAdopted := false
+	if owner := metav1.GetControllerOf(foundSvc); owner == nil {
+		if err := ctrl.SetControllerReference(instance, foundSvc, r.Scheme); err != nil {
+			logger.Error(err, "Failed to set the controller reference on the adopted Service")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+			return ctrl.Result{}, err
+		}
+		serviceAdopted = true
+		if r.Recorder != nil {
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ServiceAdopted", "",
+				"Service %s/%s already existed without a controller owner; the operator adopted it and set its controller reference",
+				instance.Namespace, instance.Name)
+		}
+	}
+
 	// Service exists — reconcile spec changes (e.g., SecureHTTP changed)
 	desiredSvc, err := r.createService(instance, logger)
 	if err != nil {
@@ -495,9 +526,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		serviceChanged = true
 	}
 
-	if serviceChanged {
-		logger.Info("Service changed, updating service",
-			"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+	if serviceAdopted || serviceChanged {
+		if serviceChanged {
+			logger.Info("Service changed, updating service",
+				"Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		}
 		// Preserve API-server-allocated node ports when the desired spec does
 		// not pin one and the target type still uses node ports, so updating
 		// the service does not drop the allocation.
@@ -512,7 +545,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 			return ctrl.Result{}, err
 		}
-		logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		if serviceAdopted {
+			logger.Info("Service adopted and updated", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		} else {
+			logger.Info("Service updated after spec change", "Service.Name", instance.Name, "Service.Namespace", instance.Namespace)
+		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
