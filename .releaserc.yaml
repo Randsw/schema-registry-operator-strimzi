@@ -107,13 +107,21 @@ generateNotes:
 prepare:
   - path: '@semantic-release/changelog'
   - path: '@semantic-release/exec'
-    # Bump the Helm chart version only when files under helm-chart/ssr-operator
-    # changed since the previous release tag. The helm-chart workflow publishes
-    # a new chart package only when Chart.yaml changes, so bumping it on every
-    # release created empty chart releases.
+    # The chart appVersion is always set to the released operator version:
+    # the chart's default image tag falls back to appVersion, so a stale
+    # appVersion ships an operator binary mismatched with the chart and its
+    # CRD. semantic-release substitutes the next release version into the
+    # --set-version argument before the command runs.
+    # The chart version itself is bumped only when files under
+    # helm-chart/ssr-operator changed since the previous release tag. The
+    # helm-chart workflow publishes a new chart package only when Chart.yaml
+    # changes, so bumping it on every release created empty chart releases.
     cmd: |
       bash -c '
         set -e
+        python3 -m pip install pybump
+        # Always keep appVersion in sync with the released operator version.
+        pybump set --file helm-chart/ssr-operator/Chart.yaml --app-version --set-version ${nextRelease.version}
         last_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
         if [ -z "$last_tag" ]; then
           changed=1
@@ -121,7 +129,6 @@ prepare:
           changed=$(git diff --name-only "$last_tag"..HEAD -- helm-chart/ssr-operator | wc -l)
         fi
         if [ "$changed" -gt 0 ]; then
-          python3 -m pip install pybump
           pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch
         else
           echo "No helm-chart changes since $last_tag; skipping Chart.yaml version bump"

@@ -94,9 +94,20 @@ help: ## Display this help.
 
 ##@ Development
 
+# The chart ships its own copy of the generated CRD
+# (helm-chart/ssr-operator/crds/); keep the two in sync whenever the CRD is
+# regenerated so the chart never ships a schema the operator binary does not
+# match.
+CRD_FILE = strimziregistryoperator.randsw.code_strimzischemaregistries.yaml
+
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=0 webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(MAKE) helm-crd-sync
+
+.PHONY: helm-crd-sync
+helm-crd-sync: ## Copy the generated CRD into the Helm chart's crds/ directory.
+	cp config/crd/bases/$(CRD_FILE) helm-chart/ssr-operator/crds/$(CRD_FILE)
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

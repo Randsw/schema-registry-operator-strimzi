@@ -12,7 +12,7 @@ image:
   # operator build; avoid mutable tags such as "latest", which make an
   # install or a pod replacement run a binary mismatched with the chart and
   # its CRD.
-  # tag: "1.17.0"
+  # tag: "1.17.3"
   resources:
     limits:
       cpu: 500m
