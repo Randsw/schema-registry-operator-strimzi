@@ -418,3 +418,92 @@ func TestRenderedDeploymentAlwaysSetsReplicas(t *testing.T) {
 		})
 	}
 }
+
+// TestValuesPodSecurityStandardsRestricted guards the PSS restricted
+// hardening at the values level: on clusters enforcing the restricted Pod
+// Security Standard the operator Deployment is rejected unless the pod
+// runs as non-root with the RuntimeDefault seccomp profile and the
+// container drops all Linux capabilities and keeps privilege escalation
+// disabled.
+func TestValuesPodSecurityStandardsRestricted(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+
+	var values struct {
+		Image struct {
+			SecurityContext struct {
+				AllowPrivilegeEscalation *bool `json:"allowPrivilegeEscalation"`
+				Capabilities             struct {
+					Drop []string `json:"drop"`
+				} `json:"capabilities"`
+			} `json:"securityContext"`
+		} `json:"image"`
+		PodSecurityContext struct {
+			RunAsNonRoot   *bool `json:"runAsNonRoot"`
+			SeccompProfile struct {
+				Type string `json:"type"`
+			} `json:"seccompProfile"`
+		} `json:"podSecurityContext"`
+	}
+	if err := sigsyaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+
+	if values.Image.SecurityContext.AllowPrivilegeEscalation == nil || *values.Image.SecurityContext.AllowPrivilegeEscalation {
+		t.Error("image.securityContext.allowPrivilegeEscalation must be false for the PSS restricted standard")
+	}
+	if !slices.Contains(values.Image.SecurityContext.Capabilities.Drop, "ALL") {
+		t.Errorf("image.securityContext.capabilities.drop = %v, want it to include ALL for the PSS restricted standard; the operator needs no Linux capabilities", values.Image.SecurityContext.Capabilities.Drop)
+	}
+	if values.PodSecurityContext.RunAsNonRoot == nil || !*values.PodSecurityContext.RunAsNonRoot {
+		t.Error("podSecurityContext.runAsNonRoot must be true for the PSS restricted standard")
+	}
+	if values.PodSecurityContext.SeccompProfile.Type != "RuntimeDefault" {
+		t.Errorf("podSecurityContext.seccompProfile.type = %q, want RuntimeDefault for the PSS restricted standard", values.PodSecurityContext.SeccompProfile.Type)
+	}
+}
+
+// TestRenderedDeploymentPodSecurityRestricted verifies the PSS restricted
+// hardening survives rendering: the pod spec carries
+// seccompProfile.type=RuntimeDefault and the operator container drops all
+// Linux capabilities, in both RBAC renderings of the chart.
+func TestRenderedDeploymentPodSecurityRestricted(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	for _, tc := range []struct {
+		name string
+		sets []string
+	}{
+		{name: "default values", sets: nil},
+		{name: "rbac.namespaceScoped=true", sets: []string{"--set", "rbac.namespaceScoped=true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docs := renderedDocs(t, renderChart(t, tc.sets...))
+			dep := findRendered(t, docs, "Deployment", "")
+			spec, _ := dep["spec"].(map[string]any)
+			template, _ := spec["template"].(map[string]any)
+			podSpec, _ := template["spec"].(map[string]any)
+
+			podSC, _ := podSpec["securityContext"].(map[string]any)
+			seccomp, _ := podSC["seccompProfile"].(map[string]any)
+			if seccomp["type"] != "RuntimeDefault" {
+				t.Errorf("rendered pod securityContext.seccompProfile.type = %v, want RuntimeDefault", seccomp["type"])
+			}
+
+			containers, _ := podSpec["containers"].([]any)
+			if len(containers) == 0 {
+				t.Fatal("rendered Deployment has no containers")
+			}
+			container, _ := containers[0].(map[string]any)
+			containerSC, _ := container["securityContext"].(map[string]any)
+			caps, _ := containerSC["capabilities"].(map[string]any)
+			drop, _ := caps["drop"].([]any)
+			if !anyListContains(drop, "ALL") {
+				t.Errorf("rendered container securityContext.capabilities.drop = %v, want it to include ALL", drop)
+			}
+		})
+	}
+}

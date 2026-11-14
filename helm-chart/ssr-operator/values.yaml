@@ -22,9 +22,11 @@ image:
       memory: 64Mi
   securityContext:
     allowPrivilegeEscalation: false
-    # capabilities:
-    #   drop:
-    #   - ALL
+    # The operator needs no Linux capabilities (it only execs keytool/openssl
+    # as child processes); dropping ALL satisfies the PSS restricted standard.
+    capabilities:
+      drop:
+      - ALL
     # readOnlyRootFilesystem: true
     # runAsNonRoot: true
     # runAsUser: 1000
@@ -47,6 +49,10 @@ podAnnotations:
 
 podSecurityContext:
   runAsNonRoot: true
+  # RuntimeDefault seccomp profile: required by the PSS restricted standard
+  # (the operator image has no custom seccomp requirements).
+  seccompProfile:
+    type: RuntimeDefault
 
 service:
   type: ClusterIP
