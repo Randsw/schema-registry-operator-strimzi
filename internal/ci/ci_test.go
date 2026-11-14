@@ -140,3 +140,83 @@ func TestSemanticReleaseKeepsStrictE2EGate(t *testing.T) {
 		t.Error("Semantic-Release job must not allow a skipped E2E; the release gate must stay strict")
 	}
 }
+
+// releaserc is the subset of the semantic-release configuration the tests
+// inspect.
+type releaserc struct {
+	Prepare []struct {
+		Path   string   `yaml:"path"`
+		Cmd    string   `yaml:"cmd"`
+		Assets []string `yaml:"assets"`
+	} `yaml:"prepare"`
+}
+
+func loadReleaserc(t *testing.T) releaserc {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".releaserc.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read .releaserc.yaml: %v", err)
+	}
+	var rc releaserc
+	if err := sigsyaml.Unmarshal(data, &rc); err != nil {
+		t.Fatalf("failed to parse .releaserc.yaml: %v", err)
+	}
+	return rc
+}
+
+// TestReleasercSyncsChartAppVersion guards the appVersion-sync contract: the
+// chart's default image tag falls back to Chart.yaml appVersion, so release
+// automation must set appVersion to the released operator version on every
+// release. Without it the chart ships an operator binary mismatched with the
+// chart and its CRD (appVersion drifted to 1.17.0 while 1.17.1+ were out).
+// The conditional chart version bump and the release commit assets must stay
+// in place so the appVersion change is actually published.
+func TestReleasercSyncsChartAppVersion(t *testing.T) {
+	rc := loadReleaserc(t)
+
+	var exec, git *struct {
+		Path   string   `yaml:"path"`
+		Cmd    string   `yaml:"cmd"`
+		Assets []string `yaml:"assets"`
+	}
+	for i := range rc.Prepare {
+		switch rc.Prepare[i].Path {
+		case "@semantic-release/exec":
+			exec = &rc.Prepare[i]
+		case "@semantic-release/git":
+			git = &rc.Prepare[i]
+		}
+	}
+	if exec == nil {
+		t.Fatal(".releaserc.yaml prepare has no @semantic-release/exec step")
+	}
+	if git == nil {
+		t.Fatal(".releaserc.yaml prepare has no @semantic-release/git step")
+	}
+
+	// appVersion is set to the released operator version on every release
+	// (semantic-release substitutes ${nextRelease.version} before exec).
+	if !strings.Contains(exec.Cmd, "pybump set --file helm-chart/ssr-operator/Chart.yaml --app-version") {
+		t.Error(".releaserc.yaml exec prepare step must set the chart appVersion (pybump set --app-version); otherwise the chart ships a stale operator image tag")
+	}
+	if !strings.Contains(exec.Cmd, "--set-version ${nextRelease.version}") {
+		t.Error(".releaserc.yaml exec prepare step must set appVersion to ${nextRelease.version} (semantic-release substitution), not a hardcoded version")
+	}
+
+	// The conditional chart version bump must stay: the helm-chart workflow
+	// publishes a new chart package only when Chart.yaml changes.
+	if !strings.Contains(exec.Cmd, "pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch") {
+		t.Error(".releaserc.yaml exec prepare step must keep the conditional chart version bump (pybump bump --level patch)")
+	}
+
+	// The appVersion change must be committed with the release.
+	chartAsset := false
+	for _, a := range git.Assets {
+		if a == "helm-chart/ssr-operator/Chart.yaml" {
+			chartAsset = true
+		}
+	}
+	if !chartAsset {
+		t.Error("@semantic-release/git assets must include helm-chart/ssr-operator/Chart.yaml so the appVersion sync is committed with the release")
+	}
+}

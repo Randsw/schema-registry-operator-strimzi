@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -147,6 +148,65 @@ func TestChartAppVersionIsPinned(t *testing.T) {
 	}
 	if strings.EqualFold(strings.TrimSpace(chart.AppVersion), "latest") {
 		t.Error("Chart.yaml appVersion is the mutable \"latest\"; pin it to the released operator version")
+	}
+}
+
+// TestChartAppVersionMatchesDefaultImageTag guards the image-tag
+// consistency contract end to end: the operator image the chart installs
+// by default must be the released operator version carried in appVersion.
+// values.yaml may pin an explicit image.tag — then it must equal appVersion;
+// when it is unset the Deployment template must fall back to
+// .Chart.AppVersion, so a stale appVersion directly changes the deployed
+// operator binary (release automation keeps appVersion in sync with the
+// released operator version, see .releaserc.yaml).
+func TestChartAppVersionMatchesDefaultImageTag(t *testing.T) {
+	root := repoRoot(t)
+
+	chartData, err := os.ReadFile(filepath.Join(root, "helm-chart", "ssr-operator", "Chart.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read Chart.yaml: %v", err)
+	}
+	var chart struct {
+		AppVersion string `yaml:"appVersion"`
+	}
+	if err := sigsyaml.Unmarshal(chartData, &chart); err != nil {
+		t.Fatalf("failed to parse Chart.yaml: %v", err)
+	}
+	appVersion := strings.TrimSpace(chart.AppVersion)
+	if appVersion == "" {
+		t.Fatal("Chart.yaml appVersion is empty; the default operator image tag would be empty")
+	}
+	// A concrete version (semver, prerelease allowed) — never a mutable tag.
+	if !regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(appVersion) {
+		t.Errorf("Chart.yaml appVersion = %q, want a concrete semver (X.Y.Z[-prerelease]) matching the released operator version", appVersion)
+	}
+
+	valuesData, err := os.ReadFile(filepath.Join(root, "helm-chart", "ssr-operator", "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+	var values struct {
+		Image struct {
+			Tag string `yaml:"tag"`
+		} `yaml:"image"`
+	}
+	if err := sigsyaml.Unmarshal(valuesData, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+	if tag := strings.TrimSpace(values.Image.Tag); tag != "" {
+		if tag != appVersion {
+			t.Errorf("values.yaml image.tag = %q does not match Chart.yaml appVersion = %q; the chart would install an operator binary mismatched with its appVersion", tag, appVersion)
+		}
+		return
+	}
+
+	// tag unset: the Deployment template must fall back to .Chart.AppVersion.
+	depData, err := os.ReadFile(filepath.Join(root, "helm-chart", "ssr-operator", "templates", "deployment.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read templates/deployment.yaml: %v", err)
+	}
+	if !strings.Contains(string(depData), "{{ .Values.image.tag | default .Chart.AppVersion }}") {
+		t.Error("templates/deployment.yaml must default the image tag to .Chart.AppVersion so the chart installs the operator version carried in appVersion")
 	}
 }
 
