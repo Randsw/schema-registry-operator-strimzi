@@ -351,3 +351,53 @@ func TestHelmChartWorkflowInstallsStrimziCRDsBeforeInstall(t *testing.T) {
 		t.Error("Strimzi CRD install step must be gated by the same changed-helm-files condition as the ct install step")
 	}
 }
+
+// TestDependabotDockerEntriesHaveDockerfiles guards the dependabot
+// configuration: a docker ecosystem entry pointing at a directory without a
+// Dockerfile can never produce updates and logs errors on every run (the
+// helm-chart/ssr-operator entry was exactly that). Every docker entry must
+// point at a directory containing a Dockerfile.
+func TestDependabotDockerEntriesHaveDockerfiles(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "dependabot.yml"))
+	if err != nil {
+		t.Fatalf("failed to read .github/dependabot.yml: %v", err)
+	}
+	// sigs.k8s.io/yaml decodes with encoding/json semantics, so the
+	// hyphenated keys must be tagged with json names (yaml tags are not
+	// matched for keys containing separators).
+	var deps struct {
+		Updates []struct {
+			PackageEcosystem string `json:"package-ecosystem"`
+			Directory        string `json:"directory"`
+		} `json:"updates"`
+	}
+	if err := sigsyaml.Unmarshal(data, &deps); err != nil {
+		t.Fatalf("failed to parse .github/dependabot.yml: %v", err)
+	}
+
+	dockerEntries := 0
+	for _, u := range deps.Updates {
+		if u.PackageEcosystem != "docker" {
+			continue
+		}
+		dockerEntries++
+		dir := filepath.Join(repoRoot(t), filepath.FromSlash(u.Directory))
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("docker ecosystem entry directory %q cannot be read: %v", u.Directory, err)
+		}
+		hasDockerfile := false
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "Dockerfile") {
+				hasDockerfile = true
+				break
+			}
+		}
+		if !hasDockerfile {
+			t.Errorf("docker ecosystem entry points at %q which contains no Dockerfile; dependabot can never produce updates there and logs errors on every run", u.Directory)
+		}
+	}
+	if dockerEntries == 0 {
+		t.Error(".github/dependabot.yml has no docker ecosystem entry; the root Dockerfile must stay covered")
+	}
+}

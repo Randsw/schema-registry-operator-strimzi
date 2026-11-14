@@ -29,12 +29,3 @@ updates:
     time: "10:00"
   labels:
     - "Docker dependencies"
-- package-ecosystem: "docker"
-  # Look for a `Dockerfile` in the `root` directory
-  directory: "helm-chart/ssr-operator"
-  # Check for updates once a week
-  schedule:
-    interval: "daily"
-    time: "10:00"
-  labels:
-    - "Docker/Helm dependencies"
