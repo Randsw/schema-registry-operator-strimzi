@@ -356,3 +356,65 @@ func TestRenderedManagerRoleGrantsEvents(t *testing.T) {
 		})
 	}
 }
+
+// TestAutoscalingValuesRemoved guards the dead-values contract: the chart
+// has no HPA template, so autoscaling values are dead — setting
+// autoscaling.enabled=true would silently drop spec.replicas from the
+// Deployment (the API default of 1 applies) and nothing would ever
+// autoscale the operator. The values block and the deployment guard must
+// stay removed; replicaCount covers manual scaling of the leader-elected,
+// lightweight operator.
+func TestAutoscalingValuesRemoved(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+	var values map[string]any
+	if err := sigsyaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+	if _, ok := values["autoscaling"]; ok {
+		t.Error("values.yaml still defines autoscaling; the chart has no HPA template, so the values are dead and autoscaling.enabled=true would silently drop spec.replicas")
+	}
+
+	depSrc, err := os.ReadFile(filepath.Join(chartDir(t), "templates", "deployment.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read templates/deployment.yaml: %v", err)
+	}
+	src := string(depSrc)
+	if strings.Contains(src, "autoscaling") {
+		t.Error("templates/deployment.yaml still references autoscaling; remove the guard so spec.replicas is always rendered")
+	}
+	if !strings.Contains(src, "replicas: {{ .Values.replicaCount }}") {
+		t.Error("templates/deployment.yaml must render spec.replicas unconditionally from .Values.replicaCount")
+	}
+}
+
+// TestRenderedDeploymentAlwaysSetsReplicas verifies the guard removal end
+// to end: spec.replicas is rendered from replicaCount in every rendering
+// of the Deployment instead of being silently dropped.
+func TestRenderedDeploymentAlwaysSetsReplicas(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	for _, tc := range []struct {
+		name string
+		sets []string
+	}{
+		{name: "default values", sets: nil},
+		{name: "rbac.namespaceScoped=true", sets: []string{"--set", "rbac.namespaceScoped=true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docs := renderedDocs(t, renderChart(t, tc.sets...))
+			dep := findRendered(t, docs, "Deployment", "")
+			spec, _ := dep["spec"].(map[string]any)
+			replicas, ok := spec["replicas"].(float64)
+			if !ok {
+				t.Fatal("rendered Deployment has no numeric spec.replicas; the autoscaling guard must stay removed so replicas always render from replicaCount")
+			}
+			if replicas != 1 {
+				t.Errorf("rendered Deployment spec.replicas = %v, want 1 (the replicaCount default)", replicas)
+			}
+		})
+	}
+}
