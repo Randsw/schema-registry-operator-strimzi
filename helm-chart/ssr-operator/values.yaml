@@ -101,6 +101,17 @@ cluster_roles:
     kind: "ServiceAccount"
     labels: {}
     rules:
+      # Operator events (Recorder.Eventf) are created in the CR's namespace,
+      # which in the default cluster-scoped mode can be any namespace: the
+      # manager role must grant events create/patch cluster-wide (mirrors
+      # config/rbac/role.yaml).
+      - apiGroups:
+        - ""
+        resources:
+        - events
+        verbs:
+        - create
+        - patch
       - apiGroups:
         - "apps"
         resources:

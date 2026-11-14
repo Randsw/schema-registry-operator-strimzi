@@ -21,8 +21,11 @@ limitations under the License.
 package chart
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -144,5 +147,212 @@ func TestChartAppVersionIsPinned(t *testing.T) {
 	}
 	if strings.EqualFold(strings.TrimSpace(chart.AppVersion), "latest") {
 		t.Error("Chart.yaml appVersion is the mutable \"latest\"; pin it to the released operator version")
+	}
+}
+
+// chartDir returns the absolute path of the ssr-operator Helm chart.
+func chartDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "helm-chart", "ssr-operator")
+}
+
+// helmAvailable reports whether the helm binary is on PATH. The rendering
+// tests exercise real `helm template` output but skip (instead of fail) in
+// environments without helm: the source-contract tests already pin the
+// chart sources, and CI renders the chart in the dedicated helm workflow.
+func helmAvailable(t *testing.T) bool {
+	t.Helper()
+	_, err := exec.LookPath("helm")
+	return err == nil
+}
+
+// renderChart renders the chart with `helm template` and the given --set
+// flags, returning the rendered multi-document YAML.
+func renderChart(t *testing.T, sets ...string) []byte {
+	t.Helper()
+	args := append([]string{"template", "ssr-operator", chartDir(t)}, sets...)
+	out, err := exec.Command("helm", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template %v failed: %v\n%s", sets, err, out)
+	}
+	return out
+}
+
+// renderedDocs splits a rendered multi-document YAML stream (as produced by
+// `helm template`) into one generic map per Kubernetes object.
+func renderedDocs(t *testing.T, rendered []byte) []map[string]any {
+	t.Helper()
+	var docs []map[string]any
+	var current []string
+	flush := func() {
+		doc := strings.TrimSpace(strings.Join(current, "\n"))
+		current = nil
+		if doc == "" {
+			return
+		}
+		var obj map[string]any
+		if err := sigsyaml.Unmarshal([]byte(doc), &obj); err != nil {
+			t.Fatalf("failed to parse rendered document: %v\n%s", err, doc)
+		}
+		if len(obj) > 0 {
+			docs = append(docs, obj)
+		}
+	}
+	for _, line := range strings.Split(string(rendered), "\n") {
+		if strings.TrimSpace(line) == "---" {
+			flush()
+			continue
+		}
+		current = append(current, line)
+	}
+	flush()
+	return docs
+}
+
+// findRendered returns the rendered object with the given kind whose
+// metadata.name contains nameSuffix, failing the test if absent.
+func findRendered(t *testing.T, docs []map[string]any, kind, nameSuffix string) map[string]any {
+	t.Helper()
+	for _, doc := range docs {
+		if doc["kind"] != kind {
+			continue
+		}
+		meta, _ := doc["metadata"].(map[string]any)
+		name, _ := meta["name"].(string)
+		if strings.Contains(name, nameSuffix) {
+			return doc
+		}
+	}
+	t.Fatalf("no rendered %s with name containing %q; rendered objects:\n%s", kind, nameSuffix, renderedSummary(docs))
+	return nil
+}
+
+// renderedSummary lists the kind/name of every rendered object for failure
+// messages.
+func renderedSummary(docs []map[string]any) string {
+	var sb strings.Builder
+	for _, doc := range docs {
+		meta, _ := doc["metadata"].(map[string]any)
+		name, _ := meta["name"].(string)
+		fmt.Fprintf(&sb, "- %s/%s\n", doc["kind"], name)
+	}
+	return sb.String()
+}
+
+// grantsEvents reports whether one of the decoded RBAC rules grants create
+// and patch on core ("") events.
+func grantsEvents(rules []any) bool {
+	for _, r := range rules {
+		rule, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		groups, _ := rule["apiGroups"].([]any)
+		resources, _ := rule["resources"].([]any)
+		verbs, _ := rule["verbs"].([]any)
+		if !anyListContains(groups, "") || !anyListContains(resources, "events") {
+			continue
+		}
+		if anyListContains(verbs, "create") && anyListContains(verbs, "patch") {
+			return true
+		}
+	}
+	return false
+}
+
+// anyListContains reports whether a decoded YAML list ([]any) contains the
+// given string value.
+func anyListContains(list []any, want string) bool {
+	for _, v := range list {
+		if s, ok := v.(string); ok && s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestValuesManagerRoleGrantsEvents guards the events RBAC contract at the
+// values level: the manager role must grant create/patch on core events.
+// The operator emits events (Recorder.Eventf) in the watched CR's
+// namespace, which in the default cluster-scoped mode can be any namespace;
+// without this rule every event outside the release namespace fails with
+// RBAC Forbidden and the operator's signaling is silently lost.
+func TestValuesManagerRoleGrantsEvents(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+
+	// sigs.k8s.io/yaml decodes with encoding/json semantics (yaml struct
+	// tags are ignored), so the fields are tagged with json names; the
+	// underscored "cluster_roles" key cannot be matched case-insensitively.
+	var values struct {
+		ClusterRoles []struct {
+			Name  string `json:"name"`
+			Rules []struct {
+				APIGroups []string `json:"apiGroups"`
+				Resources []string `json:"resources"`
+				Verbs     []string `json:"verbs"`
+			} `json:"rules"`
+		} `json:"cluster_roles"`
+	}
+	if err := sigsyaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+
+	var manager struct {
+		Rules []struct {
+			APIGroups []string `json:"apiGroups"`
+			Resources []string `json:"resources"`
+			Verbs     []string `json:"verbs"`
+		} `json:"rules"`
+	}
+	found := false
+	for _, role := range values.ClusterRoles {
+		if role.Name == "manager-role" {
+			manager.Rules = role.Rules
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("values.yaml cluster_roles has no manager-role entry")
+	}
+
+	for _, rule := range manager.Rules {
+		if slices.Contains(rule.APIGroups, "") &&
+			slices.Contains(rule.Resources, "events") &&
+			slices.Contains(rule.Verbs, "create") &&
+			slices.Contains(rule.Verbs, "patch") {
+			return // contract satisfied
+		}
+	}
+	t.Errorf("values.yaml manager-role rules grant no create/patch on core events; rules: %+v", manager.Rules)
+}
+
+// TestRenderedManagerRoleGrantsEvents verifies the events rule survives
+// rendering in BOTH renderings of templates/clusterrole.yaml: the default
+// cluster-scoped ClusterRole and the namespaced Role rendered when
+// rbac.namespaceScoped=true.
+func TestRenderedManagerRoleGrantsEvents(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	for _, tc := range []struct {
+		name string
+		sets []string
+		kind string
+	}{
+		{name: "default cluster-scoped ClusterRole", sets: nil, kind: "ClusterRole"},
+		{name: "namespaced Role (rbac.namespaceScoped=true)", sets: []string{"--set", "rbac.namespaceScoped=true"}, kind: "Role"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docs := renderedDocs(t, renderChart(t, tc.sets...))
+			role := findRendered(t, docs, tc.kind, "-manager-role")
+			rules, _ := role["rules"].([]any)
+			if !grantsEvents(rules) {
+				t.Errorf("rendered %s manager role does not grant create/patch on core events; rules: %#v", tc.kind, rules)
+			}
+		})
 	}
 }
