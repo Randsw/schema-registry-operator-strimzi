@@ -507,3 +507,56 @@ func TestRenderedDeploymentPodSecurityRestricted(t *testing.T) {
 		})
 	}
 }
+
+// TestManagerConfigConfigMapRemoved guards the dead-resource contract: the
+// Deployment never mounted or referenced the manager-config ConfigMap (its
+// args are hardcoded flags), so the template shipped a dead resource on
+// every install. The template must stay deleted and no template may
+// reference the ConfigMap again.
+func TestManagerConfigConfigMapRemoved(t *testing.T) {
+	cmPath := filepath.Join(chartDir(t), "templates", "cm.yaml")
+	if _, err := os.Stat(cmPath); err == nil {
+		t.Errorf("%s still exists; the Deployment never mounts the manager-config ConfigMap (args are hardcoded flags), so the dead template must stay deleted", cmPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("failed to stat %s: %v", cmPath, err)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(chartDir(t), "templates", "*"))
+	if err != nil {
+		t.Fatalf("failed to scan chart templates: %v", err)
+	}
+	for _, path := range matches {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", path, err)
+		}
+		if strings.Contains(string(data), "manager-config") {
+			t.Errorf("%s references the removed manager-config ConfigMap", path)
+		}
+	}
+}
+
+// TestRenderedChartHasNoManagerConfigConfigMap verifies the removal end to
+// end: the chart renders no ConfigMap at all (the manager-config ConfigMap
+// was its only one), in both RBAC renderings.
+func TestRenderedChartHasNoManagerConfigConfigMap(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	for _, tc := range []struct {
+		name string
+		sets []string
+	}{
+		{name: "default values", sets: nil},
+		{name: "rbac.namespaceScoped=true", sets: []string{"--set", "rbac.namespaceScoped=true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docs := renderedDocs(t, renderChart(t, tc.sets...))
+			for _, doc := range docs {
+				if doc["kind"] == "ConfigMap" {
+					t.Errorf("chart still renders a ConfigMap; the dead manager-config ConfigMap must stay removed:\n%s", renderedSummary(docs))
+				}
+			}
+		})
+	}
+}
