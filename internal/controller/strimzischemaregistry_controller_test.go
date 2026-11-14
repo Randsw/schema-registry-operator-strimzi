@@ -3818,11 +3818,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 	// Phase 4 (plan §2.10 L5): the HeapOpts pattern must accept plain digits
 	// only — hex letters like "12a" are rejected by CRD validation at the API
-	// server.
+	// server. F7 loosened the pattern: "-Xms<size>" and "-Xmx<size>" are also
+	// accepted alone (either unit case, flexible spacing), while garbage,
+	// unit-less sizes and the reversed option order stay rejected.
 	Context("When validating the HeapOpts pattern at the API server", func() {
 		ctx := context.Background()
 
-		It("rejects hex-letter heap sizes and accepts plain digits", func() {
+		It("rejects invalid heap sizes and accepts the documented forms", func() {
 			namespaceName := "heapopts-validation"
 			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}}
 			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
@@ -3856,6 +3858,30 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			By("Accepting the empty HeapOpts (operator default applies)")
 			Expect(k8sClient.Create(ctx, newCR("sr-empty-heap", ""))).To(Succeed())
+
+			By("Accepting -Xmx alone (F7)")
+			Expect(k8sClient.Create(ctx, newCR("sr-xmx-only-heap", "-Xmx1g"))).To(Succeed())
+
+			By("Accepting -Xms alone (F7)")
+			Expect(k8sClient.Create(ctx, newCR("sr-xms-only-heap", "-Xms512m"))).To(Succeed())
+
+			By("Accepting k/K units and multiple spaces (F7)")
+			Expect(k8sClient.Create(ctx, newCR("sr-units-heap", "-Xms1K  -Xmx2048k"))).To(Succeed())
+
+			By("Rejecting garbage values (F7)")
+			err = k8sClient.Create(ctx, newCR("sr-garbage-heap", "foo"))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("heapopts"))
+
+			By("Rejecting unit-less heap sizes (F7)")
+			err = k8sClient.Create(ctx, newCR("sr-unitless-heap", "-Xmx1024"))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("heapopts"))
+
+			By("Rejecting the reversed -Xmx ... -Xms order (F7)")
+			err = k8sClient.Create(ctx, newCR("sr-reversed-heap", "-Xmx1g -Xms512m"))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("heapopts"))
 		})
 	})
 

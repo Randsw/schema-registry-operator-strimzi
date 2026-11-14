@@ -101,8 +101,12 @@ type StrimziSchemaRegistrySpec struct {
 	// +kubebuilder:validation:Enum=JKS;PKCS12
 	KeystoreType string `json:"keystoretype,omitempty"`
 
-	// HeapOpts sets the JVM heap options for Schema Registry (defaults to "-Xms512M -Xmx512M")
-	// +kubebuilder:validation:Pattern="^(-Xms[0-9]+(m|M|g|G) -Xmx[0-9]+(m|M|g|G))?$"
+	// HeapOpts sets the JVM heap options for Schema Registry (defaults to "-Xms512M -Xmx512M").
+	// Accepted forms (CRD-validated): "-Xms<size>", "-Xmx<size>", or both in
+	// the common "-Xms<size> -Xmx<size>" order, where <size> is plain digits
+	// followed by a k/K, m/M or g/G unit; the two options may be separated by
+	// one or more spaces. Examples: "-Xmx1g", "-Xms512m -Xmx2g".
+	// +kubebuilder:validation:Pattern="^(-Xms[0-9]+[kKmMgG](\\s+-Xmx[0-9]+[kKmMgG])?|-Xmx[0-9]+[kKmMgG])?$"
 	HeapOpts string `json:"heapopts,omitempty"`
 
 	// KafkastoreTopic is the name of the Kafka topic Schema Registry uses to store

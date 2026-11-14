@@ -636,8 +636,10 @@ reconciles do not repeat the events; reconciliation still succeeds.
 | `ssl.keystore.*` (incl. `ssl.keystore.type`)| REST API TLS keystore (type follows `spec.keystoretype`)    |
 | `ssl.key.password`                         | REST API TLS key password                                   |
 
-`spec.heapopts` accepts only plain digit heap sizes (e.g. `-Xms512M -Xmx512M`); hex-letter sizes such as
-`12a` are rejected by CRD validation.
+`spec.heapopts` accepts `-Xms<size>`, `-Xmx<size>`, or both in the common `-Xms<size> -Xmx<size>` order, where
+`<size>` is plain digits followed by a `k`/`K`, `m`/`M` or `g`/`G` unit (e.g. `-Xmx1g`, `-Xms512m -Xmx2g`); the
+two options may be separated by one or more spaces. Anything else — hex-letter sizes such as `12a`, unit-less
+sizes, or the reversed `-Xmx ... -Xms ...` order — is rejected by CRD validation.
 
 ### BASIC/RBAC authentication on the REST API
 

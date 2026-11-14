@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -880,6 +881,69 @@ func TestCRDManifestReplicasValidation(t *testing.T) {
 	minimum, ok := replicas["minimum"].(float64)
 	if !ok || minimum != 1 {
 		t.Errorf("expected spec.replicas minimum 1, got %v", replicas["minimum"])
+	}
+}
+
+// TestCRDManifestHeapOptsValidation guards the F7 CRD contract: the
+// generated CRD must validate the documented heapopts forms — "-Xms<size>",
+// "-Xmx<size>", or both in the common "-Xms ... -Xmx" order, with k/K/m/M/g/G
+// units and flexible spacing — while still rejecting garbage, unit-less and
+// hex-letter sizes, and the reversed option order. The pattern is compiled
+// from the generated manifest, so dropping or mistyping the kubebuilder
+// marker fails here.
+func TestCRDManifestHeapOptsValidation(t *testing.T) {
+	crdPath := filepath.Join("..", "..", "config", "crd", "bases",
+		"strimziregistryoperator.randsw.code_strimzischemaregistries.yaml")
+	data, err := os.ReadFile(crdPath)
+	if err != nil {
+		t.Fatalf("failed to read the generated CRD: %v", err)
+	}
+
+	var crd map[string]any
+	if err := sigsyaml.Unmarshal(data, &crd); err != nil {
+		t.Fatalf("failed to parse the generated CRD: %v", err)
+	}
+
+	heapopts, err := crdSpecProperty(crd, "heapopts")
+	if err != nil {
+		t.Fatalf("spec.heapopts missing from the generated CRD: %v", err)
+	}
+	pattern, ok := heapopts["pattern"].(string)
+	if !ok || pattern == "" {
+		t.Fatalf("expected spec.heapopts to carry a pattern, got %v", heapopts["pattern"])
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("spec.heapopts pattern does not compile: %v", err)
+	}
+
+	accepted := []string{
+		"",
+		"-Xms512M -Xmx512M",
+		"-Xmx1g",
+		"-Xms512m",
+		"-Xms512m -Xmx2g",
+		"-Xms1K  -Xmx2048k", // multiple spaces, k/K units
+		"-Xmx1024k",
+	}
+	for _, v := range accepted {
+		if !re.MatchString(v) {
+			t.Errorf("expected %q to be accepted by the heapopts pattern", v)
+		}
+	}
+	rejected := []string{
+		"foo",
+		"12a",
+		"-Xms12aM -Xmx12aM",
+		"-XmsabcM -XmxabcM",
+		"-Xmx1024",         // unit-less
+		"-Xmx1g -Xms512m",  // reversed order
+		"-Xms512m -Xmx2g ", // trailing space
+	}
+	for _, v := range rejected {
+		if re.MatchString(v) {
+			t.Errorf("expected %q to be rejected by the heapopts pattern", v)
+		}
 	}
 }
 
