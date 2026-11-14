@@ -81,6 +81,31 @@ func selectorLabelsForStrimziSchemaRegistryOperator(name string) map[string]stri
 	}
 }
 
+// maxLabelValueLength is the Kubernetes limit for label values: a valid
+// label value must be 63 characters or fewer.
+const maxLabelValueLength = 63
+
+// imageVersionLabel derives the app.kubernetes.io/version label value from
+// the container image reference: the substring after the last ':' when it is
+// a tag rather than part of a registry host, "latest" when the image carries
+// no tag. A digest-pinned image (image@sha256:<64 hex chars>) yields a
+// 64-character value that exceeds the 63-character Kubernetes label limit,
+// so the digest is truncated (F3). The label is no longer part of the
+// Deployment selector (F1) but remains a pod label and must stay valid.
+func imageVersionLabel(image string) string {
+	parts := strings.Split(image, ":")
+	if len(parts) > 1 {
+		last := parts[len(parts)-1]
+		if !strings.Contains(last, "/") {
+			if len(last) > maxLabelValueLength {
+				return last[:maxLabelValueLength]
+			}
+			return last
+		}
+	}
+	return "latest"
+}
+
 // labelsForStrimziSchemaRegistryOperator returns the standard set of labels
 // for resources managed by the Schema Registry operator. It extends the
 // stable selector subset with the mutable app.kubernetes.io/version (derived
@@ -88,16 +113,7 @@ func selectorLabelsForStrimziSchemaRegistryOperator(name string) map[string]stri
 // must never be used in a Deployment selector (F1).
 func labelsForStrimziSchemaRegistryOperator(name, image, kafkaClusterName string) map[string]string {
 	ls := selectorLabelsForStrimziSchemaRegistryOperator(name)
-	ls["app.kubernetes.io/version"] = func() string {
-		parts := strings.Split(image, ":")
-		if len(parts) > 1 {
-			last := parts[len(parts)-1]
-			if !strings.Contains(last, "/") {
-				return last
-			}
-		}
-		return "latest"
-	}()
+	ls["app.kubernetes.io/version"] = imageVersionLabel(image)
 	ls["strimzi.io/cluster"] = kafkaClusterName
 	return ls
 }

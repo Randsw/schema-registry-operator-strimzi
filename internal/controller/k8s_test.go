@@ -3767,3 +3767,43 @@ func dropKey(m map[string][]byte, key string) map[string][]byte {
 	}
 	return out
 }
+
+// TestImageVersionLabel covers F3: the app.kubernetes.io/version label is
+// derived from the substring after the last ':' of the image reference. A
+// digest-pinned image (image@sha256:<64 hex chars>) yields a 64-character
+// value that exceeds the 63-character Kubernetes label limit, so the digest
+// must be truncated; normal tags and tag-less images keep the existing
+// behavior.
+func TestImageVersionLabel(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	cases := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{name: "tagged image", image: "confluentinc/cp-schema-registry:8.4.1", want: "8.4.1"},
+		{name: "registry with port", image: "registry.example:5000/team/image:1.0.0", want: "1.0.0"},
+		{name: "image without tag", image: "confluentinc/cp-schema-registry", want: "latest"},
+		{name: "digest-pinned image is truncated to 63 chars", image: "confluentinc/cp-schema-registry@sha256:" + digest, want: digest[:maxLabelValueLength]},
+		{name: "tag plus digest is truncated to 63 chars", image: "confluentinc/cp-schema-registry:7.6.1@sha256:" + digest, want: digest[:maxLabelValueLength]},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := imageVersionLabel(tc.image)
+			if got != tc.want {
+				t.Errorf("imageVersionLabel(%q) = %q, want %q", tc.image, got, tc.want)
+			}
+			if len(got) > maxLabelValueLength {
+				t.Errorf("label value %q exceeds the %d-char Kubernetes limit", got, maxLabelValueLength)
+			}
+		})
+	}
+
+	// The digest-pinned value must also be a valid label value end to end:
+	// hex characters are within the allowed set and the length is capped.
+	ls := labelsForStrimziSchemaRegistryOperator("test-sr", "confluentinc/cp-schema-registry@sha256:"+digest, "kafka")
+	version := ls["app.kubernetes.io/version"]
+	if len(version) != maxLabelValueLength {
+		t.Errorf("expected the version label to be capped at %d chars, got %d (%q)", maxLabelValueLength, len(version), version)
+	}
+}
