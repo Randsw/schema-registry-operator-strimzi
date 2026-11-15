@@ -3006,6 +3006,29 @@ func TestMigrateFinalizer(t *testing.T) {
 		}
 	})
 
+	t.Run("already migrated issues no update", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Finalizers = []string{finalizer}
+		updates := 0
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if _, ok := obj.(*strimziregistryoperatorv1alpha1.StrimziSchemaRegistry); ok {
+					updates++
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: fakeClient, Scheme: scheme}
+
+		if err := reconciler.migrateFinalizer(context.Background(), inst, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if updates != 0 {
+			t.Errorf("expected no Update calls for an already migrated object, got %d", updates)
+		}
+	})
+
 	t.Run("fresh object gets current finalizer", func(t *testing.T) {
 		inst := newTestInstance()
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
