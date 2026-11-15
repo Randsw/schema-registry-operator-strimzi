@@ -19,6 +19,9 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -918,9 +921,90 @@ func TestBuildDerivedJKSSecretThreadCACert(t *testing.T) {
 	})
 }
 
+// sec1ECPrivateKeyPEM generates an ECDSA P-256 key and encodes it in the
+// traditional SEC1 "EC PRIVATE KEY" PEM format openssl writes for EC keys —
+// one of the private key formats the PEM material validation must accept.
+func sec1ECPrivateKeyPEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate EC key: %v", err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("failed to marshal EC key: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+}
+
+// TestHasPEMTLSSecretKeys covers the TLS-secret detection used by the user
+// TLS secret validation: a secret carrying any of the standard
+// kubernetes.io/tls keys — including a partially populated one — and a
+// secret typed kubernetes.io/tls are recognized as PEM TLS secrets so they
+// get precise error paths, while unrelated secrets are not.
+func TestHasPEMTLSSecretKeys(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret *corev1.Secret
+		want   bool
+	}{
+		{name: "nil secret", secret: nil, want: false},
+		{
+			name:   "both tls.crt and tls.key",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k")}},
+			want:   true,
+		},
+		{
+			name:   "partial: tls.crt only",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("c")}},
+			want:   true,
+		},
+		{
+			name:   "partial: tls.key only",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls.key": []byte("k")}},
+			want:   true,
+		},
+		{
+			name:   "empty-valued tls keys still mark the shape",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls.crt": {}, "tls.key": {}}},
+			want:   true,
+		},
+		{
+			name:   "kubernetes.io/tls type without keys",
+			secret: &corev1.Secret{Type: corev1.SecretTypeTLS, Data: map[string][]byte{}},
+			want:   true,
+		},
+		{
+			name:   "kubernetes.io/tls type with unrelated keys only",
+			secret: &corev1.Secret{Type: corev1.SecretTypeTLS, Data: map[string][]byte{"unrelated": []byte("x")}},
+			want:   true,
+		},
+		{
+			name:   "opaque secret with keystore keys only",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls-keystore.jks": []byte("jks"), "keystore_password": []byte("pw")}},
+			want:   false,
+		},
+		{
+			name:   "opaque empty secret",
+			secret: &corev1.Secret{Data: map[string][]byte{}},
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasPEMTLSSecretKeys(tt.secret); got != tt.want {
+				t.Errorf("hasPEMTLSSecretKeys() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestValidateUserTLSSecret covers the shape-dispatching validation wrapper:
 // standard kubernetes.io/tls (PEM) secrets, pre-built keystores following
-// spec.keystoretype, and the derived-secret name collision guard.
+// spec.keystoretype, and the derived-secret name collision guard. The PEM
+// cases use real certificate/key material because the validation now parses
+// the PEM content, and partial PEM secrets must surface the missing key
+// instead of falling back to the keystore contract.
 func TestValidateUserTLSSecret(t *testing.T) {
 	newInstance := func(tlsSecretName string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
 		inst := newTestInstance()
@@ -928,6 +1012,13 @@ func TestValidateUserTLSSecret(t *testing.T) {
 		inst.Spec.TLSSecretName = tlsSecretName
 		return inst
 	}
+
+	// Real PEM material: the validation parses tls.crt/tls.key, so the
+	// fixtures must be genuine certificate and key PEM.
+	realPEM := realPEMSecretData(t)
+	realCertPEM := realPEM["tls.crt"]
+	realKeyPEM := realPEM["tls.key"]
+	realPEMWithCA, _ := realPEMSecretDataWithCA(t)
 
 	tests := []struct {
 		name         string
@@ -946,32 +1037,64 @@ func TestValidateUserTLSSecret(t *testing.T) {
 		{
 			name:     "valid PEM secret (with optional ca.crt) passes",
 			instance: newInstance("user-tls"),
+			secret:   &corev1.Secret{Data: realPEMWithCA},
+		},
+		{
+			name:     "valid PEM secret with a SEC1 EC private key passes",
+			instance: newInstance("user-tls"),
 			secret: &corev1.Secret{Data: map[string][]byte{
-				"tls.crt": []byte("pem-cert"),
-				"tls.key": []byte("pem-key"),
-				"ca.crt":  []byte("ca-pem"),
+				"tls.crt": realCertPEM,
+				"tls.key": sec1ECPrivateKeyPEM(t),
 			}},
 		},
 		{
 			name:         "PEM secret with empty tls.key is invalid",
 			instance:     newInstance("user-tls"),
-			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": {}}},
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM, "tls.key": {}}},
 			wantInvalid:  true,
 			wantMentions: []string{"tls.key"},
 		},
 		{
 			name:         "PEM secret with empty tls.crt is invalid",
 			instance:     newInstance("user-tls"),
-			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": {}, "tls.key": []byte("pem-key")}},
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": {}, "tls.key": realKeyPEM}},
 			wantInvalid:  true,
 			wantMentions: []string{"tls.crt"},
 		},
 		{
-			name:         "secret with only tls.crt falls back to the keystore contract",
+			name:         "partial PEM secret with only tls.crt reports the missing tls.key",
 			instance:     newInstance("user-tls"),
-			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert")}},
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM}},
 			wantInvalid:  true,
-			wantMentions: []string{"tls-keystore.jks"},
+			wantMentions: []string{"tls.key"},
+		},
+		{
+			name:         "partial PEM secret with only tls.key reports the missing tls.crt",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.key": realKeyPEM}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.crt"},
+		},
+		{
+			name:         "kubernetes.io/tls-typed secret without keys is invalid",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Type: corev1.SecretTypeTLS, Data: map[string][]byte{}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.crt", "tls.key"},
+		},
+		{
+			name:         "PEM secret with unparseable tls.crt is invalid",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("not a valid PEM certificate"), "tls.key": realKeyPEM}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.crt"},
+		},
+		{
+			name:         "PEM secret with unparseable tls.key is invalid",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM, "tls.key": []byte("not a valid PEM private key")}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.key"},
 		},
 		{
 			name: "tlssecretname equal to the CR name no longer collides (per-registry derived name)",
@@ -979,7 +1102,7 @@ func TestValidateUserTLSSecret(t *testing.T) {
 			// tlssecretname == CR name cannot collide with the
 			// operator-managed <name>-jks / <name>-tls secrets.
 			instance: newInstance("test-sr"),
-			secret:   &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": []byte("pem-key")}},
+			secret:   &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM, "tls.key": realKeyPEM}},
 		},
 		{
 			name: "derived secret name exceeding the 253-character limit is invalid",
@@ -988,7 +1111,7 @@ func TestValidateUserTLSSecret(t *testing.T) {
 				inst.Name = strings.Repeat("a", 241)
 				return inst
 			}(),
-			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": []byte("pem-key")}},
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM, "tls.key": realKeyPEM}},
 			wantInvalid:  true,
 			wantMentions: []string{"253"},
 		},
