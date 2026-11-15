@@ -1,3 +1,16 @@
+## [1.17.7](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.6...1.17.7) (2026-11-15)
+
+### 🧪 Tests
+
+* **chart:** assert the events.k8s.io rule in values and rendered RBAC ([0c0d7f5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0c0d7f575bd0e26f4f7de2a57bbcde8c6b75ae6c))
+* **controller:** assert recorded events carry a non-empty action ([9312535](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9312535da9b8cb8de58fc8b7d0b15cb3b1320e40))
+* **controller:** cover remaining event sites and the API-server action ([5164527](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5164527dfd60821e342dafe89f35118f2f040df2))
+
+### 🛠 Fixes
+
+* **controller:** use non-empty action on recorded events ([83c4e7f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/83c4e7fc4d62af5da4a547ffaf8e87b436c398a0))
+* **rbac:** grant events.k8s.io events create/patch ([3b078ab](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3b078abde48977776d657b2085bc6a3bd4b462c0))
+
 ## [1.17.6](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.5...1.17.6) (2026-11-15)
 
 ### 🧪 Tests
