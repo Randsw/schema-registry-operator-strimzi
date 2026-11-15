@@ -216,7 +216,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			ObservedGeneration: instance.Generation,
 		})
 		instance.Status.Status = "InvalidSpec"
-		if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
+		if !equality.Semantic.DeepEqual(origStatus, &instance.Status) {
 			if err := r.Status().Update(ctx, instance); err != nil {
 				logger.Error(err, "Failed to update CR status")
 				monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
@@ -251,7 +251,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			ObservedGeneration: instance.Generation,
 		})
 		instance.Status.Status = "InvalidSpec"
-		if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
+		if !equality.Semantic.DeepEqual(origStatus, &instance.Status) {
 			if err := r.Status().Update(ctx, instance); err != nil {
 				logger.Error(err, "Failed to update CR status")
 				monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
@@ -295,7 +295,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 				ObservedGeneration: instance.Generation,
 			})
 			instance.Status.Status = "InvalidTLSSecret"
-			if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
+			if !equality.Semantic.DeepEqual(origStatus, &instance.Status) {
 				if err := r.Status().Update(ctx, instance); err != nil {
 					logger.Error(err, "Failed to update CR status")
 					monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
@@ -427,7 +427,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	} else {
 		instance.Status.Status = "NotReady"
 	}
-	if !equality.Semantic.DeepEqual(origStatus, instance.Status) {
+	if !equality.Semantic.DeepEqual(origStatus, &instance.Status) {
 		err = r.Status().Update(ctx, instance)
 		if err != nil {
 			logger.Error(err, "Failed to update CR Status")
@@ -606,7 +606,7 @@ func (r *StrimziSchemaRegistryReconciler) setReconcileErrorStatus(
 		ObservedGeneration: instance.Generation,
 	})
 	instance.Status.Status = "ReconcileError"
-	if equality.Semantic.DeepEqual(origStatus, instance.Status) {
+	if equality.Semantic.DeepEqual(origStatus, &instance.Status) {
 		return
 	}
 	if err := r.Status().Update(ctx, instance); err != nil {
