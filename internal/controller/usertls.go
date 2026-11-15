@@ -118,7 +118,10 @@ func validateUserTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSche
 // buildDerivedJKSSecret converts the PEM user TLS secret into the JKS
 // keystore contract and returns the desired derived secret. The user
 // secret's resourceVersion is recorded in an annotation so the conversion is
-// regenerated only when the user secret changes. ctx bounds the openssl and
+// regenerated only when the user secret changes. The secret's optional
+// ca.crt is threaded through as the issuing chain of the exported PKCS12, so
+// the derived keystore validates for clients trusting that CA even when
+// tls.crt holds only the leaf certificate. ctx bounds the openssl and
 // keytool child processes in the conversion (B5).
 func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
 	ctx context.Context,
@@ -131,6 +134,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
 		ctx,
 		string(userSecret.Data["tls.crt"]),
 		string(userSecret.Data["tls.key"]),
+		string(userSecret.Data["ca.crt"]),
 		"",
 	)
 	if err != nil {

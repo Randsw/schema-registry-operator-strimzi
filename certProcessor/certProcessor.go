@@ -587,9 +587,12 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 
 // ConvertPEMToJKS builds a JKS keystore from a PEM-encoded certificate and
 // private key — the shape of a standard kubernetes.io/tls secret (tls.crt /
-// tls.key, as issued by cert-manager). The issuing CA certificate is not
-// required: the PKCS12 bundle is created without -chain so a leaf certificate
-// alone converts fine.
+// tls.key, as issued by cert-manager). The issuing CA certificate (the
+// secret's optional ca.crt key) is optional: when provided it must parse and
+// is embedded into the exported PKCS12 as the chain (-chain -CAfile), so TLS
+// clients validating against that CA succeed even when tls.crt holds only the
+// leaf certificate; when absent the bundle is created without -chain exactly
+// as before, so a leaf certificate alone converts fine.
 //
 // Returns
 // -------
@@ -614,7 +617,7 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 //
 // ctx bounds the openssl and keytool child processes (see CreateTruststore
 // for the deadline semantics, B5).
-func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, keyPEM string, password string) ([]byte, string, error) {
+func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, keyPEM string, caPEM string, password string) ([]byte, string, error) {
 	ctx, cancel := withExecDeadline(ctx)
 	defer cancel()
 
@@ -623,6 +626,19 @@ func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, ke
 		password, err = GeneratePassword(24, true, false)
 		if err != nil {
 			cp.log.Error(err, "Failed to generate cryptographically secure random number")
+			return nil, "", err
+		}
+	}
+
+	// The issuing CA is optional: an empty (or whitespace-only) ca.crt keeps
+	// the chain-free export of a leaf-only secret. A provided ca.crt must
+	// parse before any subprocess runs, so a broken bundle fails with an
+	// actionable error instead of a cryptic openssl failure.
+	hasCA := strings.TrimSpace(caPEM) != ""
+	if hasCA {
+		if _, err := StringToCertificates(caPEM); err != nil {
+			err = fmt.Errorf("invalid issuing CA certificate (ca.crt): %w", err)
+			cp.log.Error(err, "Failed to parse the issuing CA certificate of the user TLS secret")
 			return nil, "", err
 		}
 	}
@@ -645,10 +661,22 @@ func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, ke
 		return nil, "", err
 	}
 
+	// When the user secret carries the issuing CA, write it into the private
+	// temp dir so the PKCS12 export can embed the chain (-chain -CAfile).
+	caCertPath := ""
+	if hasCA {
+		caCertPath, err = writeTempFileIn(tempDir, "ca.crt", caPEM)
+		if err != nil {
+			cp.log.Error(err, "Failed to write temp file", "File", "ca.crt")
+			return nil, "", err
+		}
+	}
+
 	p12Path := filepath.Join(tempDir, "tls.p12")
-	// Generate p12 format bundle. No -chain/-CAfile: the issuing CA is
-	// optional in a kubernetes.io/tls secret (ca.crt).
-	cmd := opensslExportPKCS12Cmd(ctx, certPath, keyPath, "", "confluent-schema-registry", p12Path, password)
+	// Generate p12 format bundle. With a provided issuing CA the chain is
+	// embedded (-chain -CAfile); without one the export stays chain-free,
+	// exactly as before.
+	cmd := opensslExportPKCS12Cmd(ctx, certPath, keyPath, caCertPath, "confluent-schema-registry", p12Path, password)
 	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
 		return nil, "", err
 	}

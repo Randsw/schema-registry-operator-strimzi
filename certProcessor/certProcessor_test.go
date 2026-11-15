@@ -192,7 +192,7 @@ func TestConvertPEMToJKS(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
 
 	t.Run("converts PEM cert and key into a parseable JKS", func(t *testing.T) {
-		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "test1234")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -214,7 +214,7 @@ func TestConvertPEMToJKS(t *testing.T) {
 	})
 
 	t.Run("wrong password cannot open the keystore", func(t *testing.T) {
-		keystore, _, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "test1234")
+		keystore, _, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -224,7 +224,7 @@ func TestConvertPEMToJKS(t *testing.T) {
 	})
 
 	t.Run("empty password is auto-generated", func(t *testing.T) {
-		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -237,8 +237,80 @@ func TestConvertPEMToJKS(t *testing.T) {
 	})
 
 	t.Run("invalid PEM certificate fails", func(t *testing.T) {
-		if _, _, err := cp.ConvertPEMToJKS(context.Background(), "not a valid PEM certificate", uc.UserKeyPEM, "test1234"); err == nil {
+		if _, _, err := cp.ConvertPEMToJKS(context.Background(), "not a valid PEM certificate", uc.UserKeyPEM, "", "test1234"); err == nil {
 			t.Error("expected error when converting invalid PEM data, got nil")
+		}
+	})
+}
+
+// TestConvertPEMToJKS_WithCACert covers the user-provided issuing CA (the
+// optional ca.crt key of a kubernetes.io/tls secret): when present it must be
+// embedded into the exported PKCS12 as the chain so the derived keystore
+// validates for clients trusting that CA even when tls.crt holds only the
+// leaf; when absent the keystore keeps holding only the leaf, exactly as
+// before; and an unparseable ca.crt is rejected with an actionable error.
+func TestConvertPEMToJKS_WithCACert(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+
+	t.Run("includes the issuing CA chain in the keystore", func(t *testing.T) {
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, ca.CACertPEM, "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keystore) == 0 {
+			t.Fatal("empty keystore")
+		}
+		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+		if len(certs) != 2 {
+			t.Fatalf("expected the keystore to hold the leaf and the CA chain, got %d certs: %s", len(certs), certSubjects(certs))
+		}
+		got := certRawSet(certs)
+		if _, ok := got[string(uc.UserCert.Raw)]; !ok {
+			t.Errorf("expected the leaf certificate in the keystore, got %s", certSubjects(certs))
+		}
+		if _, ok := got[string(ca.CACert.Raw)]; !ok {
+			t.Errorf("expected the provided ca.crt certificate in the keystore chain, got %s", certSubjects(certs))
+		}
+	})
+
+	t.Run("without ca.crt the keystore holds only the leaf", func(t *testing.T) {
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, uc.UserCert.Raw) {
+			t.Errorf("expected the keystore to hold only the leaf certificate, got %d certs: %s", len(certs), certSubjects(certs))
+		}
+	})
+
+	t.Run("whitespace-only ca.crt is treated as absent", func(t *testing.T) {
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "  \n\t ", "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, uc.UserCert.Raw) {
+			t.Errorf("expected the keystore to hold only the leaf certificate, got %d certs: %s", len(certs), certSubjects(certs))
+		}
+	})
+
+	t.Run("invalid ca.crt fails with an actionable error", func(t *testing.T) {
+		_, _, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "not a valid PEM certificate", "test1234")
+		if err == nil {
+			t.Fatal("expected an error for an unparseable ca.crt, got nil")
+		}
+		if !strings.Contains(err.Error(), "ca.crt") {
+			t.Errorf("expected the error to name the offending input ca.crt, got: %v", err)
 		}
 	})
 }

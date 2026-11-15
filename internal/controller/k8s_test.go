@@ -3494,7 +3494,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to generate user cert: %v", err)
 		}
-		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "shortpw123")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "shortpw123")
 		if err != nil {
 			t.Fatalf("failed to build keystore: %v", err)
 		}
@@ -3640,7 +3640,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to generate expired user cert: %v", err)
 		}
-		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "expired123")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "expired123")
 		if err != nil {
 			t.Fatalf("failed to build keystore from expired cert: %v", err)
 		}

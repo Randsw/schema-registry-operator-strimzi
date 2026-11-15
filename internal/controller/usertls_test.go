@@ -17,7 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
+	"encoding/pem"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -762,6 +768,154 @@ func realPEMSecretData(t *testing.T) map[string][]byte {
 		"tls.crt": []byte(uc.UserCertPEM),
 		"tls.key": []byte(uc.UserKeyPEM),
 	}
+}
+
+// realPEMSecretDataWithCA is realPEMSecretData plus the issuing CA under the
+// optional ca.crt key — the full shape cert-manager writes for a
+// kubernetes.io/tls secret. It also returns the generated CA so tests can
+// assert on the threaded chain.
+func realPEMSecretDataWithCA(t *testing.T) (map[string][]byte, *testutil.TestCA) {
+	t.Helper()
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+	return map[string][]byte{
+		"tls.crt": []byte(uc.UserCertPEM),
+		"tls.key": []byte(uc.UserKeyPEM),
+		"ca.crt":  []byte(ca.CACertPEM),
+	}, ca
+}
+
+// jksCertificates runs keytool -list -rfc on JKS keystore bytes and returns
+// the certificates the store holds — for the derived keystore that is the
+// private key entry's full certificate chain. The certProcessor test helper
+// cannot be reused because its keytool command builders are unexported.
+func jksCertificates(t *testing.T, keystore []byte, password string) []*x509.Certificate {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "derived.jks")
+	if err := os.WriteFile(path, keystore, 0o600); err != nil {
+		t.Fatalf("failed to write the derived keystore temp file: %v", err)
+	}
+	out, err := exec.Command("keytool", "-list", "-rfc", "-keystore", path, "-storepass", password, "-noprompt").Output()
+	if err != nil {
+		t.Fatalf("keytool -list failed on the derived keystore: %v", err)
+	}
+	var certs []*x509.Certificate
+	rest := out
+	for {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatalf("failed to parse a certificate from the keytool -list output: %v", err)
+		}
+		certs = append(certs, cert)
+	}
+	return certs
+}
+
+// TestBuildDerivedJKSSecretThreadCACert covers the ca.crt threading: the user
+// TLS secret's optional ca.crt must reach the JKS conversion so the derived
+// keystore carries the issuing chain; without ca.crt the derived keystore is
+// unchanged (leaf only); and an unparseable ca.crt fails with an actionable
+// error naming the offending key.
+func TestBuildDerivedJKSSecretThreadCACert(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = "user-tls"
+		return inst
+	}
+	newUserSecret := func(data map[string][]byte) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+			Data:       data,
+		}
+	}
+
+	t.Run("with ca.crt the derived keystore carries the issuing chain", func(t *testing.T) {
+		inst := newInstance()
+		data, ca := realPEMSecretDataWithCA(t)
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		derived, err := reconciler.buildDerivedJKSSecret(context.Background(), inst, newUserSecret(data), logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		certs := jksCertificates(t, derived.Data["tls-keystore.jks"], string(derived.Data["keystore_password"]))
+		if len(certs) != 2 {
+			t.Fatalf("expected the derived keystore to hold the leaf and the CA chain, got %d certs", len(certs))
+		}
+		var leaf *x509.Certificate
+		foundCA := false
+		for _, cert := range certs {
+			if bytes.Equal(cert.Raw, ca.CACert.Raw) {
+				foundCA = true
+			} else {
+				leaf = cert
+			}
+		}
+		if !foundCA {
+			t.Fatal("expected the provided ca.crt certificate to be part of the derived keystore chain")
+		}
+		if leaf == nil {
+			t.Fatal("expected the leaf certificate in the derived keystore")
+		}
+		// The threaded chain must make the leaf validate against the CA the
+		// user provided.
+		roots := x509.NewCertPool()
+		roots.AddCert(ca.CACert)
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+			t.Errorf("expected the leaf certificate to validate against the threaded CA, got: %v", err)
+		}
+	})
+
+	t.Run("without ca.crt the derived keystore holds only the leaf", func(t *testing.T) {
+		inst := newInstance()
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		derived, err := reconciler.buildDerivedJKSSecret(context.Background(), inst, newUserSecret(realPEMSecretData(t)), logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		certs := jksCertificates(t, derived.Data["tls-keystore.jks"], string(derived.Data["keystore_password"]))
+		if len(certs) != 1 {
+			t.Fatalf("expected the derived keystore to hold only the leaf certificate, got %d certs", len(certs))
+		}
+	})
+
+	t.Run("invalid ca.crt fails with an actionable error", func(t *testing.T) {
+		inst := newInstance()
+		data := realPEMSecretData(t)
+		data["ca.crt"] = []byte("not a valid PEM certificate")
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, err := reconciler.buildDerivedJKSSecret(context.Background(), inst, newUserSecret(data), logr.Logger{})
+		if err == nil {
+			t.Fatal("expected an error for an unparseable ca.crt, got nil")
+		}
+		if !strings.Contains(err.Error(), "ca.crt") {
+			t.Errorf("expected the error to name the offending key ca.crt, got: %v", err)
+		}
+	})
 }
 
 // TestValidateUserTLSSecret covers the shape-dispatching validation wrapper:
