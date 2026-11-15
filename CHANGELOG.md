@@ -1,3 +1,13 @@
+## [1.17.8](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.7...1.17.8) (2026-11-15)
+
+### 🧪 Tests
+
+* **controller:** cover finalizer deletion order and legacy finalizer purge ([5d8bb51](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5d8bb514fff9456efc20b4e455ea649b92751c69))
+
+### 🛠 Fixes
+
+* **controller:** check deletion before finalizer migration and purge legacy finalizer on delete ([c14c1c7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c14c1c777f002d1a55001ea7349d7395bffd3449))
+
 ## [1.17.7](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.6...1.17.7) (2026-11-15)
 
 ### 🧪 Tests
