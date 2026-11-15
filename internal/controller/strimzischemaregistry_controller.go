@@ -184,6 +184,25 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	// re-triggers this reconcile forever because the controller watches its
 	// own CR via For().
 	origStatus := instance.Status.DeepCopy()
+	// Handle deletion BEFORE any finalizer migration: the API server rejects
+	// adding a finalizer to an object that already has a deletion timestamp,
+	// so migrating first would make CRs that still carry the legacy finalizer
+	// impossible to delete.
+	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
+	if isApplicationMarkedToBeDeleted {
+		// Remove both the current and the legacy finalizer so CRs created
+		// before the finalizer rename also delete cleanly.
+		if controllerutil.ContainsFinalizer(instance, finalizer) || controllerutil.ContainsFinalizer(instance, legacyFinalizer) {
+			controllerutil.RemoveFinalizer(instance, finalizer)
+			controllerutil.RemoveFinalizer(instance, legacyFinalizer)
+			err := r.Update(ctx, instance)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		r.updateInstanceCountMetric(ctx)
+		return ctrl.Result{}, nil
+	}
 	// Migrate the finalizer from the legacy value to the current value, adding
 	// or removing finalizers in a single update so existing objects do not end
 	// up with a dangling legacy finalizer.
@@ -192,18 +211,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
-	}
-	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
-	if isApplicationMarkedToBeDeleted {
-		if controllerutil.ContainsFinalizer(instance, finalizer) {
-			controllerutil.RemoveFinalizer(instance, finalizer)
-			err := r.Update(ctx, instance)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		r.updateInstanceCountMetric(ctx)
-		return ctrl.Result{}, nil
 	}
 
 	// Validate that ClientAuth is only enabled when SecureHTTP is enabled.
