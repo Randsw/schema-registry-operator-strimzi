@@ -1,3 +1,13 @@
+## [1.17.6](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.5...1.17.6) (2026-11-15)
+
+### 🧪 Tests
+
+* **controller:** assert status updates only occur on genuine status changes ([c4c2578](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c4c257807f05ca9fa67adf07294f594f2f9d3164))
+
+### 🛠 Fixes
+
+* **controller:** compare status copies as same type to avoid redundant updates ([20148b5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/20148b5bcaa0c520aead17cfb44d760733f8ac7b))
+
 ## [1.17.5](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.4...1.17.5) (2026-11-14)
 
 ### 📔 Docs
