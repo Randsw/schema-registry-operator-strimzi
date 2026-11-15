@@ -1056,7 +1056,7 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 // CRs affected by a Secret event. Two matching paths:
 //  1. Label fast-path (unchanged): secrets carrying the strimzi.io/cluster
 //     label are matched against CRs of the same Kafka cluster — the CR-named
-//     user secret and the cluster CA cert secret.
+//     user secret and the cluster CA cert and CA key secrets.
 //  2. Name path: CRs whose spec.tlssecretname equals the secret's name.
 //     User-provided REST API TLS secrets (created with kubectl or cert-manager)
 //     typically carry no Strimzi label, so they are matched by name instead.
@@ -1076,11 +1076,11 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 //     (rather than the bare name suffix) keeps user-provided TLS secrets
 //     that merely end with -tls/-jks (e.g. the documented
 //     schema-registry-tls name) flowing to the matching paths below.
-//  2. Cluster CA cert secrets (<cluster>-cluster-ca-cert) can only match
-//     through the label path: no CR can reference one via spec.tlssecretname
-//     (the user TLS secret validation requires keystore material the CA
-//     secret does not carry), so the namespace-wide name-path List is
-//     skipped for them.
+//  2. Cluster CA secrets (<cluster>-cluster-ca-cert and <cluster>-cluster-ca)
+//     can only match through the label path: no CR can reference one via
+//     spec.tlssecretname (the user TLS secret validation requires keystore
+//     material the CA secrets do not carry), so the namespace-wide name-path
+//     List is skipped for them.
 func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Context, obj client.Object) []reconcile.Request {
 	if owner := metav1.GetControllerOf(obj); owner != nil && owner.Kind == "StrimziSchemaRegistry" {
 		// Operator-owned output secret: Create/Update events never reach this
@@ -1091,8 +1091,9 @@ func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Contex
 			NamespacedName: types.NamespacedName{Name: owner.Name, Namespace: obj.GetNamespace()},
 		}}
 	}
-	// Cluster CA cert secrets never match the name path (see above).
-	isClusterCA := strings.HasSuffix(obj.GetName(), clusterCASuffix)
+	// Cluster CA cert and key secrets never match the name path (see above).
+	isClusterCA := strings.HasSuffix(obj.GetName(), clusterCASuffix) ||
+		strings.HasSuffix(obj.GetName(), clusterCAKeySuffix)
 
 	requests := make([]reconcile.Request, 0, 1)
 	seen := make(map[types.NamespacedName]struct{}, 1)
@@ -1126,6 +1127,15 @@ func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Contex
 				}
 				// Cluster CA cert secret: name ends with -cluster-ca-cert.
 				if strings.HasSuffix(obj.GetName(), clusterCASuffix) {
+					add(item.Name, item.Namespace)
+					continue
+				}
+				// Cluster CA key secret: name ends with -cluster-ca. Strimzi
+				// creates and rotates the CA key and cert secrets
+				// independently — the key secret may appear (or change) after
+				// the cert secret — so the CRs of the cluster must converge
+				// on key-secret events too (CA-key convergence).
+				if strings.HasSuffix(obj.GetName(), clusterCAKeySuffix) {
 					add(item.Name, item.Namespace)
 				}
 			}

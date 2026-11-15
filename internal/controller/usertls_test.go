@@ -599,6 +599,43 @@ func TestMapSecretToRequests(t *testing.T) {
 			t.Errorf("expected exactly 1 List call (the label path) for a CA secret, got %d", listCalls)
 		}
 	})
+
+	t.Run("labeled cluster CA key secret enqueues the CRs of the cluster", func(t *testing.T) {
+		// Strimzi creates and rotates the CA key and cert secrets
+		// independently; a <cluster>-cluster-ca event must converge the CRs
+		// of the cluster (CA-key convergence).
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name:      "kafka-cluster-cluster-ca",
+			Namespace: "default",
+			Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+		}}
+		expectRequests(t, reconciler.mapSecretToRequests(ctx, secret), "sr-name", "sr-labeled")
+	})
+
+	t.Run("cluster CA key secret skips the name-path List", func(t *testing.T) {
+		// Like the CA cert secret, the CA key secret can only match via the
+		// label path, so the namespace-wide spec.tlssecretname List must not
+		// run for it.
+		listCalls := 0
+		r := newCountingReconciler(t, &listCalls, srName, srLabeled)
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name:      "kafka-cluster-cluster-ca",
+			Namespace: "default",
+			Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+		}}
+		expectRequests(t, r.mapSecretToRequests(ctx, secret), "sr-name", "sr-labeled")
+		if listCalls != 1 {
+			t.Errorf("expected exactly 1 List call (the label path) for a CA key secret, got %d", listCalls)
+		}
+	})
+
+	t.Run("unlabeled cluster CA key secret enqueues nothing", func(t *testing.T) {
+		// Without the Strimzi label the CA key secret cannot match the label
+		// path, and the name path is skipped for CA secrets: no CR can
+		// reference a CA secret via spec.tlssecretname.
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: "default"}}
+		expectRequests(t, reconciler.mapSecretToRequests(ctx, secret))
+	})
 }
 
 // TestSecretWatchPredicate covers the Secret watch predicate paired with
@@ -751,6 +788,78 @@ func TestSecretEventPipelineBounded(t *testing.T) {
 	}
 	if requests[0].Name != "sr-name" || requests[0].Namespace != "default" {
 		t.Errorf("expected a request for default/sr-name, got %v", requests[0])
+	}
+}
+
+// TestCASecretEventPipelineBounded guards the CA-key convergence mapping end
+// to end: a <cluster>-cluster-ca secret event (Create/Update/Generic —
+// Strimzi owns that secret, so every event type flows) enqueues the CRs of
+// the cluster exactly once per event, while the operator's own output-secret
+// writes issued during the resulting reconciles stay suppressed by
+// secretWatchPredicate — the pipeline stays bounded (no reconcile storm) when
+// the CA key secret is created after the CA cert secret.
+func TestCASecretEventPipelineBounded(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+
+	sr := newTestInstance()
+	sr.Name = "sr-name"
+	sr.Labels = map[string]string{"strimzi.io/cluster": "kafka-cluster"}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sr).Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+	ctx := context.Background()
+
+	p := secretWatchPredicate()
+	caKeySecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      "kafka-cluster-cluster-ca",
+		Namespace: "default",
+		Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+	}}
+
+	// Every CA key secret event flows — Strimzi owns the secret, the
+	// operator never writes it — and each enqueues the CR exactly once.
+	enqueued := 0
+	if !p.Create(event.CreateEvent{Object: caKeySecret}) {
+		t.Fatal("expected the Create event of a Strimzi CA key secret to pass through")
+	}
+	enqueued += len(r.mapSecretToRequests(ctx, caKeySecret))
+	for i := 0; i < 10; i++ {
+		if !p.Update(event.UpdateEvent{ObjectOld: caKeySecret, ObjectNew: caKeySecret}) {
+			t.Fatal("expected the Update event of a Strimzi CA key secret to pass through")
+		}
+		enqueued += len(r.mapSecretToRequests(ctx, caKeySecret))
+	}
+	if !p.Generic(event.GenericEvent{Object: caKeySecret}) {
+		t.Fatal("expected the Generic event of a Strimzi CA key secret to pass through")
+	}
+	enqueued += len(r.mapSecretToRequests(ctx, caKeySecret))
+	if enqueued != 12 {
+		t.Fatalf("expected 12 enqueued requests (exactly 1 per CA key secret event), got %d", enqueued)
+	}
+
+	// The reconciles triggered by those events write the operator's own
+	// output secrets; their Create/Update events must stay suppressed so the
+	// pipeline converges instead of looping (1.7 loop prevention).
+	for _, name := range []string{"sr-name-jks", "sr-name-tls"} {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					Kind:       "StrimziSchemaRegistry",
+					Name:       "sr-name",
+					UID:        "test-uid",
+					Controller: ptr.To(true),
+				}},
+			},
+		}
+		if p.Create(event.CreateEvent{Object: secret}) {
+			t.Errorf("expected the Create event of the operator-owned %s to be suppressed", name)
+		}
+		if p.Update(event.UpdateEvent{ObjectOld: secret, ObjectNew: secret}) {
+			t.Errorf("expected the Update event of the operator-owned %s to be suppressed", name)
+		}
 	}
 }
 
