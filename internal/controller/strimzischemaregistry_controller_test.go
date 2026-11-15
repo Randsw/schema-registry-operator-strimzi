@@ -4353,4 +4353,131 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(rolled.Spec.Template.Annotations[tlsVersionKey]).To(Equal(renewed.ResourceVersion))
 		})
 	})
+
+	// The deletion-timestamp check must run BEFORE finalizer migration: the
+	// API server rejects adding a finalizer to an object that is already
+	// being deleted, which would leave CRs that still carry the legacy
+	// finalizer stuck in Terminating forever.
+	Context("When deleting CRs that carry legacy or current finalizers", func() {
+		ctx := context.Background()
+		specCounter := 0
+
+		var (
+			namespaceName      string
+			typeNamespacedName types.NamespacedName
+		)
+
+		newFinalizerResource := func(finalizers []string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+			return &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       namespaceName,
+					Namespace:  namespaceName,
+					Labels:     map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+					Finalizers: finalizers,
+				},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP: true, Listener: "TLS",
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
+				},
+			}
+		}
+
+		BeforeEach(func() {
+			// A unique namespace per spec: re-creating a Namespace object that
+			// still carries a resourceVersion from a previous create is
+			// rejected by the API server.
+			specCounter++
+			namespaceName = "test-finalizer-deletion-" + strconv.Itoa(specCounter)
+			typeNamespacedName = types.NamespacedName{Name: namespaceName, Namespace: namespaceName}
+
+			By("Creating the Namespace")
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})).To(Succeed())
+
+			By("Setting the Image ENV VAR")
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+		})
+
+		AfterEach(func() {
+			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			err := k8sClient.Get(ctx, typeNamespacedName, found)
+			if err == nil {
+				found.Finalizers = []string{} // Remove finalizers to allow deletion
+				_ = k8sClient.Update(ctx, found)
+				_ = k8sClient.Delete(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespaceName}})
+			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+		})
+
+		It("should delete a CR that carries only the legacy finalizer", func() {
+			By("Creating a CR that still carries the legacy finalizer")
+			Expect(k8sClient.Create(ctx, newFinalizerResource([]string{legacyFinalizer}))).To(Succeed())
+
+			By("Deleting the CR (the legacy finalizer keeps it in Terminating)")
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, instance)).To(Succeed())
+
+			By("Reconciling: the legacy finalizer must be removed without adding the current one")
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred(), "reconcile must not add a finalizer to a deleting object")
+
+			By("Checking that the CR is fully deleted")
+			Eventually(func() error {
+				updatedInstance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				return k8sClient.Get(ctx, typeNamespacedName, updatedInstance)
+			}, time.Minute, time.Second).ShouldNot(Succeed(), "CR with only the legacy finalizer should be deleted")
+		})
+
+		It("should remove the current finalizer and complete deletion", func() {
+			By("Creating a CR that carries the current finalizer")
+			Expect(k8sClient.Create(ctx, newFinalizerResource([]string{finalizer}))).To(Succeed())
+
+			By("Deleting the CR")
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, instance)).To(Succeed())
+
+			By("Reconciling to trigger finalizer removal")
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking that the CR is fully deleted")
+			Eventually(func() error {
+				updatedInstance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				return k8sClient.Get(ctx, typeNamespacedName, updatedInstance)
+			}, time.Minute, time.Second).ShouldNot(Succeed(), "CR with the current finalizer should be deleted")
+		})
+
+		It("should migrate the legacy finalizer to the current one on a live CR", func() {
+			By("Creating a live CR that carries only the legacy finalizer")
+			Expect(k8sClient.Create(ctx, newFinalizerResource([]string{legacyFinalizer}))).To(Succeed())
+
+			By("Reconciling (later steps may fail on missing dependencies; migration runs first)")
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			By("Checking that the legacy finalizer was swapped for the current one")
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			Expect(instance.Finalizers).To(ContainElement(finalizer), "current finalizer should be added")
+			Expect(instance.Finalizers).NotTo(ContainElement(legacyFinalizer), "legacy finalizer should be removed")
+		})
+
+		It("should not churn finalizers on a live CR that already has the current one", func() {
+			By("Creating a live CR that carries the current finalizer")
+			Expect(k8sClient.Create(ctx, newFinalizerResource([]string{finalizer}))).To(Succeed())
+
+			By("Reconciling")
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			By("Checking that the finalizer list is unchanged")
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			Expect(instance.Finalizers).To(Equal([]string{finalizer}), "no finalizer churn expected")
+		})
+	})
 })
