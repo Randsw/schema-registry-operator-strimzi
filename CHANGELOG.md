@@ -1,3 +1,14 @@
+## [1.17.9](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.8...1.17.9) (2026-11-15)
+
+### 🧪 Tests
+
+* **controller:** cover recreation of deleted Service, NetworkPolicy and JKS secret ([8a5124b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8a5124b1cfbfd1b67681a6cf50c0dab31c04c703))
+* **controller:** map secret deletions to the owning CR and cover the watch predicate ([1a5f280](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1a5f280b0adc3085b24d9c29fd18dae0a5307f4e))
+
+### 🛠 Fixes
+
+* **controller:** watch owned Service, NetworkPolicy and secret deletions ([4556caf](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4556caf8e3c4e808bc923d8dee21418f35a9a7ce))
+
 ## [1.17.8](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.7...1.17.8) (2026-11-15)
 
 ### 🧪 Tests
