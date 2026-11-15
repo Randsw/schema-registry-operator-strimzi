@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
@@ -3177,6 +3178,204 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 	})
 
+	// Owned-watch coverage for the managed Service: manual deletion must be
+	// recoverable by a subsequent reconciliation, which recreates the Service
+	// with the passthrough metadata. The spec is self-contained (own
+	// namespace, DeferCleanup) like the other single-spec contexts, because
+	// the shared BeforeEach fixtures cannot re-create their namespace object
+	// for a second spec.
+	Context("When the managed Service is deleted", func() {
+		const SchemaRegistryName = "test-service-delete"
+
+		ctx := context.Background()
+
+		It("should recreate the Service with the passthrough metadata on the next reconcile", func() {
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+			typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+			DeferCleanup(func() {
+				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+					if len(found.Finalizers) > 0 {
+						found.Finalizers = []string{}
+						_ = k8sClient.Update(ctx, found)
+					}
+					_ = k8sClient.Delete(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, namespace)
+			})
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = &kafka.KafkaStatus{
+				ClusterId: "service-delete-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap." + SchemaRegistryName + ".svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+			DeferCleanup(func() { _ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE") })
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					Service: &strimziregistryoperatorv1alpha1.Service{
+						Annotations: map[string]string{"prometheus.io/scrape": "true"},
+						Labels:      map[string]string{"monitoring.example.com/team": "schemas"},
+					},
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("Reconciling until the service exists")
+			for i := 0; i < 3; i++ {
+				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, &corev1.Service{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			By("Deleting the managed Service")
+			Expect(k8sClient.Delete(ctx, &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName},
+			})).To(Succeed())
+			Eventually(func() bool {
+				return errors.IsNotFound(k8sClient.Get(ctx, typeNamespacedName, &corev1.Service{}))
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Reconciling and expecting the Service to be recreated with the passthrough metadata")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, &corev1.Service{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			recreated := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, recreated)).To(Succeed())
+			Expect(recreated.Annotations["prometheus.io/scrape"]).To(Equal("true"))
+			Expect(recreated.Labels["monitoring.example.com/team"]).To(Equal("schemas"))
+		})
+	})
+
+	// Owned-watch coverage for the managed NetworkPolicy: manual deletion of
+	// the policy created for spec.networkpolicy.enabled must be recoverable
+	// by a subsequent reconciliation. Self-contained (own namespace,
+	// DeferCleanup) for the same reason as the Service-deletion context.
+	Context("When the managed NetworkPolicy is deleted", func() {
+		const SchemaRegistryName = "test-networkpolicy-delete"
+
+		ctx := context.Background()
+
+		It("should recreate the NetworkPolicy on the next reconcile", func() {
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+			typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+			npName := types.NamespacedName{Name: SchemaRegistryName + "-network-policy", Namespace: SchemaRegistryName}
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+			DeferCleanup(func() {
+				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+					if len(found.Finalizers) > 0 {
+						found.Finalizers = []string{}
+						_ = k8sClient.Update(ctx, found)
+					}
+					_ = k8sClient.Delete(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, namespace)
+			})
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = &kafka.KafkaStatus{
+				ClusterId: "networkpolicy-delete-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap." + SchemaRegistryName + ".svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+			DeferCleanup(func() { _ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE") })
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					NetworkPolicy:      &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true},
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("Reconciling until the NetworkPolicy exists")
+			for i := 0; i < 3; i++ {
+				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, npName, &networkingv1.NetworkPolicy{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			By("Deleting the managed NetworkPolicy")
+			Expect(k8sClient.Delete(ctx, &networkingv1.NetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: npName.Name, Namespace: npName.Namespace},
+			})).To(Succeed())
+			Eventually(func() bool {
+				return errors.IsNotFound(k8sClient.Get(ctx, npName, &networkingv1.NetworkPolicy{}))
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Reconciling and expecting the NetworkPolicy to be recreated")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() error {
+				return k8sClient.Get(ctx, npName, &networkingv1.NetworkPolicy{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			recreated := &networkingv1.NetworkPolicy{}
+			Expect(k8sClient.Get(ctx, npName, recreated)).To(Succeed())
+			Expect(recreated.Spec.Ingress).To(HaveLen(1))
+			Expect(recreated.Spec.Egress).To(HaveLen(3))
+		})
+	})
+
 	// Phase 3: REST endpoint mutual TLS.
 	Context("When reconciling with clientauth enabled", func() {
 		const SchemaRegistryName = "test-clientauth"
@@ -3292,6 +3491,131 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			}, time.Minute*2, time.Second).Should(Succeed())
 			Expect(jks.Data).To(HaveKey("truststore.jks"))
 			Expect(jks.Data).To(HaveKey("truststore_password"))
+		})
+	})
+
+	// Owned-watch coverage for the operator-managed JKS secret: manual
+	// deletion of the <name>-jks truststore secret must be observed and the
+	// secret regenerated by a subsequent reconciliation, while the secret's
+	// own Create/Update events stay suppressed (no reconcile loop).
+	// Self-contained (own namespace, DeferCleanup) for the same reason as the
+	// Service-deletion context.
+	Context("When the operator-managed JKS secret is deleted", func() {
+		const SchemaRegistryName = "test-jks-secret-delete"
+
+		ctx := context.Background()
+
+		It("should regenerate the secret on the next reconcile without re-enqueuing its own events", func() {
+			var err error
+			clusterCA, err := testutil.GenerateClusterCACert("STIMZI-SR-JKS-DELETE")
+			Expect(err).NotTo(HaveOccurred())
+
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+			typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+			jksName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+			DeferCleanup(func() {
+				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				if getErr := k8sClient.Get(ctx, typeNamespacedName, found); getErr == nil {
+					if len(found.Finalizers) > 0 {
+						found.Finalizers = []string{}
+						_ = k8sClient.Update(ctx, found)
+					}
+					_ = k8sClient.Delete(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, namespace)
+			})
+
+			cluster := &kafka.Kafka{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: SchemaRegistryName},
+				Spec: &kafka.KafkaSpec{
+					Kafka: &kafka.KafkaClusterSpec{
+						Listeners: []kafka.GenericKafkaListener{
+							{Name: "plain", Port: 9092, Tls: false, Type: kafka.INTERNAL_KAFKALISTENERTYPE},
+						},
+						Version: "4.1.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			updateCluster := &kafka.Kafka{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updateCluster)).To(Succeed())
+			updateCluster.Status = &kafka.KafkaStatus{
+				ClusterId: "jks-delete-cluster",
+				Listeners: []kafka.ListenerStatus{
+					{BootstrapServers: "kafka-cluster-kafka-bootstrap." + SchemaRegistryName + ".svc:9092", Name: "plain"},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: SchemaRegistryName},
+				Data:       map[string][]byte{"ca.key": []byte(clusterCA.CAKeyPEM)},
+			})).To(Succeed())
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca-cert", Namespace: SchemaRegistryName},
+				Data:       map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)},
+			})).To(Succeed())
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+			DeferCleanup(func() { _ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE") })
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         true,
+					ClientAuth:         true,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for the operator-managed JKS secret")
+			Eventually(func() error {
+				return k8sClient.Get(ctx, jksName, &corev1.Secret{})
+			}, time.Minute*2, time.Second).Should(Succeed())
+
+			By("Deleting the JKS secret")
+			Expect(k8sClient.Delete(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: jksName.Name, Namespace: jksName.Namespace},
+			})).To(Succeed())
+			Eventually(func() bool {
+				return errors.IsNotFound(k8sClient.Get(ctx, jksName, &corev1.Secret{}))
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Reconciling and expecting the secret to be regenerated")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() error {
+				return k8sClient.Get(ctx, jksName, &corev1.Secret{})
+			}, time.Minute*2, time.Second).Should(Succeed())
+
+			recreated := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, jksName, recreated)).To(Succeed())
+			Expect(recreated.Data).To(HaveKey("truststore.jks"))
+			Expect(recreated.Data).To(HaveKey("truststore_password"))
+
+			By("Verifying the regenerated secret is controller-owned and its own Create/Update events stay suppressed")
+			owner := metav1.GetControllerOf(recreated)
+			Expect(owner).NotTo(BeNil())
+			Expect(owner.Kind).To(Equal("StrimziSchemaRegistry"))
+			p := secretWatchPredicate()
+			Expect(p.Create(event.CreateEvent{Object: recreated})).To(BeFalse())
+			Expect(p.Update(event.UpdateEvent{ObjectOld: recreated, ObjectNew: recreated})).To(BeFalse())
+			Expect(p.Delete(event.DeleteEvent{Object: recreated})).To(BeTrue())
+
+			By("Verifying a Delete event maps back to the owning CR")
+			requests := controllerReconciler.mapSecretToRequests(ctx, recreated)
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].Name).To(Equal(SchemaRegistryName))
+			Expect(requests[0].Namespace).To(Equal(SchemaRegistryName))
 		})
 	})
 
