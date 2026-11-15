@@ -3,7 +3,9 @@
 package certprocessor
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -451,6 +453,13 @@ func (cp *CertProcessor) CreateKeystore(ctx context.Context, userCACert string, 
 // server certificate (key + CSR signed by the cluster CA) for the Schema
 // Registry REST API TLS endpoint.
 //
+// The cluster CA secret may hold a multi-PEM bundle (Strimzi appends the new
+// CA to the old one during a zero-downtime CA rotation). The certificate
+// whose public key matches the provided CA private key (ca.key) is used for
+// signing, so the issued server certificate always has an issuer clients
+// trust. An empty or unparseable ca.crt/ca.key, or a bundle in which no
+// certificate matches the key, is rejected with an actionable error.
+//
 // ctx bounds the openssl and keytool child processes (see CreateTruststore
 // for the deadline semantics, B5).
 func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, caKey string, password string, cn string) ([]byte, string, error) {
@@ -460,6 +469,19 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 	// Validate CN is not empty
 	if cn == "" {
 		return nil, "", fmt.Errorf("common name (CN) cannot be empty")
+	}
+	// Empty CA material would otherwise surface as a cryptic openssl/keytool
+	// failure or an invalid signed certificate; reject it up front with an
+	// actionable error naming the offending input.
+	if strings.TrimSpace(caCert) == "" {
+		err := errors.New("cluster CA certificate (ca.crt) is empty; the <cluster>-cluster-ca-cert secret must contain a CA certificate to sign the REST API certificate")
+		cp.log.Error(err, "Empty cluster CA certificate")
+		return nil, "", err
+	}
+	if strings.TrimSpace(caKey) == "" {
+		err := errors.New("cluster CA private key (ca.key) is empty; the <cluster>-cluster-ca-key secret must contain the CA private key to sign the REST API certificate")
+		cp.log.Error(err, "Empty cluster CA private key")
+		return nil, "", err
 	}
 	// Create key, create clr. Sign clr with CACert. Create keystore.
 	if password == "" {
@@ -491,14 +513,25 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 		cp.log.Error(err, "Failed to generate CSR")
 		return nil, "", err
 	}
-	ca, err := StringToCertificate(caCert)
+	caCerts, err := StringToCertificates(caCert)
 	if err != nil {
-		cp.log.Error(err, "Failed to convert from string to x509 certificate")
+		err = fmt.Errorf("invalid cluster CA certificate (ca.crt): %w", err)
+		cp.log.Error(err, "Failed to parse cluster CA certificate bundle")
 		return nil, "", err
 	}
 	key, err := StringToPrivateKey(caKey)
 	if err != nil {
+		err = fmt.Errorf("invalid cluster CA private key (ca.key): %w", err)
 		cp.log.Error(err, "Failed to convert from string to x509 private key")
+		return nil, "", err
+	}
+	// During a Strimzi CA rotation ca.crt holds the old and the new CA
+	// certificate and the active one is not necessarily first; sign with the
+	// certificate whose public key matches the provided ca.key, otherwise the
+	// issued server certificate would have an issuer clients do not trust.
+	ca, err := selectCACertForKey(caCerts, key)
+	if err != nil {
+		cp.log.Error(err, "Failed to select the CA certificate matching the CA private key")
 		return nil, "", err
 	}
 	// Sign the CSR with the CA to create a server certificate
@@ -817,6 +850,37 @@ func StringToPrivateKey(privateKeyString string) (*rsa.PrivateKey, error) {
 	default:
 		return nil, errors.New("key type is not RSA private key")
 	}
+}
+
+// publicKeyMatches reports whether the two public keys are the same key,
+// compared via their PKIX DER encodings so every public key algorithm found
+// in a CA certificate (RSA today, ECDSA once the pipeline supports it) is
+// handled uniformly.
+func publicKeyMatches(a, b crypto.PublicKey) bool {
+	aDER, err := x509.MarshalPKIXPublicKey(a)
+	if err != nil {
+		return false
+	}
+	bDER, err := x509.MarshalPKIXPublicKey(b)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(aDER, bDER)
+}
+
+// selectCACertForKey returns the certificate from the ca.crt bundle whose
+// public key matches the provided ca.key private key. During a Strimzi CA
+// rotation the bundle holds the old and the new CA certificate and the one
+// matching the active private key is not necessarily first; signing with a
+// non-matching certificate would issue server certificates whose issuer
+// clients do not trust.
+func selectCACertForKey(caCerts []*x509.Certificate, caKey *rsa.PrivateKey) (*x509.Certificate, error) {
+	for _, cert := range caCerts {
+		if publicKeyMatches(cert.PublicKey, caKey.Public()) {
+			return cert, nil
+		}
+	}
+	return nil, fmt.Errorf("no certificate in the CA bundle (ca.crt) matches the provided CA private key (ca.key); ensure ca.crt and ca.key come from the same CA generation so the REST API certificate is signed by a CA clients trust")
 }
 
 // saveFiles writes the server private key and certificate into dir using

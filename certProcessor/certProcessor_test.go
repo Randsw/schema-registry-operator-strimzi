@@ -759,3 +759,137 @@ func TestCreateTruststore_EmptyCert(t *testing.T) {
 		})
 	}
 }
+
+// TestGenerateTLSforHTTP_SelectsCAMatchingKey covers the CA-selection fix:
+// when ca.crt is a multi-PEM bundle whose FIRST certificate does not match
+// the provided ca.key but a later one does, the matching CA must be used for
+// signing. Before the fix the first certificate was used blindly, producing
+// server certificates with an issuer clients do not trust.
+func TestGenerateTLSforHTTP_SelectsCAMatchingKey(t *testing.T) {
+	caOld, err := testutil.GenerateClusterCACert("rotation-old-ca")
+	if err != nil {
+		t.Fatalf("failed to generate old CA: %v", err)
+	}
+	caNew, err := testutil.GenerateClusterCACert("rotation-new-ca")
+	if err != nil {
+		t.Fatalf("failed to generate new CA: %v", err)
+	}
+
+	// The first certificate in the bundle belongs to the old CA, but the
+	// provided private key is the new (active) CA's key.
+	bundle := caOld.CACertPEM + caNew.CACertPEM
+
+	cp := NewCertProcessor(logr.Logger{})
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), bundle, caNew.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(keystore) == 0 {
+		t.Fatal("empty keystore")
+	}
+
+	_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+	var leaf *x509.Certificate
+	for _, cert := range certs {
+		// The REST API server certificate carries the CSR's subject CN; the
+		// CA certificates in the keystore have the cluster CA CNs.
+		if cert.Subject.CommonName == "confluent-schema-registry" {
+			leaf = cert
+			break
+		}
+	}
+	if leaf == nil {
+		t.Fatalf("server certificate not found in the keystore; entries: %s", certSubjects(certs))
+	}
+
+	// The issued certificate must be signed by the CA whose key was provided
+	// (the second bundle entry), not by the first bundle entry.
+	if err := leaf.CheckSignatureFrom(caNew.CACert); err != nil {
+		t.Errorf("expected the server certificate to be signed by the CA matching ca.key, but signature verification against it failed: %v", err)
+	}
+	if err := leaf.CheckSignatureFrom(caOld.CACert); err == nil {
+		t.Error("expected the server certificate NOT to be signed by the first (non-matching) bundle certificate, but it verifies against it")
+	}
+	if leaf.Issuer.CommonName != "rotation-new-ca" {
+		t.Errorf("expected the issuer to be the matching CA %q, got %q", "rotation-new-ca", leaf.Issuer.CommonName)
+	}
+	// The full chain must validate against the matching CA as root.
+	roots := x509.NewCertPool()
+	roots.AddCert(caNew.CACert)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+		t.Errorf("expected the server certificate chain to validate against the matching CA, got: %v", err)
+	}
+}
+
+// TestGenerateTLSforHTTP_NoCertMatchesKey verifies the actionable error when
+// no certificate of the ca.crt bundle matches the provided ca.key: the
+// operator must not silently issue server certificates with an issuer
+// clients do not trust.
+func TestGenerateTLSforHTTP_NoCertMatchesKey(t *testing.T) {
+	caOld, err := testutil.GenerateClusterCACert("rotation-old-ca")
+	if err != nil {
+		t.Fatalf("failed to generate old CA: %v", err)
+	}
+	caNew, err := testutil.GenerateClusterCACert("rotation-new-ca")
+	if err != nil {
+		t.Fatalf("failed to generate new CA: %v", err)
+	}
+	caOther, err := testutil.GenerateClusterCACert("unrelated-ca")
+	if err != nil {
+		t.Fatalf("failed to generate unrelated CA: %v", err)
+	}
+
+	bundle := caOld.CACertPEM + caNew.CACertPEM
+
+	cp := NewCertProcessor(logr.Logger{})
+	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), bundle, caOther.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	if err == nil {
+		t.Fatal("expected an error when no bundle certificate matches ca.key, got nil")
+	}
+	if len(keystore) != 0 {
+		t.Error("expected no keystore when no bundle certificate matches ca.key")
+	}
+	if !strings.Contains(err.Error(), "ca.crt") || !strings.Contains(err.Error(), "ca.key") {
+		t.Errorf("expected an actionable error naming ca.crt and ca.key, got: %v", err)
+	}
+}
+
+// TestGenerateTLSforHTTP_EmptyInputs verifies that empty, whitespace-only or
+// unparseable CA material is rejected with an actionable error naming the
+// offending input (ca.crt or ca.key) instead of a cryptic tool failure.
+func TestGenerateTLSforHTTP_EmptyInputs(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	tests := []struct {
+		name            string
+		caCert          string
+		caKey           string
+		wantErrContains string
+	}{
+		{"empty ca.crt", "", ca.CAKeyPEM, "ca.crt"},
+		{"whitespace-only ca.crt", "  \n\t ", ca.CAKeyPEM, "ca.crt"},
+		{"unparseable ca.crt", "not a valid PEM certificate", ca.CAKeyPEM, "ca.crt"},
+		{"empty ca.key", ca.CACertPEM, "", "ca.key"},
+		{"whitespace-only ca.key", ca.CACertPEM, " \n\t ", "ca.key"},
+		{"unparseable ca.key", ca.CACertPEM, "not a valid PEM private key", "ca.key"},
+		{"both empty", "", "", "ca.crt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), tt.caCert, tt.caKey, "test1234", "confluent-schema-registry.kafka")
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if len(keystore) != 0 {
+				t.Error("expected no keystore on invalid input")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Errorf("expected the error to name %s, got: %v", tt.wantErrContains, err)
+			}
+		})
+	}
+}
