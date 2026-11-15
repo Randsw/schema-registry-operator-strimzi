@@ -102,10 +102,12 @@ cluster_roles:
     rules:
       # Operator events (Recorder.Eventf) are created in the CR's namespace,
       # which in the default cluster-scoped mode can be any namespace: the
-      # manager role must grant events create/patch cluster-wide (mirrors
-      # config/rbac/role.yaml).
+      # manager role must grant events create/patch cluster-wide on both the
+      # core and the events.k8s.io API groups (mirrors config/rbac/role.yaml,
+      # where controller-gen emits the two groups as a single rule).
       - apiGroups:
         - ""
+        - events.k8s.io
         resources:
         - events
         verbs:
