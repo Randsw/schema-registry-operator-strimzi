@@ -28,13 +28,16 @@ import (
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/client-go/kubernetes"
 	eventsfake "k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
@@ -3495,6 +3498,98 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			// The status.status field must be populated alongside the Ready
 			// condition so the CRD printcolumn is not permanently empty.
 			Expect(instance.Status.Status).To(Equal("InvalidSpec"))
+		})
+	})
+
+	// Phase 3 (events): the recorded validation events must be persisted by
+	// the API server with a non-empty action. The production recorder
+	// (mgr.GetEventRecorder) records events.k8s.io/v1 Events, which the API
+	// server rejects with a 422 when the action is empty, so a persisted
+	// event proves both the RBAC-visible create path and the action field.
+	// The spec is self-contained (own namespace, DeferCleanup) like the
+	// multi-spec contexts above, because the shared BeforeEach fixtures
+	// cannot re-create their namespace object for a second spec.
+	Context("When recording validation events for an invalid clientauth spec", func() {
+		const SchemaRegistryName = "test-clientauth-events"
+
+		ctx := context.Background()
+
+		It("should persist the validation events with a non-empty action on the API server", func() {
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
+			typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+			DeferCleanup(func() {
+				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
+					if len(found.Finalizers) > 0 {
+						found.Finalizers = []string{}
+						_ = k8sClient.Update(ctx, found)
+					}
+					_ = k8sClient.Delete(ctx, found)
+				}
+				_ = k8sClient.Delete(ctx, namespace)
+			})
+
+			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+			DeferCleanup(func() { _ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE") })
+
+			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
+				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					SecureHTTP:         false,
+					ClientAuth:         true,
+					Listener:           "plain",
+					CompatibilityLevel: "forward",
+					SecurityProtocol:   "PLAINTEXT",
+					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			// Wire a real recorder to the test API server the same way the
+			// manager does (the client-go FakeRecorder used elsewhere
+			// flattens events and drops the action).
+			cs, err := kubernetes.NewForConfig(cfg)
+			Expect(err).NotTo(HaveOccurred())
+			broadcaster := eventsfake.NewBroadcaster(&eventsfake.EventSinkImpl{Interface: cs.EventsV1()})
+			sinkCtx, sinkCancel := context.WithCancel(context.Background())
+			defer sinkCancel()
+			Expect(broadcaster.StartRecordingToSinkWithContext(sinkCtx)).To(Succeed())
+			rec := broadcaster.NewRecorder(k8sClient.Scheme(), "test-events-controller")
+			// The concrete recorder implements both Eventf and
+			// AnnotatedEventf, but its static EventRecorderLogger interface
+			// does not declare AnnotatedEventf; assert and combine the two
+			// interfaces the same way controller-runtime's lazyRecorder does.
+			annotated, ok := rec.(eventsfake.AnnotatedEventRecorder)
+			Expect(ok).To(BeTrue())
+			recorder := struct {
+				eventsfake.EventRecorderLogger
+				eventsfake.AnnotatedEventRecorder
+			}{rec, annotated}
+
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: recorder}
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Both validation events must exist with the non-empty Validate
+			// action; Eventually absorbs the broadcaster's asynchronous
+			// write to the sink.
+			actionFor := func(reason string) func() string {
+				return func() string {
+					list := &eventsv1.EventList{}
+					if err := k8sClient.List(ctx, list, client.InNamespace(SchemaRegistryName)); err != nil {
+						return ""
+					}
+					for _, ev := range list.Items {
+						if ev.Reason == reason {
+							return ev.Action
+						}
+					}
+					return ""
+				}
+			}
+			Eventually(actionFor("ClientAuthRequiresSecureHTTP"), time.Minute, time.Second).Should(Equal("Validate"))
+			Eventually(actionFor("ReconciliationSkipped"), time.Minute, time.Second).Should(Equal("Validate"))
 		})
 	})
 

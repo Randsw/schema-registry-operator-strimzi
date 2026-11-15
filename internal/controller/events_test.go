@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-logr/logr"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -327,5 +328,181 @@ func TestRecordedEventsCarryNonEmptyAction(t *testing.T) {
 				t.Errorf("expected a ConfigKeyOverridden event naming %q, events: %v", key, got)
 			}
 		}
+	})
+
+	t.Run("TLSCertificateRenewed", func(t *testing.T) {
+		scheme := newEventActionTestScheme(t)
+		recorder := &capturingEventRecorder{}
+
+		ca, err := testutil.GenerateClusterCACert("test-ca-rotation")
+		if err != nil {
+			t.Fatalf("failed to generate cluster CA: %v", err)
+		}
+		cluster := "test-cluster"
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = ""
+		inst.Spec.SecurityProtocol = "PLAINTEXT"
+		inst.Spec.Listener = "plaintext"
+		inst.Labels = map[string]string{strimziClusterLabel: cluster}
+
+		caCertSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            cluster + clusterCASuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "1000",
+			},
+			Data: map[string][]byte{"ca.crt": []byte(ca.CACertPEM)},
+		}
+		caKeySecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            cluster + clusterCAKeySuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "1001",
+			},
+			Data: map[string][]byte{"ca.key": []byte(ca.CAKeyPEM)},
+		}
+		deployment := &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: inst.Name + deploySuffix, Namespace: inst.Namespace},
+			Spec: apps.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
+				},
+			},
+		}
+		// A -tls secret recorded against an older CA version forces the
+		// CA-change renewal.
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            inst.Name + tlsSecretSuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "2000",
+				Annotations:     map[string]string{CAVersionKey: "999"},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"tls-keystore.jks":  []byte("stale-keystore-bytes"),
+				"keystore_password": []byte("stale"),
+				"key_password":      []byte("stale"),
+			},
+		}
+
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, caCertSecret, caKeySecret, deployment, tlsSecret).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}
+
+		if _, _, err := r.handleTLSCertExpiry(ctx, inst, logger, cluster); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertEventAction(t, recorder.drain(), corev1.EventTypeNormal, "TLSCertificateRenewed", "RenewCertificate")
+	})
+
+	t.Run("TLSSecretRecreated", func(t *testing.T) {
+		scheme := newEventActionTestScheme(t)
+		recorder := &capturingEventRecorder{}
+
+		ca, err := testutil.GenerateClusterCACert("test-ca-rotation")
+		if err != nil {
+			t.Fatalf("failed to generate cluster CA: %v", err)
+		}
+		cluster := "test-cluster"
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = ""
+		inst.Spec.SecurityProtocol = "PLAINTEXT"
+		inst.Spec.Listener = "plaintext"
+		inst.Labels = map[string]string{strimziClusterLabel: cluster}
+
+		caCertSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            cluster + clusterCASuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "1000",
+			},
+			Data: map[string][]byte{"ca.crt": []byte(ca.CACertPEM)},
+		}
+		caKeySecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            cluster + clusterCAKeySuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "1001",
+			},
+			Data: map[string][]byte{"ca.key": []byte(ca.CAKeyPEM)},
+		}
+		// The Deployment exists but the operator-managed -tls secret was
+		// deleted: recreateMissingTLSSecret must rebuild it and announce the
+		// recreation.
+		deployment := &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: inst.Name + deploySuffix, Namespace: inst.Namespace},
+			Spec: apps.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
+				},
+			},
+		}
+
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, caCertSecret, caKeySecret, deployment).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}
+
+		if _, err := r.recreateMissingTLSSecret(ctx, inst, logger, cluster); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertEventAction(t, recorder.drain(), corev1.EventTypeNormal, "TLSSecretRecreated", "RecreateSecret")
+	})
+
+	t.Run("DeploymentRecreated", func(t *testing.T) {
+		scheme := newEventActionTestScheme(t)
+		recorder := &capturingEventRecorder{}
+		inst := newTestInstance()
+		inst.Spec.SecurityProtocol = "PLAINTEXT"
+		inst.Spec.Listener = "tls"
+		inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+		}
+
+		// A pre-fix Deployment whose selector contains mutable labels: the
+		// selector is immutable, so updateExistingDeployment must delete and
+		// re-create it, emitting the DeploymentRecreated event.
+		legacySelector := map[string]string{
+			"app":                          inst.Name,
+			"strimzi-schema-registry":      inst.Name,
+			"app.kubernetes.io/instance":   inst.Name,
+			"app.kubernetes.io/name":       "strimzischemaregistry",
+			"app.kubernetes.io/managed-by": "strimzi-registry-operator",
+			"app.kubernetes.io/part-of":    inst.Name,
+			"app.kubernetes.io/version":    "7.6.1",
+			"strimzi.io/cluster":           "kafka-cluster",
+		}
+		dep := &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": "stale-hash"},
+			},
+			Spec: apps.DeploymentSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: legacySelector},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: legacySelector},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.1"}}},
+				},
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), dep).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}
+
+		updated, _, err := r.updateExistingDeployment(inst, ctx, logger, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if updated == nil || updated.Spec.Selector == nil {
+			t.Fatal("expected the re-created Deployment to be returned")
+		}
+		assertEventAction(t, recorder.drain(), corev1.EventTypeNormal, "DeploymentRecreated", "RecreateDeployment")
 	})
 }
