@@ -301,7 +301,11 @@ func renderedSummary(docs []map[string]any) string {
 }
 
 // grantsEvents reports whether one of the decoded RBAC rules grants create
-// and patch on core ("") events.
+// and patch on events for BOTH the core ("") and the events.k8s.io API
+// groups. The operator records events.k8s.io/v1 Events (mgr.GetEventRecorder)
+// alongside core events, and the API server rejects the new-style Events with
+// an empty action, so both groups must be granted exactly as the generated
+// config/rbac/role.yaml does (controller-gen emits them as a single rule).
 func grantsEvents(rules []any) bool {
 	for _, r := range rules {
 		rule, ok := r.(map[string]any)
@@ -311,7 +315,7 @@ func grantsEvents(rules []any) bool {
 		groups, _ := rule["apiGroups"].([]any)
 		resources, _ := rule["resources"].([]any)
 		verbs, _ := rule["verbs"].([]any)
-		if !anyListContains(groups, "") || !anyListContains(resources, "events") {
+		if !anyListContains(groups, "") || !anyListContains(groups, "events.k8s.io") || !anyListContains(resources, "events") {
 			continue
 		}
 		if anyListContains(verbs, "create") && anyListContains(verbs, "patch") {
@@ -333,11 +337,16 @@ func anyListContains(list []any, want string) bool {
 }
 
 // TestValuesManagerRoleGrantsEvents guards the events RBAC contract at the
-// values level: the manager role must grant create/patch on core events.
-// The operator emits events (Recorder.Eventf) in the watched CR's
-// namespace, which in the default cluster-scoped mode can be any namespace;
-// without this rule every event outside the release namespace fails with
-// RBAC Forbidden and the operator's signaling is silently lost.
+// values level: the manager role must grant create/patch on events for both
+// the core and the events.k8s.io API groups. The operator emits events
+// (Recorder.Eventf) in the watched CR's namespace, which in the default
+// cluster-scoped mode can be any namespace; without the core rule every
+// event outside the release namespace fails with RBAC Forbidden, and without
+// the events.k8s.io rule the events.k8s.io/v1 Events the manager recorder
+// emits fail the same way — the operator's signaling is silently lost. The
+// rule must mirror config/rbac/role.yaml, where controller-gen grants both
+// groups in a single rule (TestChartManagerRoleMatchesGeneratedRBAC enforces
+// that parity for the rendered chart).
 func TestValuesManagerRoleGrantsEvents(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
 	if err != nil {
@@ -382,19 +391,20 @@ func TestValuesManagerRoleGrantsEvents(t *testing.T) {
 
 	for _, rule := range manager.Rules {
 		if slices.Contains(rule.APIGroups, "") &&
+			slices.Contains(rule.APIGroups, "events.k8s.io") &&
 			slices.Contains(rule.Resources, "events") &&
 			slices.Contains(rule.Verbs, "create") &&
 			slices.Contains(rule.Verbs, "patch") {
 			return // contract satisfied
 		}
 	}
-	t.Errorf("values.yaml manager-role rules grant no create/patch on core events; rules: %+v", manager.Rules)
+	t.Errorf("values.yaml manager-role rules grant no create/patch on events for both the core and events.k8s.io groups; rules: %+v", manager.Rules)
 }
 
-// TestRenderedManagerRoleGrantsEvents verifies the events rule survives
-// rendering in BOTH renderings of templates/clusterrole.yaml: the default
-// cluster-scoped ClusterRole and the namespaced Role rendered when
-// rbac.namespaceScoped=true.
+// TestRenderedManagerRoleGrantsEvents verifies the events rule (core and
+// events.k8s.io groups, create/patch) survives rendering in BOTH renderings
+// of templates/clusterrole.yaml: the default cluster-scoped ClusterRole and
+// the namespaced Role rendered when rbac.namespaceScoped=true.
 func TestRenderedManagerRoleGrantsEvents(t *testing.T) {
 	if !helmAvailable(t) {
 		t.Skip("helm not installed; skipping helm template rendering test")
