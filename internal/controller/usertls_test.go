@@ -34,6 +34,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -530,34 +531,33 @@ func TestMapSecretToRequests(t *testing.T) {
 		return &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
 	}
 
-	t.Run("operator-owned jks secret is skipped before any List call", func(t *testing.T) {
+	// Operator-owned output secrets resolve straight back to their owning CR
+	// via the controller owner reference — without any List call. Their
+	// Create/Update events are filtered upstream by secretWatchPredicate, so
+	// this mapping only runs for Delete events (and tests), where the
+	// recreation of a manually deleted secret must be triggered.
+	t.Run("operator-owned jks secret maps to its owner CR without any List call", func(t *testing.T) {
 		listCalls := 0
 		r := newCountingReconciler(t, &listCalls, srName, srUserTLS, srOther, srLabeled)
-		if reqs := r.mapSecretToRequests(ctx, operatorOwnedSecret("sr-name-jks")); len(reqs) != 0 {
-			t.Errorf("expected no requests for an operator-owned -jks secret, got %v", reqs)
-		}
+		expectRequests(t, r.mapSecretToRequests(ctx, operatorOwnedSecret("sr-name-jks")), "sr-name")
 		if listCalls != 0 {
 			t.Errorf("expected zero List calls for an operator-owned -jks secret, got %d", listCalls)
 		}
 	})
 
-	t.Run("operator-owned managed TLS secret is skipped before any List call", func(t *testing.T) {
+	t.Run("operator-owned managed TLS secret maps to its owner CR without any List call", func(t *testing.T) {
 		listCalls := 0
 		r := newCountingReconciler(t, &listCalls, srName, srUserTLS, srOther, srLabeled)
-		if reqs := r.mapSecretToRequests(ctx, operatorOwnedSecret("sr-name-tls")); len(reqs) != 0 {
-			t.Errorf("expected no requests for an operator-owned -tls secret, got %v", reqs)
-		}
+		expectRequests(t, r.mapSecretToRequests(ctx, operatorOwnedSecret("sr-name-tls")), "sr-name")
 		if listCalls != 0 {
 			t.Errorf("expected zero List calls for an operator-owned -tls secret, got %d", listCalls)
 		}
 	})
 
-	t.Run("derived user TLS jks secret is skipped before any List call", func(t *testing.T) {
+	t.Run("derived user TLS jks secret maps to its owner CR without any List call", func(t *testing.T) {
 		listCalls := 0
 		r := newCountingReconciler(t, &listCalls, srName, srUserTLS, srOther, srLabeled)
-		if reqs := r.mapSecretToRequests(ctx, operatorOwnedSecret("user-tls-secret-jks")); len(reqs) != 0 {
-			t.Errorf("expected no requests for the derived -jks secret, got %v", reqs)
-		}
+		expectRequests(t, r.mapSecretToRequests(ctx, operatorOwnedSecret("user-tls-secret-jks")), "sr-name")
 		if listCalls != 0 {
 			t.Errorf("expected zero List calls for the derived -jks secret, got %d", listCalls)
 		}
@@ -590,6 +590,159 @@ func TestMapSecretToRequests(t *testing.T) {
 			t.Errorf("expected exactly 1 List call (the label path) for a CA secret, got %d", listCalls)
 		}
 	})
+}
+
+// TestSecretWatchPredicate covers the Secret watch predicate paired with
+// mapSecretToRequests: Create/Update/Generic events of operator-controlled
+// output secrets are suppressed (loop prevention), their Delete events pass
+// through so a manually deleted secret is recreated, and secrets the
+// operator does not control flow for every event type.
+func TestSecretWatchPredicate(t *testing.T) {
+	operatorOwned := func(name string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					Kind:       "StrimziSchemaRegistry",
+					Name:       "sr-name",
+					UID:        "test-uid",
+					Controller: ptr.To(true),
+				}},
+			},
+		}
+	}
+	userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "user-tls-secret", Namespace: "default"}}
+	p := secretWatchPredicate()
+
+	t.Run("operator-owned secret Create/Update/Generic events are suppressed", func(t *testing.T) {
+		secret := operatorOwned("sr-name-jks")
+		if p.Create(event.CreateEvent{Object: secret}) {
+			t.Error("expected the Create event of an operator-owned secret to be suppressed")
+		}
+		if p.Update(event.UpdateEvent{ObjectOld: secret, ObjectNew: secret}) {
+			t.Error("expected the Update event of an operator-owned secret to be suppressed")
+		}
+		if p.Generic(event.GenericEvent{Object: secret}) {
+			t.Error("expected the Generic event of an operator-owned secret to be suppressed")
+		}
+	})
+
+	t.Run("operator-owned secret Delete event passes through", func(t *testing.T) {
+		if !p.Delete(event.DeleteEvent{Object: operatorOwned("sr-name-jks")}) {
+			t.Error("expected the Delete event of an operator-owned secret to pass through")
+		}
+	})
+
+	t.Run("uncontrolled secrets flow for every event type", func(t *testing.T) {
+		if !p.Create(event.CreateEvent{Object: userSecret}) {
+			t.Error("expected the Create event of an uncontrolled secret to pass through")
+		}
+		if !p.Update(event.UpdateEvent{ObjectOld: userSecret, ObjectNew: userSecret}) {
+			t.Error("expected the Update event of an uncontrolled secret to pass through")
+		}
+		if !p.Delete(event.DeleteEvent{Object: userSecret}) {
+			t.Error("expected the Delete event of an uncontrolled secret to pass through")
+		}
+		if !p.Generic(event.GenericEvent{Object: userSecret}) {
+			t.Error("expected the Generic event of an uncontrolled secret to pass through")
+		}
+	})
+
+	t.Run("secrets controlled by another kind are not suppressed", func(t *testing.T) {
+		// The suppression must key on the StrimziSchemaRegistry controller
+		// kind; a secret owned by e.g. a Deployment keeps flowing.
+		foreign := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "foreign-secret",
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "apps/v1",
+					Kind:       "Deployment",
+					Name:       "some-deploy",
+					UID:        "other-uid",
+					Controller: ptr.To(true),
+				}},
+			},
+		}
+		if !p.Create(event.CreateEvent{Object: foreign}) {
+			t.Error("expected the Create event of a foreign-controlled secret to pass through")
+		}
+		if !p.Update(event.UpdateEvent{ObjectOld: foreign, ObjectNew: foreign}) {
+			t.Error("expected the Update event of a foreign-controlled secret to pass through")
+		}
+		if !p.Generic(event.GenericEvent{Object: foreign}) {
+			t.Error("expected the Generic event of a foreign-controlled secret to pass through")
+		}
+	})
+
+	t.Run("released secret Update event passes through", func(t *testing.T) {
+		// Old object controlled, new object released: the event must flow so
+		// the now-uncontrolled secret keeps being matched by name/label.
+		if !p.Update(event.UpdateEvent{ObjectOld: operatorOwned("sr-name-jks"), ObjectNew: userSecret}) {
+			t.Error("expected the Update event of a released secret to pass through")
+		}
+	})
+}
+
+// TestSecretEventPipelineBounded guards the pairing of secretWatchPredicate
+// with mapSecretToRequests: simulating the watch pipeline (predicate → map)
+// over the operator's own Create event plus a burst of self-triggered Update
+// events must enqueue nothing (no reconcile storm), while a single Delete
+// event enqueues the owning CR exactly once.
+func TestSecretEventPipelineBounded(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+
+	sr := newTestInstance()
+	sr.Name = "sr-name"
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sr).Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+	ctx := context.Background()
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sr-name-jks",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+				Kind:       "StrimziSchemaRegistry",
+				Name:       "sr-name",
+				UID:        "test-uid",
+				Controller: ptr.To(true),
+			}},
+		},
+	}
+
+	p := secretWatchPredicate()
+
+	// Operator-issued writes: one Create followed by a burst of Updates —
+	// the pipeline must enqueue nothing at all.
+	enqueued := 0
+	if p.Create(event.CreateEvent{Object: secret}) {
+		enqueued += len(r.mapSecretToRequests(ctx, secret))
+	}
+	for i := 0; i < 10; i++ {
+		if p.Update(event.UpdateEvent{ObjectOld: secret, ObjectNew: secret}) {
+			enqueued += len(r.mapSecretToRequests(ctx, secret))
+		}
+	}
+	if enqueued != 0 {
+		t.Errorf("expected 0 enqueued requests from operator-issued Create/Update events, got %d", enqueued)
+	}
+
+	// Manual deletion: exactly one request for the owning CR.
+	if !p.Delete(event.DeleteEvent{Object: secret}) {
+		t.Fatal("expected the Delete event of an operator-owned secret to pass through")
+	}
+	requests := r.mapSecretToRequests(ctx, secret)
+	if len(requests) != 1 {
+		t.Fatalf("expected exactly 1 request for the owning CR, got %d: %v", len(requests), requests)
+	}
+	if requests[0].Name != "sr-name" || requests[0].Namespace != "default" {
+		t.Errorf("expected a request for default/sr-name, got %v", requests[0])
+	}
 }
 
 // realPEMSecretData generates a real certificate and key with the shared

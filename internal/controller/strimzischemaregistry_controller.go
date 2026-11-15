@@ -29,6 +29,7 @@ import (
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -37,10 +38,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/recorder"
 )
@@ -1063,11 +1067,15 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 // CR List call:
 //  1. Secrets the operator itself owns — the <name>-jks and <name>-tls
 //     outputs and the derived <name>-<tlssecretname>-jks — are written by
-//     reconciliation, never inputs to it, so their events must not
-//     re-trigger reconciliation. The controller-owner check (rather than the
-//     bare name suffix) keeps user-provided TLS secrets that merely end with
-//     -tls/-jks (e.g. the documented schema-registry-tls name) flowing to
-//     the matching paths below.
+//     reconciliation, never inputs to it, so their Create/Update events must
+//     not re-trigger reconciliation; secretWatchPredicate filters those out
+//     before this mapper runs. Their Delete events DO pass through (a
+//     manually deleted output secret must be recreated), so a controlled
+//     secret is resolved back to its owning CR straight from the controller
+//     owner reference — no List call needed. The controller-owner check
+//     (rather than the bare name suffix) keeps user-provided TLS secrets
+//     that merely end with -tls/-jks (e.g. the documented
+//     schema-registry-tls name) flowing to the matching paths below.
 //  2. Cluster CA cert secrets (<cluster>-cluster-ca-cert) can only match
 //     through the label path: no CR can reference one via spec.tlssecretname
 //     (the user TLS secret validation requires keystore material the CA
@@ -1075,7 +1083,13 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 //     skipped for them.
 func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Context, obj client.Object) []reconcile.Request {
 	if owner := metav1.GetControllerOf(obj); owner != nil && owner.Kind == "StrimziSchemaRegistry" {
-		return nil
+		// Operator-owned output secret: Create/Update events never reach this
+		// point (secretWatchPredicate filters them out). Delete events must
+		// re-trigger reconciliation so the secret is recreated; the owner
+		// reference names the CR to enqueue.
+		return []reconcile.Request{{
+			NamespacedName: types.NamespacedName{Name: owner.Name, Namespace: obj.GetNamespace()},
+		}}
 	}
 	// Cluster CA cert secrets never match the name path (see above).
 	isClusterCA := strings.HasSuffix(obj.GetName(), clusterCASuffix)
@@ -1141,13 +1155,52 @@ func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Contex
 	return requests
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// secretWatchPredicate filters Secret events before they reach
+// mapSecretToRequests. Secrets the operator controls (the <name>-jks and
+// <name>-tls outputs and the derived <tlssecretname>-jks) are written by
+// reconciliation, never inputs to it: their Create/Update/Generic events are
+// suppressed so the operator's own writes cannot re-enqueue the CR and form
+// a reconcile loop. Their Delete events pass through so a manually deleted
+// output secret is observed and recreated — mapSecretToRequests resolves the
+// owning CR from the controller owner reference. Secrets the operator does
+// not control (user-provided TLS secrets, Strimzi CA/user secrets) keep
+// flowing for every event type.
+func secretWatchPredicate() predicate.Funcs {
+	operatorControlled := func(obj client.Object) bool {
+		owner := metav1.GetControllerOf(obj)
+		return owner != nil && owner.Kind == "StrimziSchemaRegistry"
+	}
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return !operatorControlled(e.Object)
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return !operatorControlled(e.ObjectNew)
+		},
+		// Deletions are never self-triggered: the operator recreates a deleted
+		// output secret instead of deleting it, so every Delete event is
+		// external and must be observed.
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return true
+		},
+		GenericFunc: func(e event.GenericEvent) bool {
+			return !operatorControlled(e.Object)
+		},
+	}
+}
+
+// SetupWithManager sets up the controller with the Manager. The managed
+// Service and NetworkPolicy are watched via Owns so their manual deletion
+// triggers reconciliation and recreation; the Secret watch carries
+// secretWatchPredicate so operator-issued Create/Update events stay
+// suppressed while deletions of operator-managed secrets are observed.
 func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
 		Watches(
 			&v1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.mapSecretToRequests),
+			builder.WithPredicates(secretWatchPredicate()),
 		).
 		Watches(
 			&kafka.Kafka{},
@@ -1162,6 +1215,8 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 			}),
 		).
 		Owns(&apps.Deployment{}).
+		Owns(&v1.Service{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Complete(r)
 }
 
