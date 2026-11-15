@@ -190,6 +190,19 @@ func opensslExportPKCS12Cmd(ctx context.Context, certPath, keyPath, caCertPath, 
 	return withPasswordEnv(cmd, password)
 }
 
+// truststoreAlias returns the alias under which the CA certificate at index
+// (of a bundle of total certificates) is imported into the truststore. A
+// single-cert bundle keeps the historical "CARoot" alias so existing
+// deployments see no change; a multi-cert bundle — the shape Strimzi
+// produces during a zero-downtime cluster CA rotation — uses "CARoot-0",
+// "CARoot-1", ... in bundle order.
+func truststoreAlias(index, total int) string {
+	if total == 1 {
+		return "CARoot"
+	}
+	return fmt.Sprintf("CARoot-%d", index)
+}
+
 // Create a JKS-formatted truststore using the cluster's CA certificate.
 // Parameters
 //     ----------
@@ -209,6 +222,14 @@ func opensslExportPKCS12Cmd(ctx context.Context, certPath, keyPath, caCertPath, 
 // Notes
 // -----
 // Internally this function calls out to the “keytool“ command-line tool.
+//
+// The cluster CA secret may hold a multi-PEM bundle (Strimzi appends the new
+// CA to the old one during a zero-downtime CA rotation). Every CERTIFICATE
+// block is imported under its own alias — "CARoot" for a single-cert bundle,
+// "CARoot-0", "CARoot-1", ... for a multi-cert bundle — because a single
+// keytool -importcert call silently keeps only the first certificate of a
+// multi-PEM file. An empty or unparseable ca.crt is rejected with an
+// actionable error before any subprocess runs.
 //
 // Security: all intermediate files are written into a per-call temporary
 // directory with 0700 permissions that is removed when the function returns.
@@ -233,6 +254,28 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 		}
 	}
 
+	// An empty ca.crt would otherwise surface as a cryptic keytool failure;
+	// reject it up front with an actionable error naming the offending input.
+	if strings.TrimSpace(cert) == "" {
+		err := errors.New("cluster CA certificate (ca.crt) is empty; the <cluster>-cluster-ca-cert secret must contain a CA certificate to build the truststore")
+		cp.log.Error(err, "Empty cluster CA certificate")
+		return nil, "", err
+	}
+
+	// keytool -importcert reads only the FIRST certificate of a multi-PEM
+	// file, so during a Strimzi zero-downtime CA rotation — when ca.crt holds
+	// the old and the new cluster CA — a single import would drop every CA
+	// after the first and clients would stop trusting servers signed by the
+	// other CA. Parse every CERTIFICATE block (this also rejects unparseable
+	// input before any subprocess runs) and import each one under its own
+	// alias (see truststoreAlias).
+	certs, err := StringToCertificates(cert)
+	if err != nil {
+		err = fmt.Errorf("invalid cluster CA certificate (ca.crt): %w", err)
+		cp.log.Error(err, "Failed to parse cluster CA certificate bundle")
+		return nil, "", err
+	}
+
 	tempDir, err := os.MkdirTemp("", "ssr-truststore-*")
 	if err != nil {
 		cp.log.Error(err, "Failed to create temp dir")
@@ -240,18 +283,25 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 	}
 	defer cp.removeTempDir(tempDir)
 
-	// Write CA certificate into the private temp dir.
-	caCertPath, err := writeTempFileIn(tempDir, "ca.crt", cert)
-	if err != nil {
-		cp.log.Error(err, "Failed to write temp file", "File", "ca.crt")
-		return nil, "", err
-	}
 	outputPath := filepath.Join(tempDir, "client.truststore.jks")
 
-	// Generate truststore
-	cmd := keytoolImportCertCmd(ctx, outputPath, "CARoot", caCertPath, password)
-	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
-		return nil, "", err
+	// Import every CA certificate into the truststore. Each certificate is
+	// written to its own temp file because keytool -importcert accepts a
+	// single certificate per invocation; the store password still travels
+	// through the process environment (passwordEnvVar) for every call.
+	for i, caCert := range certs {
+		caCertPath, err := writeTempFileIn(tempDir, fmt.Sprintf("ca-%d.crt", i),
+			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})))
+		if err != nil {
+			cp.log.Error(err, "Failed to write temp file", "File", fmt.Sprintf("ca-%d.crt", i))
+			return nil, "", err
+		}
+
+		// Generate truststore
+		cmd := keytoolImportCertCmd(ctx, outputPath, truststoreAlias(i, len(certs)), caCertPath, password)
+		if _, err := runCertCommand(ctx, cp, cmd); err != nil {
+			return nil, "", err
+		}
 	}
 
 	// Check if truststore exists
@@ -704,16 +754,46 @@ func signCSR(caCert *x509.Certificate, caKey *rsa.PrivateKey, csr *x509.Certific
 	return serverCert, nil
 }
 
-func StringToCertificate(certString string) (*x509.Certificate, error) {
-	block, _ := pem.Decode([]byte(certString))
-	if block == nil {
-		return nil, errors.New("failed to parse PEM block containing the certificate")
+// StringToCertificates decodes every CERTIFICATE PEM block in certString and
+// parses each into an x509.Certificate, preserving bundle order. PEM blocks
+// of any other type and any data between blocks are skipped, matching
+// pem.Decode's lenient leading-garbage behavior. An error is returned when no
+// CERTIFICATE block is present or a certificate block fails to parse; the
+// message names the 0-based position of the offending certificate.
+func StringToCertificates(certString string) ([]*x509.Certificate, error) {
+	var certs []*x509.Certificate
+	rest := []byte(certString)
+	for {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse certificate #%d of the PEM bundle: %w", len(certs), err)
+		}
+		certs = append(certs, cert)
 	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	if len(certs) == 0 {
+		return nil, errors.New("no CERTIFICATE PEM block found in the provided data")
+	}
+	return certs, nil
+}
+
+// StringToCertificate parses the first CERTIFICATE PEM block of certString.
+// For multi-PEM CA bundles use StringToCertificates instead: during a Strimzi
+// CA rotation the certificate matching the CA private key is not necessarily
+// the first one.
+func StringToCertificate(certString string) (*x509.Certificate, error) {
+	certs, err := StringToCertificates(certString)
 	if err != nil {
 		return nil, err
 	}
-	return cert, nil
+	return certs[0], nil
 }
 
 func StringToPrivateKey(privateKeyString string) (*rsa.PrivateKey, error) {

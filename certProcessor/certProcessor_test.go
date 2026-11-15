@@ -1,8 +1,14 @@
 package certprocessor
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 	"unicode"
@@ -495,5 +501,261 @@ func TestGenerateTLSforHTTP_EmptyCN(t *testing.T) {
 		} else {
 			t.Error("expected error when generating TLS with empty CN, got nil")
 		}
+	}
+}
+
+// listStoreEntries runs keytool -list -rfc on the JKS file at path and
+// returns the alias names (as keytool displays them) and the certificates the
+// store contains. It is a test helper for asserting the truststore and
+// keystore contents produced by CreateTruststore and GenerateTLSforHTTP.
+func listStoreEntries(t *testing.T, cp *CertProcessor, path, password string) ([]string, []*x509.Certificate) {
+	t.Helper()
+	out, err := runCertCommand(context.Background(), cp, keytoolListCmd(context.Background(), path, password))
+	if err != nil {
+		t.Fatalf("keytool -list failed: %v", err)
+	}
+	var aliases []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if alias, ok := strings.CutPrefix(line, "Alias name: "); ok {
+			aliases = append(aliases, strings.TrimSpace(alias))
+		}
+	}
+	var certs []*x509.Certificate
+	rest := out
+	for {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatalf("failed to parse a certificate from the keytool -list output: %v", err)
+		}
+		certs = append(certs, cert)
+	}
+	return aliases, certs
+}
+
+// writeStoreFile writes JKS bytes to a fresh temporary file and returns its
+// path, ready for a keytool -list inspection.
+func writeStoreFile(t *testing.T, data []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "store.jks")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("failed to write the store temp file: %v", err)
+	}
+	return path
+}
+
+// certRawSet maps the DER encodings of certs into a set for comparisons.
+func certRawSet(certs []*x509.Certificate) map[string]struct{} {
+	set := make(map[string]struct{}, len(certs))
+	for _, c := range certs {
+		set[string(c.Raw)] = struct{}{}
+	}
+	return set
+}
+
+// certSubjects renders the subjects of certs for test failure messages.
+func certSubjects(certs []*x509.Certificate) string {
+	names := make([]string, 0, len(certs))
+	for _, c := range certs {
+		names = append(names, c.Subject.String())
+	}
+	return strings.Join(names, ", ")
+}
+
+// TestStringToCertificates covers the multi-PEM bundle parser used by
+// CreateTruststore and GenerateTLSforHTTP: it must decode every CERTIFICATE
+// block (Strimzi CA rotation bundles hold the old and the new CA), skip other
+// content, and reject empty or unparseable input.
+func TestStringToCertificates(t *testing.T) {
+	ca1, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA 1: %v", err)
+	}
+	ca2, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA 2: %v", err)
+	}
+
+	t.Run("parses every certificate of a multi-PEM bundle in order", func(t *testing.T) {
+		certs, err := StringToCertificates(ca1.CACertPEM + ca2.CACertPEM)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(certs) != 2 {
+			t.Fatalf("expected 2 certificates, got %d", len(certs))
+		}
+		if !bytes.Equal(certs[0].Raw, ca1.CACert.Raw) || !bytes.Equal(certs[1].Raw, ca2.CACert.Raw) {
+			t.Error("expected the certificates in bundle order")
+		}
+	})
+
+	t.Run("parses a single-certificate bundle", func(t *testing.T) {
+		certs, err := StringToCertificates(ca1.CACertPEM)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, ca1.CACert.Raw) {
+			t.Errorf("expected the single CA certificate, got %d certs", len(certs))
+		}
+	})
+
+	t.Run("skips non-certificate PEM blocks and surrounding data", func(t *testing.T) {
+		noise := "leading garbage\n" + string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: []byte("not-a-key")})) + "\n"
+		certs, err := StringToCertificates(noise + ca1.CACertPEM)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, ca1.CACert.Raw) {
+			t.Errorf("expected only the CA certificate, got %d certs", len(certs))
+		}
+	})
+
+	t.Run("errors when no certificate block is present", func(t *testing.T) {
+		for _, in := range []string{"", "plain garbage", string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: []byte("x")}))} {
+			if _, err := StringToCertificates(in); err == nil {
+				t.Errorf("expected an error for input %q, got nil", in)
+			}
+		}
+	})
+
+	t.Run("errors on an unparseable certificate block", func(t *testing.T) {
+		broken := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("junk-der")}))
+		_, err := StringToCertificates(broken)
+		if err == nil {
+			t.Fatal("expected an error for an unparseable certificate block, got nil")
+		}
+		if !strings.Contains(err.Error(), "#0") {
+			t.Errorf("expected the error to name the offending certificate position, got: %v", err)
+		}
+	})
+
+	t.Run("StringToCertificate returns the first certificate", func(t *testing.T) {
+		cert, err := StringToCertificate(ca1.CACertPEM + ca2.CACertPEM)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !bytes.Equal(cert.Raw, ca1.CACert.Raw) {
+			t.Error("expected StringToCertificate to return the first bundle certificate")
+		}
+	})
+}
+
+// TestCreateTruststore_MultiCertBundle covers the Strimzi cluster CA rotation
+// shape: ca.crt holds several concatenated PEM certificates (old + new CA).
+// Every certificate must land in the truststore under its own CARoot-<index>
+// alias — a single keytool -importcert call silently keeps only the first
+// one, which made clients stop trusting servers signed by the other CA
+// during rotation.
+func TestCreateTruststore_MultiCertBundle(t *testing.T) {
+	caOld, err := testutil.GenerateClusterCACert("rotation-old-ca")
+	if err != nil {
+		t.Fatalf("failed to generate old CA: %v", err)
+	}
+	caNew, err := testutil.GenerateClusterCACert("rotation-new-ca")
+	if err != nil {
+		t.Fatalf("failed to generate new CA: %v", err)
+	}
+	caSpare, err := testutil.GenerateClusterCACert("rotation-spare-ca")
+	if err != nil {
+		t.Fatalf("failed to generate spare CA: %v", err)
+	}
+
+	bundle := caOld.CACertPEM + caNew.CACertPEM + caSpare.CACertPEM
+
+	cp := NewCertProcessor(logr.Logger{})
+	truststore, password, err := cp.CreateTruststore(context.Background(), bundle, "test1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(truststore) == 0 {
+		t.Fatal("empty truststore")
+	}
+
+	aliases, certs := listStoreEntries(t, cp, writeStoreFile(t, truststore), password)
+
+	// keytool displays JKS aliases lowercased; compare case-insensitively.
+	gotAliases := make(map[string]struct{}, len(aliases))
+	for _, alias := range aliases {
+		gotAliases[strings.ToLower(alias)] = struct{}{}
+	}
+	if len(aliases) != 3 {
+		t.Errorf("expected 3 truststore entries, got %d (%v)", len(aliases), aliases)
+	}
+	for _, alias := range []string{"caroot-0", "caroot-1", "caroot-2"} {
+		if _, ok := gotAliases[alias]; !ok {
+			t.Errorf("expected alias %q in the truststore, got %v", alias, aliases)
+		}
+	}
+
+	// Every certificate of the bundle must be present in the truststore.
+	wantCerts := certRawSet([]*x509.Certificate{caOld.CACert, caNew.CACert, caSpare.CACert})
+	gotCerts := certRawSet(certs)
+	for raw := range wantCerts {
+		if _, ok := gotCerts[raw]; !ok {
+			t.Errorf("a bundle CA certificate is missing from the truststore; got %s", certSubjects(certs))
+		}
+	}
+	if len(gotCerts) != len(wantCerts) {
+		t.Errorf("truststore contains unexpected certificates: got %d, want %d", len(gotCerts), len(wantCerts))
+	}
+}
+
+// TestCreateTruststore_SingleCertAliasPreserved pins the alias scheme for the
+// common single-cert ca.crt: the certificate is imported under the historical
+// "CARoot" alias, so existing deployments see no change.
+func TestCreateTruststore_SingleCertAliasPreserved(t *testing.T) {
+	ca, err := testutil.GenerateClusterCACert("single-ca")
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	truststore, password, err := cp.CreateTruststore(context.Background(), ca.CACertPEM, "test1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	aliases, certs := listStoreEntries(t, cp, writeStoreFile(t, truststore), password)
+	if len(aliases) != 1 {
+		t.Fatalf("expected exactly 1 truststore entry, got %d (%v)", len(aliases), aliases)
+	}
+	if !strings.EqualFold(aliases[0], "CARoot") {
+		t.Errorf("expected the single-cert bundle to keep the CARoot alias, got %q", aliases[0])
+	}
+	if len(certs) != 1 || !bytes.Equal(certs[0].Raw, ca.CACert.Raw) {
+		t.Errorf("expected the truststore to hold the CA certificate, got %s", certSubjects(certs))
+	}
+}
+
+// TestCreateTruststore_EmptyCert verifies that an empty or whitespace-only
+// ca.crt is rejected with an actionable error naming the offending input,
+// instead of surfacing as a cryptic keytool failure.
+func TestCreateTruststore_EmptyCert(t *testing.T) {
+	cp := NewCertProcessor(logr.Logger{})
+	tests := []struct {
+		name string
+		cert string
+	}{
+		{"empty ca.crt", ""},
+		{"whitespace-only ca.crt", "  \n\t "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := cp.CreateTruststore(context.Background(), tt.cert, "test1234")
+			if err == nil {
+				t.Fatal("expected an error for an empty ca.crt, got nil")
+			}
+			if !strings.Contains(err.Error(), "ca.crt") {
+				t.Errorf("expected the error to name the offending input ca.crt, got: %v", err)
+			}
+		})
 	}
 }
