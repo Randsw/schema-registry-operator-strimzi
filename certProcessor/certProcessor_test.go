@@ -3,9 +3,17 @@ package certprocessor
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1032,4 +1040,345 @@ func TestGenerateTLSforHTTP_EmptyInputs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ecdsaTestCA is an ECDSA cluster CA fixture: the certificate plus the
+// private key in both PEM encodings an ECDSA Strimzi cluster CA may ship
+// (SEC1 "EC PRIVATE KEY" and PKCS#8 "PRIVATE KEY").
+type ecdsaTestCA struct {
+	CertPEM     string
+	SEC1KeyPEM  string
+	PKCS8KeyPEM string
+	Cert        *x509.Certificate
+	Key         *ecdsa.PrivateKey
+}
+
+// generateECDSATestCA creates a self-signed ECDSA P-256 cluster CA for the
+// ECDSA support tests (the shared testutil helpers only generate RSA CAs).
+func generateECDSATestCA(t *testing.T, commonName string) *ecdsaTestCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate the ECDSA CA key: %v", err)
+	}
+	serialNumber, err := cryptorand.Int(cryptorand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("failed to generate the serial number: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"io.strimzi"},
+			CommonName:   commonName,
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLenZero:        true,
+	}
+	der, err := x509.CreateCertificate(cryptorand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to self-sign the ECDSA CA certificate: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("failed to parse the ECDSA CA certificate: %v", err)
+	}
+	sec1, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("failed to marshal the ECDSA CA key (SEC1): %v", err)
+	}
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("failed to marshal the ECDSA CA key (PKCS#8): %v", err)
+	}
+	return &ecdsaTestCA{
+		CertPEM:     string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		SEC1KeyPEM:  string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: sec1})),
+		PKCS8KeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8})),
+		Cert:        cert,
+		Key:         key,
+	}
+}
+
+// TestStringToPrivateKey covers the cluster CA private key parser: RSA keys
+// in both the PKCS#1 and PKCS#8 encodings keep parsing (unchanged behavior),
+// ECDSA keys parse from both the SEC1 "EC PRIVATE KEY" and the PKCS#8
+// encoding so an ECDSA Strimzi cluster CA is supported, and garbage,
+// non-key PEM or unsupported key types are rejected.
+func TestStringToPrivateKey(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(cryptorand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate the RSA fixture key: %v", err)
+	}
+	pkcs1DER := x509.MarshalPKCS1PrivateKey(rsaKey)
+	rsaPKCS8DER, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+	if err != nil {
+		t.Fatalf("failed to marshal the RSA fixture key (PKCS#8): %v", err)
+	}
+	ecCA := generateECDSATestCA(t, "ecdsa-ca")
+	_, ed25519Key, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate the Ed25519 fixture key: %v", err)
+	}
+	ed25519DER, err := x509.MarshalPKCS8PrivateKey(ed25519Key)
+	if err != nil {
+		t.Fatalf("failed to marshal the Ed25519 fixture key: %v", err)
+	}
+
+	pkixOf := func(t *testing.T, key crypto.PublicKey) string {
+		t.Helper()
+		der, err := x509.MarshalPKIXPublicKey(key)
+		if err != nil {
+			t.Fatalf("failed to marshal the public key: %v", err)
+		}
+		return string(der)
+	}
+	rsaPKIX := pkixOf(t, rsaKey.Public())
+	ecPKIX := pkixOf(t, ecCA.Key.Public())
+
+	tests := []struct {
+		name   string
+		keyPEM string
+		verify func(t *testing.T, key crypto.Signer)
+	}{
+		{
+			name:   "RSA PKCS#1 (RSA PRIVATE KEY)",
+			keyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: pkcs1DER})),
+			verify: func(t *testing.T, key crypto.Signer) {
+				rsaParsed, ok := key.(*rsa.PrivateKey)
+				if !ok {
+					t.Fatalf("expected *rsa.PrivateKey, got %T", key)
+				}
+				if got := pkixOf(t, rsaParsed.Public()); got != rsaPKIX {
+					t.Error("parsed RSA key does not match the fixture")
+				}
+			},
+		},
+		{
+			name:   "RSA PKCS#8 (PRIVATE KEY)",
+			keyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: rsaPKCS8DER})),
+			verify: func(t *testing.T, key crypto.Signer) {
+				rsaParsed, ok := key.(*rsa.PrivateKey)
+				if !ok {
+					t.Fatalf("expected *rsa.PrivateKey, got %T", key)
+				}
+				if got := pkixOf(t, rsaParsed.Public()); got != rsaPKIX {
+					t.Error("parsed RSA key does not match the fixture")
+				}
+			},
+		},
+		{
+			name:   "ECDSA SEC1 (EC PRIVATE KEY)",
+			keyPEM: ecCA.SEC1KeyPEM,
+			verify: func(t *testing.T, key crypto.Signer) {
+				ecParsed, ok := key.(*ecdsa.PrivateKey)
+				if !ok {
+					t.Fatalf("expected *ecdsa.PrivateKey, got %T", key)
+				}
+				if got := pkixOf(t, ecParsed.Public()); got != ecPKIX {
+					t.Error("parsed ECDSA key does not match the fixture")
+				}
+			},
+		},
+		{
+			name:   "ECDSA PKCS#8 (PRIVATE KEY)",
+			keyPEM: ecCA.PKCS8KeyPEM,
+			verify: func(t *testing.T, key crypto.Signer) {
+				ecParsed, ok := key.(*ecdsa.PrivateKey)
+				if !ok {
+					t.Fatalf("expected *ecdsa.PrivateKey, got %T", key)
+				}
+				if got := pkixOf(t, ecParsed.Public()); got != ecPKIX {
+					t.Error("parsed ECDSA key does not match the fixture")
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := StringToPrivateKey(tt.keyPEM)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			tt.verify(t, key)
+		})
+	}
+
+	t.Run("garbage input is rejected", func(t *testing.T) {
+		if _, err := StringToPrivateKey("not a valid PEM private key"); err == nil {
+			t.Error("expected an error for garbage input, got nil")
+		}
+	})
+	t.Run("a certificate PEM block is not a private key", func(t *testing.T) {
+		if _, err := StringToPrivateKey(ecCA.CertPEM); err == nil {
+			t.Error("expected an error for a CERTIFICATE block, got nil")
+		}
+	})
+	t.Run("unsupported PKCS#8 key types are rejected", func(t *testing.T) {
+		_, err := StringToPrivateKey(string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: ed25519DER})))
+		if err == nil {
+			t.Fatal("expected an error for an Ed25519 PKCS#8 key, got nil")
+		}
+		if !strings.Contains(err.Error(), "not RSA or ECDSA") {
+			t.Errorf("expected the error to name the supported key types, got: %v", err)
+		}
+	})
+}
+
+// TestSignCSRWithECDSACA covers the ECDSA cluster CA signing path: an
+// ECDSA CA key must be able to sign the REST API server CSR, producing a
+// certificate that verifies against the ECDSA CA and carries the CSR's
+// public key. The RSA CA path is asserted unchanged in the same test.
+func TestSignCSRWithECDSACA(t *testing.T) {
+	ecCA := generateECDSATestCA(t, "ecdsa-cluster-ca")
+	rsaCA, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate the RSA CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	serverKey, csr, err := cp.generateCSR("schema-registry", "kafka")
+	if err != nil {
+		t.Fatalf("failed to generate the CSR: %v", err)
+	}
+
+	t.Run("an ECDSA CA signs the CSR", func(t *testing.T) {
+		serverCert, err := signCSR(ecCA.Cert, ecCA.Key, csr)
+		if err != nil {
+			t.Fatalf("failed to sign the CSR with the ECDSA CA: %v", err)
+		}
+		if err := serverCert.CheckSignatureFrom(ecCA.Cert); err != nil {
+			t.Errorf("expected the server certificate to be signed by the ECDSA CA, but signature verification failed: %v", err)
+		}
+		roots := x509.NewCertPool()
+		roots.AddCert(ecCA.Cert)
+		if _, err := serverCert.Verify(x509.VerifyOptions{Roots: roots, DNSName: "schema-registry"}); err != nil {
+			t.Errorf("expected the certificate chain to validate against the ECDSA CA, got: %v", err)
+		}
+		if !publicKeyMatches(serverCert.PublicKey, serverKey.Public()) {
+			t.Error("expected the server certificate to carry the CSR's public key")
+		}
+	})
+
+	t.Run("the RSA CA path is unchanged", func(t *testing.T) {
+		serverCert, err := signCSR(rsaCA.CACert, rsaCA.CAKey, csr)
+		if err != nil {
+			t.Fatalf("failed to sign the CSR with the RSA CA: %v", err)
+		}
+		if err := serverCert.CheckSignatureFrom(rsaCA.CACert); err != nil {
+			t.Errorf("expected the server certificate to be signed by the RSA CA, but signature verification failed: %v", err)
+		}
+	})
+}
+
+// TestSelectCACertForKeyECDSA covers the CA-cert/key matching with an ECDSA
+// key: in a mixed RSA+ECDSA rotation bundle the ECDSA key must select the
+// ECDSA certificate, and a non-matching key is still rejected.
+func TestSelectCACertForKeyECDSA(t *testing.T) {
+	ecCA := generateECDSATestCA(t, "ecdsa-new-ca")
+	rsaCA, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate the RSA CA: %v", err)
+	}
+	otherEC := generateECDSATestCA(t, "other-ecdsa-ca")
+
+	certs, err := StringToCertificates(rsaCA.CACertPEM + ecCA.CertPEM)
+	if err != nil {
+		t.Fatalf("failed to parse the CA bundle: %v", err)
+	}
+
+	selected, err := selectCACertForKey(certs, ecCA.Key)
+	if err != nil {
+		t.Fatalf("failed to select the CA certificate for the ECDSA key: %v", err)
+	}
+	if selected.Subject.CommonName != "ecdsa-new-ca" {
+		t.Errorf("expected the ECDSA certificate to be selected, got %q", selected.Subject.CommonName)
+	}
+
+	if _, err := selectCACertForKey(certs, otherEC.Key); err == nil {
+		t.Error("expected an error when no bundle certificate matches the ECDSA key, got nil")
+	}
+}
+
+// TestGenerateTLSforHTTP_ECDSACA covers the full REST API TLS pipeline with
+// an ECDSA Strimzi cluster CA: the SEC1- and PKCS#8-encoded ECDSA CA keys
+// must both produce a keystore whose server certificate is signed by the
+// ECDSA CA, and a mixed RSA+ECDSA rotation bundle must be signed by the
+// ECDSA CA matching the provided key.
+func TestGenerateTLSforHTTP_ECDSACA(t *testing.T) {
+	ecCA := generateECDSATestCA(t, "ecdsa-cluster-ca")
+	rsaOld, err := testutil.GenerateClusterCACert("rotation-old-rsa-ca")
+	if err != nil {
+		t.Fatalf("failed to generate the old RSA CA: %v", err)
+	}
+
+	findLeaf := func(t *testing.T, keystore []byte, password string) *x509.Certificate {
+		t.Helper()
+		cp := NewCertProcessor(logr.Logger{})
+		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+		for _, cert := range certs {
+			if cert.Subject.CommonName == "confluent-schema-registry" {
+				return cert
+			}
+		}
+		t.Fatalf("server certificate not found in the keystore; entries: %s", certSubjects(certs))
+		return nil
+	}
+	verifyAgainst := func(t *testing.T, leaf *x509.Certificate, ca *x509.Certificate) {
+		t.Helper()
+		if err := leaf.CheckSignatureFrom(ca); err != nil {
+			t.Errorf("expected the server certificate to be signed by %q, but signature verification failed: %v", ca.Subject.CommonName, err)
+		}
+		roots := x509.NewCertPool()
+		roots.AddCert(ca)
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+			t.Errorf("expected the certificate chain to validate against %q, got: %v", ca.Subject.CommonName, err)
+		}
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+
+	t.Run("SEC1-encoded ECDSA CA key", func(t *testing.T) {
+		keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ecCA.CertPEM, ecCA.SEC1KeyPEM, "test1234", "confluent-schema-registry", "kafka")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keystore) == 0 {
+			t.Fatal("empty keystore")
+		}
+		verifyAgainst(t, findLeaf(t, keystore, password), ecCA.Cert)
+	})
+
+	t.Run("PKCS#8-encoded ECDSA CA key", func(t *testing.T) {
+		keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ecCA.CertPEM, ecCA.PKCS8KeyPEM, "test1234", "confluent-schema-registry", "kafka")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keystore) == 0 {
+			t.Fatal("empty keystore")
+		}
+		verifyAgainst(t, findLeaf(t, keystore, password), ecCA.Cert)
+	})
+
+	t.Run("mixed RSA+ECDSA rotation bundle is signed by the matching ECDSA CA", func(t *testing.T) {
+		bundle := rsaOld.CACertPEM + ecCA.CertPEM
+		keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), bundle, ecCA.SEC1KeyPEM, "test1234", "confluent-schema-registry", "kafka")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keystore) == 0 {
+			t.Fatal("empty keystore")
+		}
+		leaf := findLeaf(t, keystore, password)
+		verifyAgainst(t, leaf, ecCA.Cert)
+		if leaf.Issuer.CommonName != "ecdsa-cluster-ca" {
+			t.Errorf("expected the issuer to be the matching ECDSA CA, got %q", leaf.Issuer.CommonName)
+		}
+		if err := leaf.CheckSignatureFrom(rsaOld.CACert); err == nil {
+			t.Error("expected the server certificate NOT to be signed by the non-matching RSA CA, but it verifies against it")
+		}
+	})
 }

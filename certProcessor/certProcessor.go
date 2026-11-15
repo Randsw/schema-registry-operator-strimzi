@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/ecdsa"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -816,7 +817,12 @@ func (cp *CertProcessor) generateCSR(name, namespace string) (*rsa.PrivateKey, *
 	return serverKey, csr, nil
 }
 
-func signCSR(caCert *x509.Certificate, caKey *rsa.PrivateKey, csr *x509.CertificateRequest) (*x509.Certificate, error) {
+// signCSR issues the REST API server certificate from the CSR, signed by the
+// provided cluster CA. caKey is the CA private key as a crypto.Signer, so
+// both RSA and ECDSA cluster CA keys are supported (x509.CreateCertificate
+// picks the signature algorithm from the signer); the CSR's public key may
+// be of any algorithm the CA can sign for.
+func signCSR(caCert *x509.Certificate, caKey crypto.Signer, csr *x509.CertificateRequest) (*x509.Certificate, error) {
 	// Generate a random serial number
 	serialNumber, err := cryptorand.Int(cryptorand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
@@ -888,17 +894,26 @@ func StringToCertificate(certString string) (*x509.Certificate, error) {
 	return certs[0], nil
 }
 
-func StringToPrivateKey(privateKeyString string) (*rsa.PrivateKey, error) {
+// StringToPrivateKey parses a PEM-encoded private key. RSA keys (PKCS#1
+// "RSA PRIVATE KEY" and PKCS#8 "PRIVATE KEY") and ECDSA keys (SEC1
+// "EC PRIVATE KEY" and PKCS#8) are supported, so a Strimzi cluster CA
+// generated with an ECDSA key can sign the REST API certificate. The
+// returned key always implements crypto.Signer.
+func StringToPrivateKey(privateKeyString string) (crypto.Signer, error) {
 	block, _ := pem.Decode([]byte(privateKeyString))
 	if block == nil {
 		return nil, errors.New("failed to parse PEM block containing the private key")
 	}
-	// Try PKCS1 first
+	// Try PKCS1 first (the traditional "RSA PRIVATE KEY" encoding)
 	priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err == nil {
 		return priv, nil
 	}
-	// If PKCS1 fails, try PKCS8
+	// SEC1 "EC PRIVATE KEY" (the traditional OpenSSL EC encoding)
+	if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	// If PKCS1 and SEC1 fail, try PKCS8 (covers RSA and ECDSA keys)
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		return nil, err
@@ -906,15 +921,16 @@ func StringToPrivateKey(privateKeyString string) (*rsa.PrivateKey, error) {
 	switch key := key.(type) {
 	case *rsa.PrivateKey:
 		return key, nil
+	case *ecdsa.PrivateKey:
+		return key, nil
 	default:
-		return nil, errors.New("key type is not RSA private key")
+		return nil, errors.New("key type is not RSA or ECDSA private key")
 	}
 }
 
 // publicKeyMatches reports whether the two public keys are the same key,
 // compared via their PKIX DER encodings so every public key algorithm found
-// in a CA certificate (RSA today, ECDSA once the pipeline supports it) is
-// handled uniformly.
+// in a CA certificate (RSA and ECDSA) is handled uniformly.
 func publicKeyMatches(a, b crypto.PublicKey) bool {
 	aDER, err := x509.MarshalPKIXPublicKey(a)
 	if err != nil {
@@ -928,12 +944,12 @@ func publicKeyMatches(a, b crypto.PublicKey) bool {
 }
 
 // selectCACertForKey returns the certificate from the ca.crt bundle whose
-// public key matches the provided ca.key private key. During a Strimzi CA
-// rotation the bundle holds the old and the new CA certificate and the one
-// matching the active private key is not necessarily first; signing with a
-// non-matching certificate would issue server certificates whose issuer
-// clients do not trust.
-func selectCACertForKey(caCerts []*x509.Certificate, caKey *rsa.PrivateKey) (*x509.Certificate, error) {
+// public key matches the provided ca.key private key (RSA or ECDSA). During
+// a Strimzi CA rotation the bundle holds the old and the new CA certificate
+// and the one matching the active private key is not necessarily first;
+// signing with a non-matching certificate would issue server certificates
+// whose issuer clients do not trust.
+func selectCACertForKey(caCerts []*x509.Certificate, caKey crypto.Signer) (*x509.Certificate, error) {
 	for _, cert := range caCerts {
 		if publicKeyMatches(cert.PublicKey, caKey.Public()) {
 			return cert, nil
