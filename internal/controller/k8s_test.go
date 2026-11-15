@@ -3872,6 +3872,167 @@ func dropKey(m map[string][]byte, key string) map[string][]byte {
 	return out
 }
 
+// TestGCOrphanedSecrets covers the conservative orphaned-secret garbage
+// collection: secrets controlled by a deleted StrimziSchemaRegistry and stale
+// derived <name>-<old>-jks secrets of a live CR are deleted, while a live
+// CR's own outputs, another live CR's secrets, user TLS secrets and Strimzi
+// CA/user secrets are never touched.
+func TestGCOrphanedSecrets(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	// controlledSecret returns a secret carrying a controller owner
+	// reference to the named StrimziSchemaRegistry, as the operator's own
+	// output secrets do.
+	controlledSecret := func(name, ownerName string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					Kind:       "StrimziSchemaRegistry",
+					Name:       ownerName,
+					UID:        types.UID("uid-" + ownerName),
+					Controller: ptr.To(true),
+				}},
+			},
+			Data: map[string][]byte{"payload": []byte("x")},
+		}
+	}
+	uncontrolledSecret := func(name string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Data:       map[string][]byte{"payload": []byte("x")},
+		}
+	}
+	exists := func(t *testing.T, c client.Client, name string) bool {
+		t.Helper()
+		err := c.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, &corev1.Secret{})
+		if err == nil {
+			return true
+		}
+		if client.IgnoreNotFound(err) == nil {
+			return false
+		}
+		t.Fatalf("failed to get secret %q: %v", name, err)
+		return false
+	}
+
+	inst := newTestInstance()
+	inst.Name = "test-sr"
+	inst.Spec.TLSSecretName = "new-tls"
+	otherCR := newTestInstance()
+	otherCR.Name = "other-sr"
+
+	t.Run("orphan of a deleted CR is deleted", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, controlledSecret("gone-sr-jks", "gone-sr"), controlledSecret("gone-sr-tls", "gone-sr")).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+		r.gcOrphanedSecrets(context.Background(), inst, logr.Logger{})
+		if exists(t, c, "gone-sr-jks") || exists(t, c, "gone-sr-tls") {
+			t.Error("expected the secrets of the deleted CR to be garbage-collected")
+		}
+	})
+
+	t.Run("stale derived jks secret of a live CR is deleted", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst,
+				controlledSecret("test-sr-old-tls-jks", "test-sr"), // <old> != spec.tlssecretname
+				controlledSecret("test-sr-new-tls-jks", "test-sr"), // matches spec.tlssecretname
+			).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+		r.gcOrphanedSecrets(context.Background(), inst, logr.Logger{})
+		if exists(t, c, "test-sr-old-tls-jks") {
+			t.Error("expected the stale derived secret to be garbage-collected")
+		}
+		if !exists(t, c, "test-sr-new-tls-jks") {
+			t.Error("expected the derived secret matching spec.tlssecretname to be kept")
+		}
+	})
+
+	t.Run("live CR's jks and tls outputs are never deleted", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst,
+				controlledSecret("test-sr-jks", "test-sr"),
+				controlledSecret("test-sr-tls", "test-sr"),
+			).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+		r.gcOrphanedSecrets(context.Background(), inst, logr.Logger{})
+		if !exists(t, c, "test-sr-jks") || !exists(t, c, "test-sr-tls") {
+			t.Error("expected the live CR's own output secrets to be kept")
+		}
+	})
+
+	t.Run("another live CR's secrets are never deleted", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, otherCR, controlledSecret("other-sr-jks", "other-sr")).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+		r.gcOrphanedSecrets(context.Background(), inst, logr.Logger{})
+		if !exists(t, c, "other-sr-jks") {
+			t.Error("expected the other live CR's secret to be kept")
+		}
+	})
+
+	t.Run("user TLS and Strimzi CA/user secrets are never touched", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst,
+				uncontrolledSecret("user-tls"),                      // user-provided REST API TLS secret
+				uncontrolledSecret("kafka-cluster-cluster-ca"),      // Strimzi cluster CA key secret
+				uncontrolledSecret("kafka-cluster-cluster-ca-cert"), // Strimzi cluster CA cert secret
+				uncontrolledSecret("test-sr"),                       // Strimzi KafkaUser secret
+			).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+		r.gcOrphanedSecrets(context.Background(), inst, logr.Logger{})
+		for _, name := range []string{"user-tls", "kafka-cluster-cluster-ca", "kafka-cluster-cluster-ca-cert", "test-sr"} {
+			if !exists(t, c, name) {
+				t.Errorf("expected the uncontrolled secret %q to be kept", name)
+			}
+		}
+	})
+
+	t.Run("no error loop after a GC deletion", func(t *testing.T) {
+		// Deleting an orphan emits a Secret Delete event that maps back to
+		// the CR named in the owner reference. For a deleted owner the
+		// reconcile must return cleanly (NotFound early return — no error,
+		// no loop); for a live owner the mapper resolves the CR so the extra
+		// reconcile observes the secret is gone and converges.
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, controlledSecret("test-sr-old-tls-jks", "test-sr")).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+		ctx := context.Background()
+		r.gcOrphanedSecrets(ctx, inst, logr.Logger{})
+		if exists(t, c, "test-sr-old-tls-jks") {
+			t.Fatal("expected the stale derived secret to be garbage-collected")
+		}
+
+		// The Delete event of the GC'd secret maps to its live owner.
+		deleted := controlledSecret("test-sr-old-tls-jks", "test-sr")
+		requests := r.mapSecretToRequests(ctx, deleted)
+		if len(requests) != 1 || requests[0].Name != "test-sr" || requests[0].Namespace != "default" {
+			t.Fatalf("expected exactly one request for the live owner, got %v", requests)
+		}
+
+		// A GC'd secret of a deleted owner maps to the dead CR; reconciling
+		// that request must return cleanly.
+		dead := controlledSecret("gone-sr-jks", "gone-sr")
+		deadRequests := r.mapSecretToRequests(ctx, dead)
+		if len(deadRequests) != 1 || deadRequests[0].Name != "gone-sr" {
+			t.Fatalf("expected exactly one request for the dead owner, got %v", deadRequests)
+		}
+		if _, err := r.Reconcile(ctx, deadRequests[0]); err != nil {
+			t.Fatalf("expected the reconcile of the deleted owner to return cleanly, got: %v", err)
+		}
+	})
+}
+
 // TestImageVersionLabel covers F3: the app.kubernetes.io/version label is
 // derived from the substring after the last ':' of the image reference. A
 // digest-pinned image (image@sha256:<64 hex chars>) yields a 64-character

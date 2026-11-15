@@ -217,6 +217,12 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// Garbage-collect operator-owned secrets orphaned by CR deletion or
+	// spec.tlssecretname transitions. Hygiene only: failures are logged and
+	// never fail reconciliation, so it runs before the validation early
+	// returns too.
+	r.gcOrphanedSecrets(ctx, instance, logger)
+
 	// Validate that ClientAuth is only enabled when SecureHTTP is enabled.
 	if msg := clientAuthValidationError(instance); msg != "" {
 		logger.Info("Invalid ClientAuth configuration; skipping reconciliation")

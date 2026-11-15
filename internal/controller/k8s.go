@@ -979,6 +979,97 @@ func (r *StrimziSchemaRegistryReconciler) persistJKSSecret(ctx context.Context, 
 	return r.Create(ctx, secret)
 }
 
+// gcOrphanedSecrets deletes operator-owned secrets that no longer correspond
+// to a live CR or the CR's current spec, so CR deletion and
+// spec.tlssecretname transitions do not leave stale TLS material behind:
+//   - a secret whose controller owner reference points to a
+//     StrimziSchemaRegistry that no longer exists (the CR was deleted) —
+//     covers the <name>-jks, <name>-tls and derived
+//     <name>-<tlssecretname>-jks outputs;
+//   - a derived <name>-<old>-jks secret of a live CR whose middle segment no
+//     longer matches spec.tlssecretname (the user TLS secret was renamed).
+//
+// The collection is deliberately conservative. Only secrets carrying a
+// controller owner reference to a StrimziSchemaRegistry are ever considered —
+// user-provided TLS secrets, Strimzi CA/user secrets and every uncontrolled
+// secret are never touched. A live CR's <name>-jks and <name>-tls outputs are
+// never deleted either: they are recreated on demand and deleting them would
+// leave pods mounting a missing secret. Errors are logged and skipped so
+// secret hygiene can never fail reconciliation.
+//
+// Deleting an orphan emits a Secret Delete event; mapSecretToRequests maps it
+// back to the CR named in the owner reference. For a deleted owner the
+// reconcile finds the CR gone and returns without error (no loop); for a live
+// owner the extra reconcile observes the secret is gone and converges.
+func (r *StrimziSchemaRegistryReconciler) gcOrphanedSecrets(ctx context.Context, instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger logr.Logger) {
+	secretList := &v1.SecretList{}
+	if err := r.List(ctx, secretList, client.InNamespace(instance.Namespace)); err != nil {
+		logger.Error(err, "Failed to list secrets for orphaned-secret garbage collection")
+		return
+	}
+	for i := range secretList.Items {
+		secret := &secretList.Items[i]
+		owner := metav1.GetControllerOf(secret)
+		if owner == nil || owner.Kind != "StrimziSchemaRegistry" {
+			// Uncontrolled (user TLS, Strimzi CA/user secrets) or foreign-
+			// controlled: never touched.
+			continue
+		}
+		if owner.Name != instance.Name {
+			ownerCR := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			err := r.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: instance.Namespace}, ownerCR)
+			if err == nil {
+				continue // another live CR's secret
+			}
+			if !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to check the owning CR of a controlled secret during garbage collection; skipping it",
+					"Secret.Name", secret.Name, "Owner.Name", owner.Name)
+				continue
+			}
+			// The owning CR no longer exists: the secret is orphaned.
+		} else if !isStaleDerivedJKSSecret(instance, secret.Name) {
+			// This live CR's secret: only a stale derived <name>-<old>-jks
+			// secret is clearly orphaned; the <name>-jks and <name>-tls
+			// outputs are recreated on demand and never garbage-collected
+			// while the CR lives.
+			continue
+		}
+		if err := r.Delete(ctx, secret); err != nil {
+			if !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete an orphaned operator-owned secret", "Secret.Name", secret.Name)
+			}
+			continue
+		}
+		logger.Info("Garbage-collected orphaned operator-owned secret",
+			"Secret.Name", secret.Name, "Secret.Namespace", secret.Namespace)
+	}
+}
+
+// isStaleDerivedJKSSecret reports whether secretName is a derived
+// <name>-<tlssecretname>-jks secret of the given CR whose middle segment no
+// longer matches the CR's current spec.tlssecretname — i.e. a conversion
+// output left behind by a spec.tlssecretname transition. The mTLS keystore
+// (<name>-jks, empty middle segment) and the REST API TLS secret
+// (<name>-tls, not -jks suffixed) never match.
+func isStaleDerivedJKSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, secretName string) bool {
+	prefix := instance.Name + "-"
+	if !strings.HasPrefix(secretName, prefix) {
+		return false
+	}
+	remainder := strings.TrimPrefix(secretName, prefix)
+	// The suffix must actually be present in the remainder: the mTLS
+	// keystore <name>-jks leaves the remainder "jks", which does not end
+	// with "-jks", so it never matches.
+	if !strings.HasSuffix(remainder, jksSecretSuffix) {
+		return false
+	}
+	middle := strings.TrimSuffix(remainder, jksSecretSuffix)
+	if middle == "" {
+		return false
+	}
+	return middle != instance.Spec.TLSSecretName
+}
+
 // createMTLSSecret creates or returns an up-to-date JKS secret containing both
 // the truststore (built from the cluster CA) and the keystore (built from the
 // KafkaUser client certificate) for mTLS authentication.
