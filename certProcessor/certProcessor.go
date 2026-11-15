@@ -462,13 +462,19 @@ func (cp *CertProcessor) CreateKeystore(ctx context.Context, userCACert string, 
 //
 // ctx bounds the openssl and keytool child processes (see CreateTruststore
 // for the deadline semantics, B5).
-func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, caKey string, password string, cn string) ([]byte, string, error) {
+func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, caKey string, password string, name string, namespace string) ([]byte, string, error) {
 	ctx, cancel := withExecDeadline(ctx)
 	defer cancel()
 
-	// Validate CN is not empty
-	if cn == "" {
+	// Validate the DNS identity inputs. name is the CR name — which may
+	// itself contain dots (e.g. my.registry) — and namespace the CR
+	// namespace; the certificate SANs are built from <name>.<namespace>, so
+	// either being empty would produce invalid names.
+	if name == "" {
 		return nil, "", fmt.Errorf("common name (CN) cannot be empty")
+	}
+	if namespace == "" {
+		return nil, "", fmt.Errorf("namespace cannot be empty; the REST API certificate DNS SANs are built from <name>.<namespace>")
 	}
 	// Empty CA material would otherwise surface as a cryptic openssl/keytool
 	// failure or an invalid signed certificate; reject it up front with an
@@ -508,7 +514,7 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 	}
 
 	// Generate server private key and CSR
-	serverKey, csr, err := cp.generateCSR(cn)
+	serverKey, csr, err := cp.generateCSR(name, namespace)
 	if err != nil {
 		cp.log.Error(err, "Failed to generate CSR")
 		return nil, "", err
@@ -756,22 +762,47 @@ func (cp *CertProcessor) KeystoreCertExpiry(ctx context.Context, keystore []byte
 	return cert.NotAfter, nil
 }
 
-func (cp *CertProcessor) generateCSR(cn string) (*rsa.PrivateKey, *x509.CertificateRequest, error) {
+// maxCommonNameLen is the PKI length limit for the certificate Subject
+// CommonName. CR names longer than this are truncated in the CN while the
+// DNS SANs keep the full name.
+const maxCommonNameLen = 64
+
+// clampCommonName truncates the CSR subject CommonName to the 64-character
+// PKI limit; the DNS SANs always keep the full, untruncated name.
+func clampCommonName(name string) string {
+	if len(name) > maxCommonNameLen {
+		return name[:maxCommonNameLen]
+	}
+	return name
+}
+
+// generateCSR creates the REST API server private key and the CSR for it.
+// name is the CR name — which may itself contain dots (e.g. my.registry) —
+// and namespace the CR namespace; both are passed separately so a dotted CR
+// name is never truncated at the first dot. The DNS SANs cover the standard
+// Kubernetes service DNS forms built from the full <name>.<namespace>
+// service name; the non-standard <name>.<namespace>.svc.cluster entry is not
+// included (B22) — it is not a resolvable name and only added noise. The
+// Subject CommonName carries the full CR name clamped to the 64-character
+// PKI limit.
+func (cp *CertProcessor) generateCSR(name, namespace string) (*rsa.PrivateKey, *x509.CertificateRequest, error) {
 	// Generate server private key. The key size is the package-level
 	// rsaKeyBits (2048 by default, B18) instead of a hardcoded 4096.
 	serverKey, err := rsa.GenerateKey(cryptorand.Reader, rsaKeyBits)
 	if err != nil {
 		return nil, nil, err
 	}
+	serviceName := name + "." + namespace
 	// Create CSR template. The DNS names cover the standard Kubernetes
-	// service DNS forms; the non-standard <cn>.svc.cluster entry is not
-	// included (B22) — it is not a resolvable name and only added noise.
+	// service DNS forms; the non-standard <name>.<namespace>.svc.cluster
+	// entry is not included (B22) — it is not a resolvable name and only
+	// added noise.
 	csrTemplate := &x509.CertificateRequest{
 		Subject: pkix.Name{
 			Organization: []string{"Schema Registry"},
-			CommonName:   strings.Split(cn, ".")[0],
+			CommonName:   clampCommonName(name),
 		},
-		DNSNames: []string{strings.Split(cn, ".")[0], cn, cn + ".svc", cn + ".svc.cluster.local"},
+		DNSNames: []string{name, serviceName, serviceName + ".svc", serviceName + ".svc.cluster.local"},
 	}
 	// Create CSR
 	csrDER, err := x509.CreateCertificateRequest(cryptorand.Reader, csrTemplate, serverKey)

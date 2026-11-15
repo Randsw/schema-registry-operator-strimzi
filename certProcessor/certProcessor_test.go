@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -160,7 +161,7 @@ func TestCreateTLSKeystore(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
 	if err != nil {
 		t.Error(err)
 	}
@@ -364,7 +365,7 @@ func TestKeystoreCertExpiry(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
 	if err != nil {
 		t.Fatalf("failed to generate TLS keystore: %v", err)
 	}
@@ -405,7 +406,7 @@ func TestGenerateCSRKeyBits(t *testing.T) {
 
 	t.Run("default key size is 2048 bits", func(t *testing.T) {
 		rsaKeyBits = 2048
-		key, _, err := cp.generateCSR("schema-registry.kafka.svc")
+		key, _, err := cp.generateCSR("schema-registry", "kafka")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -418,7 +419,7 @@ func TestGenerateCSRKeyBits(t *testing.T) {
 		// A distinct value proves the variable is honored (and documents the
 		// supported way to raise the key size).
 		rsaKeyBits = 3072
-		key, _, err := cp.generateCSR("schema-registry.kafka.svc")
+		key, _, err := cp.generateCSR("schema-registry", "kafka")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -433,7 +434,7 @@ func TestGenerateCSRKeyBits(t *testing.T) {
 // <cn>.svc.cluster entry, which is not a resolvable name.
 func TestGenerateCSRDNSNames(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
-	_, csr, err := cp.generateCSR("test-sr.default")
+	_, csr, err := cp.generateCSR("test-sr", "default")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -451,6 +452,51 @@ func TestGenerateCSRDNSNames(t *testing.T) {
 	if _, ok := got["test-sr.default.svc.cluster"]; ok {
 		t.Errorf("expected the non-standard <cn>.svc.cluster DNS name to be dropped, got %v", csr.DNSNames)
 	}
+	// The subject CN carries the full CR name (clamped to the PKI limit).
+	if csr.Subject.CommonName != "test-sr" {
+		t.Errorf("expected the CN to be the full CR name %q, got %q", "test-sr", csr.Subject.CommonName)
+	}
+}
+
+// TestGenerateCSRDottedName covers the dot-in-CR-name fix: a CR named
+// my.registry in namespace ns must get DNS SANs built from the FULL name
+// (my.registry, my.registry.ns, ...) and the full name as the subject CN —
+// the pre-fix code split the combined name.namespace argument on the first
+// dot and produced my everywhere.
+func TestGenerateCSRDottedName(t *testing.T) {
+	cp := NewCertProcessor(logr.Logger{})
+	_, csr, err := cp.generateCSR("my.registry", "ns")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []string{"my.registry", "my.registry.ns", "my.registry.ns.svc", "my.registry.ns.svc.cluster.local"}
+	if !slices.Equal(csr.DNSNames, want) {
+		t.Errorf("expected DNS SANs %v, got %v", want, csr.DNSNames)
+	}
+	if csr.Subject.CommonName != "my.registry" {
+		t.Errorf("expected the CN to be the full CR name %q, got %q", "my.registry", csr.Subject.CommonName)
+	}
+}
+
+// TestGenerateCSRCommonNameClamped covers the 64-character PKI limit of the
+// subject CommonName: a CR name longer than 64 characters is truncated in the
+// CN while the DNS SANs keep the full, untruncated name.
+func TestGenerateCSRCommonNameClamped(t *testing.T) {
+	cp := NewCertProcessor(logr.Logger{})
+	longName := strings.Repeat("a", 70)
+	_, csr, err := cp.generateCSR(longName, "ns")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if csr.Subject.CommonName != longName[:64] {
+		t.Errorf("expected the CN to be clamped to the 64-character prefix %q, got %q", longName[:64], csr.Subject.CommonName)
+	}
+	want := []string{longName, longName + ".ns", longName + ".ns.svc", longName + ".ns.svc.cluster.local"}
+	if !slices.Equal(csr.DNSNames, want) {
+		t.Errorf("expected the DNS SANs to keep the full name %v, got %v", want, csr.DNSNames)
+	}
 }
 
 // TestSignCSRNotBeforeSkewMargin covers B9: the signed REST API certificate
@@ -464,7 +510,7 @@ func TestSignCSRNotBeforeSkewMargin(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	_, csr, err := cp.generateCSR("schema-registry.kafka.svc")
+	_, csr, err := cp.generateCSR("schema-registry", "kafka")
 	if err != nil {
 		t.Fatalf("failed to generate CSR: %v", err)
 	}
@@ -532,7 +578,7 @@ func TestConcurrentCertGeneration(t *testing.T) {
 				return
 			}
 
-			tlsKeystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+			tlsKeystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
 			if err != nil {
 				errCh <- fmt.Errorf("GenerateTLSforHTTP: %w", err)
 				return
@@ -565,7 +611,7 @@ func TestGenerateTLSforHTTP_EmptyCN(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "")
+	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "", "default")
 	if err == nil {
 		// If no error returned, verify the keystore is empty (indicating failure)
 		if len(keystore) == 0 {
@@ -573,6 +619,28 @@ func TestGenerateTLSforHTTP_EmptyCN(t *testing.T) {
 		} else {
 			t.Error("expected error when generating TLS with empty CN, got nil")
 		}
+	}
+}
+
+// TestGenerateTLSforHTTP_EmptyNamespace verifies that GenerateTLSforHTTP
+// rejects an empty namespace with an actionable error: the certificate DNS
+// SANs are built from <name>.<namespace>.
+func TestGenerateTLSforHTTP_EmptyNamespace(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "")
+	if err == nil {
+		t.Fatal("expected an error for an empty namespace, got nil")
+	}
+	if len(keystore) != 0 {
+		t.Error("expected no keystore on invalid input")
+	}
+	if !strings.Contains(err.Error(), "namespace") {
+		t.Errorf("expected the error to name the namespace, got: %v", err)
 	}
 }
 
@@ -852,7 +920,7 @@ func TestGenerateTLSforHTTP_SelectsCAMatchingKey(t *testing.T) {
 	bundle := caOld.CACertPEM + caNew.CACertPEM
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), bundle, caNew.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), bundle, caNew.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -914,7 +982,7 @@ func TestGenerateTLSforHTTP_NoCertMatchesKey(t *testing.T) {
 	bundle := caOld.CACertPEM + caNew.CACertPEM
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), bundle, caOther.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), bundle, caOther.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
 	if err == nil {
 		t.Fatal("expected an error when no bundle certificate matches ca.key, got nil")
 	}
@@ -952,7 +1020,7 @@ func TestGenerateTLSforHTTP_EmptyInputs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), tt.caCert, tt.caKey, "test1234", "confluent-schema-registry.kafka")
+			keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), tt.caCert, tt.caKey, "test1234", "confluent-schema-registry", "kafka")
 			if err == nil {
 				t.Fatal("expected an error, got nil")
 			}

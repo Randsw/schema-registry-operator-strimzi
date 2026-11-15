@@ -1624,7 +1624,7 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 	logger.Info("Creating keystore for TLS secret", "Secret Name", jksTLSSecretName)
 	cp := certprocessor.NewCertProcessor(logger)
 	TLSKeystore, TLSKeystorePassword, err := cp.GenerateTLSforHTTP(ctx, clusterCert, clusterKey, "",
-		instance.Name+"."+instance.Namespace)
+		instance.Name, instance.Namespace)
 	if err != nil {
 		return nil, false, err
 	}

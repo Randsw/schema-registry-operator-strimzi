@@ -3408,7 +3408,7 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		t.Fatalf("failed to generate CA: %v", err)
 	}
 	cp := certprocessor.NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "test-sr.default")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "test-sr", "default")
 	if err != nil {
 		t.Fatalf("failed to generate TLS keystore: %v", err)
 	}
