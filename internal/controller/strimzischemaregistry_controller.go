@@ -151,6 +151,7 @@ func userTLSSecretValidationError(secretName string, secret *v1.Secret, keystore
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kafka.strimzi.io,resources=kafkas,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kafka.strimzi.io,resources=kafkausers,verbs=get;list;watch
@@ -224,14 +225,14 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			}
 		}
 		if r.Recorder != nil {
-			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ClientAuthRequiresSecureHTTP", "",
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ClientAuthRequiresSecureHTTP", "Validate",
 				"spec.clientauth is set but spec.securehttp is false; mutual TLS on the REST API will not be enabled")
 			// B12: reconciliation is skipped entirely for this invalid
 			// combination, so a previously created Deployment keeps serving
 			// with its current configuration and is no longer reconciled.
 			// Say so explicitly — the validation event above alone read like
 			// a mere mTLS downgrade.
-			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "",
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "Validate",
 				"reconciliation is skipped until the invalid spec.clientauth/spec.securehttp combination is fixed; an existing Deployment (if any) keeps running with its current configuration and is no longer reconciled")
 		}
 		return ctrl.Result{}, nil
@@ -259,8 +260,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			}
 		}
 		if r.Recorder != nil {
-			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReplicasRequireUserTLSSecret", "", "%s", msg)
-			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "",
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReplicasRequireUserTLSSecret", "Validate", "%s", msg)
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "Validate",
 				"reconciliation is skipped until the unsupported spec.replicas/spec.securehttp/spec.tlssecretname combination is fixed; an existing Deployment (if any) keeps running with its current configuration and is no longer reconciled")
 		}
 		return ctrl.Result{}, nil
@@ -303,7 +304,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 				}
 			}
 			if r.Recorder != nil {
-				r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "InvalidTLSSecret", "", "%s", msg)
+				r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "InvalidTLSSecret", "Validate", "%s", msg)
 			}
 			// The Secret watch re-enqueues when the user fixes the secret;
 			// the requeue is only a safety net.
@@ -491,7 +492,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		serviceAdopted = true
 		if r.Recorder != nil {
-			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ServiceAdopted", "",
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ServiceAdopted", "Adopt",
 				"Service %s/%s already existed without a controller owner; the operator adopted it and set its controller reference",
 				instance.Namespace, instance.Name)
 		}
@@ -1314,7 +1315,7 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 	}
 	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
 	if r.Recorder != nil {
-		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "TLSCertificateRenewed", "",
+		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "TLSCertificateRenewed", "RenewCertificate",
 			"%s; renewed it and rolling the deployment", renewReason)
 	}
 
@@ -1391,7 +1392,7 @@ func (r *StrimziSchemaRegistryReconciler) recreateMissingTLSSecret(
 	}
 	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
 	if r.Recorder != nil {
-		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "TLSSecretRecreated", "",
+		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "TLSSecretRecreated", "RecreateSecret",
 			"REST API TLS secret %s was deleted; recreated it and rolling the deployment", instance.Name+tlsSecretSuffix)
 	}
 	// Roll the deployment so the JVM reloads the recreated keystore.
@@ -1501,7 +1502,7 @@ func (r *StrimziSchemaRegistryReconciler) emitConfigOverriddenEvents(instance *s
 		return
 	}
 	for _, key := range overridden {
-		r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ConfigKeyOverridden", "",
+		r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ConfigKeyOverridden", "OverrideConfig",
 			"configuration key %q is operator-managed and was ignored", key)
 	}
 }

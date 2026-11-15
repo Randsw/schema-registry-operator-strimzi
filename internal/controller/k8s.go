@@ -2055,7 +2055,7 @@ func (r *StrimziSchemaRegistryReconciler) recreateDeploymentForLegacySelector(
 		return nil, false, err
 	}
 	if r.Recorder != nil {
-		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "DeploymentRecreated", "",
+		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "DeploymentRecreated", "RecreateDeployment",
 			"Deployment %s had a selector containing mutable labels (e.g. app.kubernetes.io/version, strimzi.io/cluster); the selector field is immutable, so it was deleted and re-created with the stable identity selector as a one-time migration (Schema Registry is stateless)", dep.Name)
 	}
 	return dep, false, nil
