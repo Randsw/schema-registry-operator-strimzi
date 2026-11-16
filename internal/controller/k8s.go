@@ -344,7 +344,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	podSpec.Labels = mergeStringMaps(podSpec.Labels, ls)
 	// Start from the user annotations so they are preserved, then set the
 	// operator-managed rollout markers (which override conflicting keys).
-	podSpec.Annotations = mergeStringMaps(podSpec.Annotations, map[string]string{keyPrefix + "/jksVersion": jksResourceVersion})
+	podSpec.Annotations = mergeStringMaps(podSpec.Annotations, map[string]string{jksVersionKey: jksResourceVersion})
 	// Track the KafkaUser secret version for SASL modes so credential changes
 	// trigger a rollout without rebuilding any JKS material.
 	if auth.NeedsSASL {
@@ -999,8 +999,8 @@ func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimzireg
 	if err == nil {
 		if isUpToDate(jks_secret.Annotations) {
 			logger.V(1).Info("JKS secret is up-to-date")
-			// Return the existing secret (not nil) so the caller has it for
-			// updateDeployment without needing to re-fetch.
+			// Return the existing secret (not nil) so the caller has its current
+			// ResourceVersion for the rollout annotation without re-fetching.
 			return jks_secret, true, nil
 		}
 		logger.V(1).Info("JKS secret is stale; caller will update it in place")

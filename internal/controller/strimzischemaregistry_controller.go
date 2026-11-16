@@ -63,6 +63,7 @@ const CAVersionKey = keyPrefix + "/caSecretVersion"
 const userVersionKey = keyPrefix + "/clientSecretVersion"
 const saslUserVersionKey = keyPrefix + "/saslUserSecretVersion"
 const tlsVersionKey = keyPrefix + "/tlsVersion"
+const jksVersionKey = keyPrefix + "/jksVersion"
 
 // tlsCertRenewalThreshold is how close to expiry the operator-managed REST
 // API TLS certificate must be before it is renewed. It is a variable so
@@ -823,16 +824,22 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 			}
 		}
 		monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
-		dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
+		// The recreated secret's ResourceVersion drives the rollout
+		// annotation; fetch it fresh so the version reflects the persisted
+		// object.
+		recreated := &v1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, recreated); err != nil {
+			logger.Error(err, "Failed to get recreated jks secret for the rollout annotation")
+			return ctrl.Result{}, err
+		}
+		patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, recreated.ResourceVersion, "jks secret recreation")
 		if err != nil {
-			logger.Error(err, "Failed to get deployment for missing jks secret recreation")
+			logger.Error(err, "Failed to roll deployment after jks secret recreation")
 			return ctrl.Result{}, err
 		}
-		if err := r.Update(ctx, dep); err != nil {
-			logger.Error(err, "Failed to update deployment after jks secret recreation")
-			return ctrl.Result{}, err
+		if !patched {
+			return ctrl.Result{}, nil
 		}
-		logger.Info("Deployment updated after jks secret recreation", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
@@ -859,6 +866,17 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 	}
 
 	if !userSecretChanged && !clusterCASecretChanged {
+		// No secret churn — but the Deployment rollout may still be pending
+		// after a failed Deployment update (e.g. a 409 Conflict): drive the
+		// check from the pod-template annotation instead of the secret's
+		// change markers, which already match here.
+		patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, curr_secret.ResourceVersion, "jks secret")
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if patched {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -904,17 +922,14 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 	}
 	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
 	logger.Info("Creating new jks secret after user or cluster CA secret changed was successful")
-	dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
+	patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, newSecret.ResourceVersion, "user or cluster CA secret change")
 	if err != nil {
-		logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		logger.Error(err, "Failed to roll deployment after user or cluster CA secret changed")
 		return ctrl.Result{}, err
 	}
-	err = r.Update(ctx, dep)
-	if err != nil {
-		logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
-		return ctrl.Result{}, err
+	if !patched {
+		return ctrl.Result{}, nil
 	}
-	logger.Info("Deployment updated after secret change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
@@ -1081,6 +1096,56 @@ func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSASLUserSecret(
 	}
 	dep.Spec.Template.Annotations[saslUserVersionKey] = userSecret.ResourceVersion
 	return dep, nil
+}
+
+// rollDeploymentForSecretVersion drives a rotation rollout from the
+// Deployment's own pod template annotations (mirroring
+// handleUserTLSSecretRotation): the desired annotation value is the current
+// ResourceVersion of the secret the pods consume, and the Deployment is
+// patched — which changes the pod template and triggers a rollout — only when
+// the recorded annotation differs. Comparing against the Deployment state
+// instead of the secret's own change markers keeps the rollout recoverable:
+// when a Deployment update fails (e.g. a 409 Conflict) the secret already
+// carries its new change-marker annotations, so a secret-churn comparison
+// would skip the rollout forever and the pods would keep the old in-memory
+// keystore/truststore until manually restarted. With the annotation check the
+// next reconcile observes the mismatch and retries the patch. It is a no-op
+// when the Deployment does not exist (nothing to roll) and when the
+// annotation already matches (no spurious rollout).
+func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSecretVersion(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+	annotationKey string,
+	secretVersion string,
+	reason string,
+) (bool, error) {
+	dep := &apps.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, dep); err != nil {
+		if errors.IsNotFound(err) {
+			// Nothing to roll before the Deployment exists.
+			return false, nil
+		}
+		return false, err
+	}
+	current := ""
+	if dep.Spec.Template.Annotations != nil {
+		current = dep.Spec.Template.Annotations[annotationKey]
+	}
+	if current == secretVersion {
+		return false, nil
+	}
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations[annotationKey] = secretVersion
+	if err := r.Update(ctx, dep); err != nil {
+		return false, err
+	}
+	logger.Info("Deployment rolled after "+reason,
+		"Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace,
+		"Annotation", annotationKey, "Secret.Version", secretVersion)
+	return true, nil
 }
 
 // mapStrimziResourceToRequests enqueues reconcile requests for the
