@@ -387,6 +387,68 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// Check if the Deployment already exists, if not create a new one
+	found := &apps.Deployment{}
+	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, found)
+	if err != nil && errors.IsNotFound(err) {
+		// Define a new Deployment
+		deployment, err := r.createDeployment(instance, ctx, logger)
+		if err != nil {
+			logger.Error(err, "Failed to create deployment")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+			return ctrl.Result{}, err
+		}
+		err = r.Create(ctx, deployment)
+		if err != nil {
+			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+			return ctrl.Result{}, err
+		}
+		// Deployment created successfully - return and requeue
+		logger.Info("Deployment created successfully", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
+		// F6: update the gauge before the early return so it is correct on
+		// the first reconcile instead of lagging one reconcile behind.
+		r.updateInstanceCountMetric(ctx)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	} else if err != nil {
+		logger.Error(err, "Failed to get Deployment")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+		return ctrl.Result{}, err
+	}
+
+	// Deployment exists — reconcile spec changes BEFORE the rotation
+	// handlers. The rotation handlers patch mounts and rollout annotations on
+	// the live Deployment; running them first would patch the STALE spec and
+	// roll pods with a broken intermediate state (e.g. a PKCS12 keystore
+	// mounted while SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION still points at the
+	// JKS file) followed by a second rollout once the spec change landed. With
+	// the spec reconciled first, a rotation rollout is applied on the next
+	// pass against the current spec — never before it.
+	updatedDep, specChanged, err := r.updateExistingDeployment(instance, ctx, logger, found)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile deployment spec changes")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+		return ctrl.Result{}, err
+	}
+	if specChanged {
+		err = r.Update(ctx, updatedDep)
+		if err != nil {
+			logger.Error(err, "Failed to update deployment after spec change")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+			return ctrl.Result{}, err
+		}
+		monitoring.StrimziSchemaRegistryDeploymentUpdateTotal.Inc()
+		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		// F6: keep the gauge correct on the early-return path too.
+		r.updateInstanceCountMetric(ctx)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
 	// Handle secret rotation if user or cluster CA secrets have changed.
 	result, err := r.handleSecretRotation(ctx, instance, logger, strimziClusterName)
 	if err != nil {
@@ -422,61 +484,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	if result.RequeueAfter > 0 {
 		return result, nil
-	}
-
-	// Check if the Deployment already exists, if not create a new one
-	found := &apps.Deployment{}
-	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, found)
-	if err != nil && errors.IsNotFound(err) {
-		// Define a new Deployment
-		deployment, err := r.createDeployment(instance, ctx, logger)
-		if err != nil {
-			logger.Error(err, "Failed to create deployment")
-			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-			return ctrl.Result{}, err
-		}
-		err = r.Create(ctx, deployment)
-		if err != nil {
-			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
-			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-			return ctrl.Result{}, err
-		}
-		// Deployment created successfully - return and requeue
-		logger.Info("Deployment created successfully", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
-		// F6: update the gauge before the early return so it is correct on
-		// the first reconcile instead of lagging one reconcile behind.
-		r.updateInstanceCountMetric(ctx)
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	} else if err != nil {
-		logger.Error(err, "Failed to get Deployment")
-		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-		return ctrl.Result{}, err
-	}
-
-	// Deployment exists — reconcile spec changes
-	updatedDep, specChanged, err := r.updateExistingDeployment(instance, ctx, logger, found)
-	if err != nil {
-		logger.Error(err, "Failed to reconcile deployment spec changes")
-		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-		return ctrl.Result{}, err
-	}
-	if specChanged {
-		err = r.Update(ctx, updatedDep)
-		if err != nil {
-			logger.Error(err, "Failed to update deployment after spec change")
-			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-			return ctrl.Result{}, err
-		}
-		monitoring.StrimziSchemaRegistryDeploymentUpdateTotal.Inc()
-		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
-		// F6: keep the gauge correct on the early-return path too.
-		r.updateInstanceCountMetric(ctx)
-		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	// The Deployment's effective desired replica count: Spec.Replicas when
 	// set (e.g. by a manual kubectl scale, which B6 preserves), else the
