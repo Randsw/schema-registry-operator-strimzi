@@ -189,6 +189,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	// Schema Registry REST API TLS secret
 	var TLSSecretName string
+	var tlsResourceVersion string
 	if instance.Spec.SecureHTTP {
 		if instance.Spec.TLSSecretName == "" {
 			TLSSecret, exists, err := r.createTLSSecret(instance, ctx, logger, kafkaClusterName)
@@ -207,6 +208,12 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			}
 			logger.Info("Secret for Schema Registry TLS created/updated successfully", "Secret.Name", TLSSecret.Name)
 			TLSSecretName = TLSSecret.Name
+			// Record the operator-managed REST API TLS secret version so the
+			// tlsVersion rollout annotation is present from creation: the
+			// annotation-driven renewal check (handleTLSCertExpiry) then
+			// compares against a recorded value instead of rolling a freshly
+			// created deployment one extra time.
+			tlsResourceVersion = TLSSecret.ResourceVersion
 		} else {
 			TLSSecretName = instance.Spec.TLSSecretName
 		}
@@ -226,7 +233,6 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	// Track the user-provided REST API TLS secret version so rotating the
 	// secret (e.g. a cert-manager reissue) triggers a rollout: the Schema
 	// Registry JVM reads the JKS keystore once at startup.
-	tlsResourceVersion := ""
 	if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName != "" {
 		userTLSSecret := &v1.Secret{}
 		if err := r.Get(ctx, types.NamespacedName{Name: TLSSecretName, Namespace: instance.Namespace}, userTLSSecret); err != nil {
@@ -351,10 +357,14 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 		podSpec.Annotations[saslUserVersionKey] = saslUserResourceVersion
 	}
 
-	// Track the user-provided REST API TLS secret version so rotating the
-	// secret triggers a rollout. Only set for user-provided secrets; the
-	// operator-managed TLS secret records its version on renewal instead
-	// (handleTLSCertExpiry), preserving its existing semantics.
+	// Track the REST API TLS secret version so rotating the secret triggers
+	// a rollout: user-provided secrets record the user secret's version,
+	// operator-managed secrets the <name>-tls secret's version. Recording
+	// the operator-managed version at build time keeps the annotation
+	// present from creation, so the annotation-driven renewal check
+	// (handleTLSCertExpiry) compares against a recorded value instead of
+	// rolling a freshly created deployment one extra time, and a spec
+	// update never drops the marker the rotation handlers maintain.
 	if tlsResourceVersion != "" {
 		podSpec.Annotations[tlsVersionKey] = tlsResourceVersion
 	}
@@ -1840,39 +1850,6 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 	return jksTLSSecret, exists, nil
 }
 
-func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
-	ctx context.Context, logger logr.Logger, jksSecret *v1.Secret) (*apps.Deployment, error) {
-	// Update deployment
-	dep := &apps.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, dep)
-	if err != nil {
-		logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
-		return nil, err
-	}
-	if jksSecret == nil {
-		jksSecret = &v1.Secret{}
-		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, jksSecret)
-		if err != nil {
-			// A missing -jks secret is not an error: PLAINTEXT and
-			// SASL_PLAINTEXT without clientauth never have one. The only
-			// caller passing nil (handleTLSCertExpiry) only needs the
-			// tlsVersion annotation, so skip the jksVersion annotation
-			// instead of failing every renewal reconcile in those modes.
-			if errors.IsNotFound(err) {
-				logger.Info("No jks secret found; skipping the jksVersion annotation", "Secret.Name", instance.Name+jksSecretSuffix)
-				return dep, nil
-			}
-			logger.Error(err, "Failed to get jks secret after user or cluster CA secret changed")
-			return nil, err
-		}
-	}
-	if dep.Spec.Template.Annotations == nil {
-		dep.Spec.Template.Annotations = make(map[string]string)
-	}
-	dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = jksSecret.ResourceVersion
-	return dep, nil
-}
-
 // computeSpecHash computes a hash of the relevant spec fields to detect changes.
 // The hash covers CompatibilityLevel, SecureHTTP, ClientAuth, HeapOpts, Listener,
 // SecurityProtocol, TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor,
@@ -2074,6 +2051,18 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 			}
 		} else {
 			TLSSecretName = instance.Name + tlsSecretSuffix
+			// Record the operator-managed REST API TLS secret version so the
+			// tlsVersion rollout annotation survives spec updates (instead of
+			// being dropped, which would make the next renewal check see a
+			// missing marker and roll the pods again) and the annotation-
+			// driven renewal check compares against a recorded value. A
+			// missing secret (recreation pending) records nothing.
+			tlsSecret := &v1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{Name: TLSSecretName, Namespace: instance.Namespace}, tlsSecret); err != nil && !errors.IsNotFound(err) {
+				return nil, false, fmt.Errorf("failed to get operator-managed TLS secret: %w", err)
+			} else if err == nil {
+				tlsResourceVersion = tlsSecret.ResourceVersion
+			}
 		}
 	}
 

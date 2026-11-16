@@ -1511,6 +1511,17 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 			// renewal happens on time even if no watch event ever fires again.
 			// An already-expired or near-expiry certificate (time.Until <=
 			// threshold) falls through to the renewal below.
+			// No renewal is due, but the rollout for a previous renewal may
+			// still be pending after a failed Deployment update: drive the
+			// check from the tlsVersion pod-template annotation instead of
+			// the secret's change markers, which already match here.
+			patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, tlsVersionKey, tlsSecret.ResourceVersion, "REST API TLS secret")
+			if err != nil {
+				return ctrl.Result{}, 0, err
+			}
+			if patched {
+				return ctrl.Result{RequeueAfter: time.Second}, 0, nil
+			}
 			return ctrl.Result{}, certRecheckInterval(notAfter), nil
 		}
 
@@ -1541,21 +1552,17 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 
 	// Roll the deployment so the JVM reloads the renewed keystore. The
 	// tlsVersion pod-template annotation changes on every renewal, forcing
-	// a rollout even though the JKS secret itself did not change.
-	dep, err := r.updateDeployment(instance, ctx, logger, nil)
+	// a rollout even though the JKS secret itself did not change. The check
+	// is driven from the pod-template annotation, so a Deployment update
+	// that failed with a conflict is retried on the next reconcile.
+	patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, tlsVersionKey, newSecret.ResourceVersion, "REST API TLS certificate renewal")
 	if err != nil {
-		logger.Error(err, "Failed to get deployment for TLS certificate renewal rollout")
+		logger.Error(err, "Failed to roll deployment after TLS certificate renewal")
 		return ctrl.Result{}, 0, err
 	}
-	if dep.Spec.Template.Annotations == nil {
-		dep.Spec.Template.Annotations = make(map[string]string)
+	if !patched {
+		return ctrl.Result{}, 0, nil
 	}
-	dep.Spec.Template.Annotations[tlsVersionKey] = newSecret.ResourceVersion
-	if err := r.Update(ctx, dep); err != nil {
-		logger.Error(err, "Failed to update deployment after TLS certificate renewal")
-		return ctrl.Result{}, 0, err
-	}
-	logger.Info("Deployment updated after TLS certificate renewal", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 	// The 1s requeue re-runs the expiry check after the renewal, so no
 	// standing interval is needed here.
 	return ctrl.Result{RequeueAfter: time.Second}, 0, nil
@@ -1615,21 +1622,18 @@ func (r *StrimziSchemaRegistryReconciler) recreateMissingTLSSecret(
 		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "TLSSecretRecreated", "RecreateSecret",
 			"REST API TLS secret %s was deleted; recreated it and rolling the deployment", instance.Name+tlsSecretSuffix)
 	}
-	// Roll the deployment so the JVM reloads the recreated keystore.
-	dep, err = r.updateDeployment(instance, ctx, logger, nil)
+	// Roll the deployment so the JVM reloads the recreated keystore. The
+	// check is driven from the tlsVersion pod-template annotation, so a
+	// Deployment update that failed with a conflict is retried on the next
+	// reconcile.
+	patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, tlsVersionKey, newSecret.ResourceVersion, "TLS secret recreation")
 	if err != nil {
-		logger.Error(err, "Failed to get deployment for TLS secret recreation rollout")
+		logger.Error(err, "Failed to roll deployment after TLS secret recreation")
 		return ctrl.Result{}, err
 	}
-	if dep.Spec.Template.Annotations == nil {
-		dep.Spec.Template.Annotations = make(map[string]string)
+	if !patched {
+		return ctrl.Result{}, nil
 	}
-	dep.Spec.Template.Annotations[tlsVersionKey] = newSecret.ResourceVersion
-	if err := r.Update(ctx, dep); err != nil {
-		logger.Error(err, "Failed to update deployment after TLS secret recreation")
-		return ctrl.Result{}, err
-	}
-	logger.Info("Deployment updated after TLS secret recreation", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 

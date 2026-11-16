@@ -1452,11 +1452,16 @@ func TestHandleTLSCertExpiryRenewsOnCAChange(t *testing.T) {
 		},
 		Data: map[string][]byte{"ca.key": []byte(ca.CAKeyPEM)},
 	}
+	// The deployment records the -tls secret's resourceVersion ("2000") in
+	// the tlsVersion pod-template annotation, mirroring an operator-created
+	// deployment: the annotation-driven rollout check is then a no-op until
+	// the secret is renewed (a new ResourceVersion).
 	deployment := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + deploySuffix, Namespace: inst.Namespace},
 		Spec: apps.DeploymentSpec{
 			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{tlsVersionKey: "2000"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
 			},
 		},
 	}
@@ -1531,6 +1536,20 @@ func TestHandleTLSCertExpiryRenewsOnCAChange(t *testing.T) {
 		}
 		if err := client.Create(ctx, seeded); err != nil {
 			t.Fatalf("failed to create the seeded -tls secret: %v", err)
+		}
+
+		// Record the seeded secret's version on the deployment pod template
+		// so the annotation-driven rollout check (no renewal due) is a no-op.
+		deployed := &apps.Deployment{}
+		if err := client.Get(ctx, types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, deployed); err != nil {
+			t.Fatalf("failed to get deployment: %v", err)
+		}
+		if deployed.Spec.Template.Annotations == nil {
+			deployed.Spec.Template.Annotations = map[string]string{}
+		}
+		deployed.Spec.Template.Annotations[tlsVersionKey] = seeded.ResourceVersion
+		if err := client.Update(ctx, deployed); err != nil {
+			t.Fatalf("failed to record the seeded secret version on the deployment: %v", err)
 		}
 
 		result, recheck, err := r.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
@@ -3947,9 +3966,10 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 	}
 	tlsSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        inst.Name + tlsSecretSuffix,
-			Namespace:   inst.Namespace,
-			Annotations: map[string]string{CAVersionKey: "1000"},
+			Name:            inst.Name + tlsSecretSuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "2000",
+			Annotations:     map[string]string{CAVersionKey: "1000"},
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -3963,11 +3983,16 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		Type:       corev1.SecretTypeOpaque,
 		Data:       map[string][]byte{"truststore.jks": []byte("stub")},
 	}
+	// The deployment records the -tls secret's resourceVersion in the
+	// tlsVersion pod-template annotation, mirroring an operator-created
+	// deployment: the annotation-driven rollout check is then a no-op until
+	// the secret is renewed (a new ResourceVersion).
 	deployment := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + deploySuffix, Namespace: inst.Namespace},
 		Spec: apps.DeploymentSpec{
 			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{tlsVersionKey: "2000"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
 			},
 		},
 	}
@@ -4015,9 +4040,10 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		}
 		freshTLSSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + tlsSecretSuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{CAVersionKey: "1000"},
+				Name:            inst.Name + tlsSecretSuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "2000",
+				Annotations:     map[string]string{CAVersionKey: "1000"},
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
