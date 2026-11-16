@@ -955,6 +955,7 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 
 	// Detect a cluster CA change for SASL_SSL (truststore-only rebuild).
 	var CAsecret *v1.Secret
+	var currJKSSecret *v1.Secret
 	clusterCASecretChanged := false
 	if auth.NeedsTruststore {
 		CAsecret = &v1.Secret{}
@@ -970,6 +971,10 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 		}
 		if errors.IsNotFound(err) || curr_secret.Annotations[CAVersionKey] != CAsecret.ResourceVersion {
 			clusterCASecretChanged = true
+		} else {
+			// Up-to-date truststore secret: kept for the annotation-driven
+			// rollout check below.
+			currJKSSecret = curr_secret
 		}
 	}
 
@@ -986,17 +991,28 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 			}
 		}
 		monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
-		dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
+		patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, newSecret.ResourceVersion, "cluster CA secret change")
 		if err != nil {
-			logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+			logger.Error(err, "Failed to roll deployment after cluster CA secret changed")
 			return ctrl.Result{}, err
 		}
-		if err := r.Update(ctx, dep); err != nil {
-			logger.Error(err, "Failed to update deployment after cluster CA secret changed")
-			return ctrl.Result{}, err
+		if !patched {
+			return ctrl.Result{}, nil
 		}
-		logger.Info("Deployment updated after cluster CA secret changed", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	// No cluster CA churn — but the truststore rollout may still be pending
+	// after a failed Deployment update: drive the check from the pod-template
+	// annotation instead of the secret's change markers, which already match.
+	if currJKSSecret != nil {
+		patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, currJKSSecret.ResourceVersion, "jks secret")
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if patched {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 	}
 
 	// Roll the deployment when the KafkaUser SCRAM credential secret changes.
@@ -1038,20 +1054,22 @@ func (r *StrimziSchemaRegistryReconciler) handleClientAuthTruststoreRotation(
 		logger.Error(err, "Failed to ensure client-auth truststore secret")
 		return ctrl.Result{}, err
 	}
-	if !created {
+	if created {
+		monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
+	}
+	// Drive the rollout check from the Deployment's pod-template annotation:
+	// patch only when the recorded jksVersion differs from the truststore
+	// secret's current ResourceVersion. This also retries a rollout whose
+	// Deployment update previously failed with a conflict, and is a no-op
+	// (no spurious rollout) once the annotation matches.
+	patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, secret.ResourceVersion, "client-auth truststore change")
+	if err != nil {
+		logger.Error(err, "Failed to roll deployment after client-auth truststore change")
+		return ctrl.Result{}, err
+	}
+	if !patched {
 		return ctrl.Result{}, nil
 	}
-	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
-	dep, err := r.updateDeployment(instance, ctx, logger, secret)
-	if err != nil {
-		logger.Error(err, "Failed to update deployment after client-auth truststore change")
-		return ctrl.Result{}, err
-	}
-	if err := r.Update(ctx, dep); err != nil {
-		logger.Error(err, "Failed to update deployment after client-auth truststore change")
-		return ctrl.Result{}, err
-	}
-	logger.Info("Deployment updated after client-auth truststore change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
