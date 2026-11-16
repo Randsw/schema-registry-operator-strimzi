@@ -1554,35 +1554,108 @@ func TestHandleTLSCertExpiryRenewsOnCAChange(t *testing.T) {
 	})
 }
 
-// TestBuildProbesInitialDelay verifies that readiness and liveness probes no
-// longer carry an InitialDelaySeconds value (the startup probe already gates
-// them), while the startup probe keeps its 30s initial delay.
-func TestBuildProbesInitialDelay(t *testing.T) {
-	t.Run("HTTP probes have no initial delay and startup keeps 30s", func(t *testing.T) {
-		readiness, liveness, startup := buildProbes(8081, corev1.URISchemeHTTP)
+// TestBuildProbes verifies probe construction: readiness and liveness probes
+// carry no InitialDelaySeconds (the startup probe gates them), the startup
+// budget is 10s delay + 12 x 10s periods, and the readiness/startup handlers
+// switch to TCPSocket for HTTPS or when authentication.method is configured
+// (an authenticated listener rejects unauthenticated HTTP GET probes with
+// 401).
+func TestBuildProbes(t *testing.T) {
+	assertStartupBudget := func(t *testing.T, startup *corev1.Probe) {
+		t.Helper()
+		if startup.InitialDelaySeconds != 10 {
+			t.Errorf("expected startup InitialDelaySeconds=10, got %d", startup.InitialDelaySeconds)
+		}
+		if startup.PeriodSeconds != 10 {
+			t.Errorf("expected startup PeriodSeconds=10, got %d", startup.PeriodSeconds)
+		}
+		if startup.FailureThreshold != 12 {
+			t.Errorf("expected startup FailureThreshold=12, got %d", startup.FailureThreshold)
+		}
+	}
+
+	assertNoInitialDelay := func(t *testing.T, readiness, liveness *corev1.Probe) {
+		t.Helper()
 		if readiness.InitialDelaySeconds != 0 {
 			t.Errorf("expected readiness InitialDelaySeconds=0, got %d", readiness.InitialDelaySeconds)
 		}
 		if liveness.InitialDelaySeconds != 0 {
 			t.Errorf("expected liveness InitialDelaySeconds=0, got %d", liveness.InitialDelaySeconds)
 		}
-		if startup.InitialDelaySeconds != 30 {
-			t.Errorf("expected startup InitialDelaySeconds=30, got %d", startup.InitialDelaySeconds)
+	}
+
+	t.Run("no auth over HTTP keeps HTTPGet probes", func(t *testing.T) {
+		readiness, liveness, startup := buildProbes(8081, corev1.URISchemeHTTP, false)
+		assertNoInitialDelay(t, readiness, liveness)
+		assertStartupBudget(t, startup)
+
+		if readiness.HTTPGet == nil || readiness.TCPSocket != nil {
+			t.Fatalf("expected an HTTPGet readiness probe, got %+v", readiness.ProbeHandler)
+		}
+		if readiness.HTTPGet.Path != "/" || readiness.HTTPGet.Port.IntVal != 8081 || readiness.HTTPGet.Scheme != corev1.URISchemeHTTP {
+			t.Errorf("unexpected readiness HTTPGet: %+v", readiness.HTTPGet)
+		}
+		if startup.HTTPGet == nil || startup.TCPSocket != nil {
+			t.Fatalf("expected an HTTPGet startup probe, got %+v", startup.ProbeHandler)
+		}
+		if startup.HTTPGet.Path != "/" || startup.HTTPGet.Port.IntVal != 8081 {
+			t.Errorf("unexpected startup HTTPGet: %+v", startup.HTTPGet)
+		}
+		if liveness.TCPSocket == nil || liveness.TCPSocket.Port.IntVal != 8081 {
+			t.Errorf("expected a TCPSocket liveness probe on 8081, got %+v", liveness.ProbeHandler)
 		}
 	})
 
-	t.Run("HTTPS probes have no initial delay and startup keeps 30s", func(t *testing.T) {
-		readiness, liveness, startup := buildProbes(8085, corev1.URISchemeHTTPS)
-		if readiness.InitialDelaySeconds != 0 {
-			t.Errorf("expected readiness InitialDelaySeconds=0, got %d", readiness.InitialDelaySeconds)
+	t.Run("HTTPS keeps TCPSocket probes", func(t *testing.T) {
+		readiness, liveness, startup := buildProbes(8085, corev1.URISchemeHTTPS, false)
+		assertNoInitialDelay(t, readiness, liveness)
+		assertStartupBudget(t, startup)
+
+		if readiness.TCPSocket == nil || readiness.TCPSocket.Port.IntVal != 8085 {
+			t.Errorf("expected a TCPSocket readiness probe on 8085, got %+v", readiness.ProbeHandler)
 		}
-		if liveness.InitialDelaySeconds != 0 {
-			t.Errorf("expected liveness InitialDelaySeconds=0, got %d", liveness.InitialDelaySeconds)
-		}
-		if startup.InitialDelaySeconds != 30 {
-			t.Errorf("expected startup InitialDelaySeconds=30, got %d", startup.InitialDelaySeconds)
+		if startup.TCPSocket == nil || startup.TCPSocket.Port.IntVal != 8085 {
+			t.Errorf("expected a TCPSocket startup probe on 8085, got %+v", startup.ProbeHandler)
 		}
 	})
+
+	t.Run("configured authentication switches HTTP probes to TCPSocket", func(t *testing.T) {
+		readiness, liveness, startup := buildProbes(8081, corev1.URISchemeHTTP, true)
+		assertNoInitialDelay(t, readiness, liveness)
+		assertStartupBudget(t, startup)
+
+		if readiness.TCPSocket == nil || readiness.HTTPGet != nil || readiness.TCPSocket.Port.IntVal != 8081 {
+			t.Errorf("expected a TCPSocket readiness probe on 8081, got %+v", readiness.ProbeHandler)
+		}
+		if startup.TCPSocket == nil || startup.HTTPGet != nil || startup.TCPSocket.Port.IntVal != 8081 {
+			t.Errorf("expected a TCPSocket startup probe on 8081, got %+v", startup.ProbeHandler)
+		}
+	})
+}
+
+// TestAuthenticationMethodConfigured covers the authentication.method lookup
+// in spec.configuration, including dash/case variants and empty values.
+func TestAuthenticationMethodConfigured(t *testing.T) {
+	tests := []struct {
+		name          string
+		configuration map[string]string
+		want          bool
+	}{
+		{name: "nil configuration", configuration: nil, want: false},
+		{name: "empty value means not configured", configuration: map[string]string{"authentication.method": ""}, want: false},
+		{name: "BASIC is configured", configuration: map[string]string{"authentication.method": "BASIC"}, want: true},
+		{name: "dash variant is configured", configuration: map[string]string{"authentication-method": "BASIC"}, want: true},
+		{name: "case variant is configured", configuration: map[string]string{"AUTHENTICATION.METHOD": "BASIC"}, want: true},
+		{name: "unrelated keys are ignored", configuration: map[string]string{"debug": "true"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := authenticationMethodConfigured(tt.configuration); got != tt.want {
+				t.Errorf("authenticationMethodConfigured(%v) = %v, want %v", tt.configuration, got, tt.want)
+			}
+		})
+	}
 }
 
 // TestBuildPodEnvStorageIdentity verifies the storage and identity env vars,

@@ -287,7 +287,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	podVolume, containerVolumeMount := buildPodVolumes(instance, TLSSecretName, auth)
 
 	listenerPort, scheme := listenerPortAndScheme(instance)
-	readinessProbe, livenessProbe, startupProbe := buildProbes(listenerPort, scheme)
+	readinessProbe, livenessProbe, startupProbe := buildProbes(listenerPort, scheme, authenticationMethodConfigured(instance.Spec.Configuration))
 
 	podSpec.Spec.Containers[0].ReadinessProbe = readinessProbe
 	podSpec.Spec.Containers[0].LivenessProbe = livenessProbe
@@ -764,16 +764,26 @@ func buildPodVolumes(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 
 // buildProbes constructs readiness, liveness, and startup probes for the Schema Registry container.
 //
-// When SecureHTTP is enabled (scheme == HTTPS), readiness and startup probes use TCPSocket
-// instead of HTTPGet. This avoids TLS certificate verification failures: Kubernetes kubelet
-// does not support insecure-skip-verify for HTTPGet probes, so HTTPS probes against self-signed
-// certificates (generated from the Strimzi cluster CA) would fail perpetually.
-// The liveness probe already uses TCPSocket unconditionally for the same reason.
-func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe, *v1.Probe) {
+// Readiness and startup probes use TCPSocket instead of HTTPGet in two cases:
+//
+//   - When SecureHTTP is enabled (scheme == HTTPS). This avoids TLS
+//     certificate verification failures: the Kubernetes kubelet does not
+//     support insecure-skip-verify for HTTPGet probes, so HTTPS probes against
+//     self-signed certificates (generated from the Strimzi cluster CA) would
+//     fail perpetually.
+//   - When authentication.method is configured in spec.configuration. An
+//     authenticated listener rejects unauthenticated HTTP GET requests with
+//     401 Unauthorized, so the probes would fail perpetually; a TCP connect
+//     probe works regardless of authentication.
+//
+// Without authentication the HTTP probe behavior is kept. The liveness probe
+// uses TCPSocket unconditionally for the same reasons.
+func buildProbes(listenerPort int32, scheme v1.URIScheme, authConfigured bool) (*v1.Probe, *v1.Probe, *v1.Probe) {
 	var readinessHandler, startupHandler v1.ProbeHandler
 
-	if scheme == v1.URISchemeHTTPS {
-		// Self-signed cert: TCPSocket avoids TLS verification failures.
+	if scheme == v1.URISchemeHTTPS || authConfigured {
+		// Self-signed cert or authenticated listener: TCPSocket avoids TLS
+		// verification failures and 401 responses.
 		readinessHandler = v1.ProbeHandler{
 			TCPSocket: &v1.TCPSocketAction{
 				Port: intstr.IntOrString{IntVal: listenerPort},
@@ -819,15 +829,33 @@ func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe,
 		FailureThreshold: 3,
 	}
 
+	// The startup budget (10s delay + 12 x 10s = 130s) leaves room for JVM
+	// startup plus the first Kafka topic initialization, which the former
+	// 30s + 3 x 10s = 60s budget could exhaust.
 	startupProbe := &v1.Probe{
 		ProbeHandler:        startupHandler,
-		InitialDelaySeconds: 30,
+		InitialDelaySeconds: 10,
 		PeriodSeconds:       10,
 		TimeoutSeconds:      5,
-		FailureThreshold:    3,
+		FailureThreshold:    12,
 	}
 
 	return readinessProbe, livenessProbe, startupProbe
+}
+
+// authenticationMethodConfigured reports whether the user configured a
+// non-empty authentication.method property in spec.configuration. The lookup
+// normalizes dash and case variants (authentication-method,
+// AUTHENTICATION.METHOD) the same way Confluent property spellings convert to
+// the same SCHEMA_REGISTRY_* env var.
+func authenticationMethodConfigured(configuration map[string]string) bool {
+	for key, value := range configuration {
+		normalized := strings.ToLower(strings.ReplaceAll(key, "-", "."))
+		if normalized == "authentication.method" && value != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // clientAuthNeedsTruststoreSecret reports whether REST API mutual TLS requires
