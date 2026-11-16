@@ -1,3 +1,20 @@
+## [1.18.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.9...1.18.0) (2026-11-16)
+
+### 🚀 Features
+
+* **certprocessor:** support ECDSA cluster CA keys ([0522a8a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0522a8a8bba516edd5afb5bc92595424bd39c73c)), closes [PKCS#8](https://github.com/Randsw/PKCS/issues/8) [1/PKCS#8](https://github.com/1/PKCS/issues/8) [PKCS#1](https://github.com/Randsw/PKCS/issues/1) [PKCS#8](https://github.com/Randsw/PKCS/issues/8) [PKCS#8](https://github.com/Randsw/PKCS/issues/8)
+
+### 🛠 Fixes
+
+* **certprocessor:** import every CA in multi-cert bundles into the truststore ([320cea2](https://github.com/Randsw/schema-registry-operator-strimzi/commit/320cea2723853d1a28a2b7675feebc16459d110f))
+* **certprocessor:** include user CA chain in exported PKCS12 ([3e9df83](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3e9df8376d3dd3db11170cbd343241f1ff632907))
+* **certprocessor:** keep full CR name in CSR SANs and clamp CN ([3120afb](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3120afbc39eb9df6e623d043baac9a7ab6b1b0a6))
+* **certprocessor:** select the signing CA by key match and validate TLS inputs ([0d52004](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0d52004243e2dd44c25d240a052ee6e135c87ff5))
+* **controller:** detect TLS-type and partial PEM user TLS secrets and validate their material ([2454506](https://github.com/Randsw/schema-registry-operator-strimzi/commit/245450695012e0a5f406ba65c63840bcab858a96)), closes [PKCS#1](https://github.com/Randsw/PKCS/issues/1) [PKCS#8](https://github.com/Randsw/PKCS/issues/8)
+* **controller:** enqueue reconciliation on cluster CA key secret events ([c12569c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c12569c426f6ca54d6100472dcf76cb2cb16802d))
+* **controller:** garbage-collect orphaned operator-owned secrets ([514572f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/514572f75a66527cec897b83113c8db6c8cba9cb))
+* **controller:** reject an empty KafkaUser password when a pre-built PKCS12 keystore is present ([888ce50](https://github.com/Randsw/schema-registry-operator-strimzi/commit/888ce500fd38fc5488370f6c86ac2cdf5c636181))
+
 ## [1.17.9](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.8...1.17.9) (2026-11-15)
 
 ### 🧪 Tests
