@@ -2123,8 +2123,14 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 		bootstrapDrift = true
 	}
 	labelsDrifted := !equality.Semantic.DeepEqual(found.Labels, desired.Labels)
+	// The live spec is compared against the desired spec on every reconcile —
+	// even when the hash matches — so manual edits to operator-managed fields
+	// (image, env, resources, probes, volumes, labels, annotations) are
+	// reverted instead of being ignored until the next CR change.
+	pinReplicas := instance.Spec.Replicas != nil
+	specDrift := deploymentSpecDrifted(found, desired, pinReplicas)
 
-	if existingHash == desiredHash && !bootstrapDrift && !labelsDrifted {
+	if existingHash == desiredHash && !bootstrapDrift && !labelsDrifted && !specDrift {
 		// Steady state: do NOT emit ConfigKeyOverridden events here. The
 		// desired spec is rebuilt on every reconcile, so emitting on each
 		// pass would spam a Warning event per reserved configuration key
@@ -2138,28 +2144,34 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	} else if bootstrapDrift {
 		logger.Info(deploymentUpdateReason(existingHash, desiredHash),
 			"oldBootstrapServers", deploymentBootstrapServers(found), "newBootstrapServers", kafkaBootstrapServer)
+	} else if specDrift {
+		logger.Info("Deployment spec drifted from the desired spec; updating")
 	} else {
 		logger.Info("Deployment labels drifted from the desired labels; updating")
 	}
 
 	// The CR spec actually changed: warn about operator-managed keys that
-	// were ignored while building the desired spec (B2). A labels-only or
-	// bootstrap-only drift does not touch the CR configuration, so the
-	// events are not repeated for it.
+	// were ignored while building the desired spec (B2). A labels-only,
+	// bootstrap-only or manual-edit drift does not touch the CR
+	// configuration, so the events are not repeated for it.
 	if existingHash != desiredHash || bootstrapDrift {
 		r.emitConfigOverriddenEvents(instance, configOverridden)
 	}
 
-	// Update the deployment spec to match desired state. When the CR sets
-	// spec.replicas (B20), the desired replica count wins and a manual
-	// `kubectl scale` is reverted on the next spec change. When the CR leaves
-	// replicas unset, the operator still never desires a specific replica
-	// count: the live Spec.Replicas — set by manual `kubectl scale` edits —
-	// must survive the update instead of being reset (B6).
-	replicas := found.Spec.Replicas
-	found.Spec = desired.Spec
-	if instance.Spec.Replicas == nil {
-		found.Spec.Replicas = replicas
+	// Patch only the drifted fields instead of replacing the whole spec.
+	// When the CR sets spec.replicas (B20), the desired replica count wins
+	// and a manual `kubectl scale` is reverted on the next spec change. When
+	// the CR leaves replicas unset, the operator still never desires a
+	// specific replica count: the live Spec.Replicas — set by manual
+	// `kubectl scale` edits — must survive the update instead of being reset
+	// (B6). The pod template is replaced only when it drifted; the rollout
+	// markers the desired build could not determine were preserved into it
+	// above, so the patch never clobbers or spuriously resets them.
+	if pinReplicas && !equality.Semantic.DeepEqual(found.Spec.Replicas, desired.Spec.Replicas) {
+		found.Spec.Replicas = desired.Spec.Replicas
+	}
+	if !podTemplateEqual(&found.Spec.Template, &desired.Spec.Template) {
+		found.Spec.Template = *desired.Spec.Template.DeepCopy()
 	}
 
 	// Sync the Deployment labels so CR label changes (the strimzi.io/cluster
@@ -2197,6 +2209,157 @@ func preservePodTemplateAnnotation(found, desired *apps.Deployment, key string) 
 		desired.Spec.Template.Annotations = make(map[string]string)
 	}
 	desired.Spec.Template.Annotations[key] = value
+}
+
+// deploymentSpecDrifted reports whether the live Deployment spec differs from
+// the desired spec in fields the operator manages: the replica count (only
+// when the CR pins it — an unpinned CR never desires a specific count, so a
+// manual `kubectl scale` survives, B6) and the pod template. API-server
+// defaults for fields the desired build leaves unset are ignored, so a
+// freshly defaulted Deployment never reads as drifted (which would update it
+// on every reconcile).
+func deploymentSpecDrifted(found, desired *apps.Deployment, pinReplicas bool) bool {
+	if pinReplicas && !equality.Semantic.DeepEqual(found.Spec.Replicas, desired.Spec.Replicas) {
+		return true
+	}
+	return !podTemplateEqual(&found.Spec.Template, &desired.Spec.Template)
+}
+
+// podTemplateEqual compares the live pod template against the desired one,
+// clearing API-server defaults on a copy of the live template wherever the
+// desired template leaves the field unset, so the comparison only reports
+// drift in fields the operator actually manages.
+func podTemplateEqual(found, desired *v1.PodTemplateSpec) bool {
+	live := found.DeepCopy()
+	normalizePodSpecForCompare(&live.Spec, &desired.Spec)
+	return equality.Semantic.DeepEqual(*live, *desired)
+}
+
+// normalizePodSpecForCompare clears API-server defaults on the live pod spec
+// (modified in place; callers pass a deep copy) wherever the desired spec
+// leaves the field unset.
+func normalizePodSpecForCompare(live, desired *v1.PodSpec) {
+	if desired.RestartPolicy == "" {
+		live.RestartPolicy = ""
+	}
+	if desired.TerminationGracePeriodSeconds == nil {
+		live.TerminationGracePeriodSeconds = nil
+	}
+	if desired.DNSPolicy == "" {
+		live.DNSPolicy = ""
+	}
+	if desired.SchedulerName == "" {
+		live.SchedulerName = ""
+	}
+	if desired.EnableServiceLinks == nil {
+		live.EnableServiceLinks = nil
+	}
+	if desired.PreemptionPolicy == nil {
+		live.PreemptionPolicy = nil
+	}
+	if desired.ServiceAccountName == "" {
+		live.ServiceAccountName = ""
+	}
+	// The API server materializes an empty (non-nil) pod security context on
+	// stored pod templates; the desired build leaves it nil unless the user
+	// template sets one.
+	if desired.SecurityContext == nil {
+		live.SecurityContext = nil
+	}
+	normalizeContainersForCompare(live.Containers, desired.Containers)
+	normalizeContainersForCompare(live.InitContainers, desired.InitContainers)
+	normalizeVolumesForCompare(live.Volumes, desired.Volumes)
+}
+
+// normalizeContainersForCompare clears the API-server container defaults
+// (termination message path/policy, image pull policy, probe thresholds,
+// port protocols) wherever the desired container leaves them unset. A
+// container count difference is genuine drift and needs no normalization.
+func normalizeContainersForCompare(live, desired []v1.Container) {
+	if len(live) != len(desired) {
+		return
+	}
+	for i := range desired {
+		d := &desired[i]
+		l := &live[i]
+		if d.TerminationMessagePath == "" {
+			l.TerminationMessagePath = ""
+		}
+		if d.TerminationMessagePolicy == "" {
+			l.TerminationMessagePolicy = ""
+		}
+		if d.ImagePullPolicy == "" {
+			l.ImagePullPolicy = ""
+		}
+		normalizeProbeForCompare(l.ReadinessProbe, d.ReadinessProbe)
+		normalizeProbeForCompare(l.LivenessProbe, d.LivenessProbe)
+		normalizeProbeForCompare(l.StartupProbe, d.StartupProbe)
+		for j := range d.Ports {
+			if j < len(l.Ports) && d.Ports[j].Protocol == "" && l.Ports[j].Protocol == v1.ProtocolTCP {
+				l.Ports[j].Protocol = ""
+			}
+		}
+		// The API server defaults a fieldRef env source's apiVersion to "v1"
+		// (the operator's SCHEMA_REGISTRY_HOST_NAME uses one).
+		for j := range d.Env {
+			if j >= len(l.Env) || d.Env[j].ValueFrom == nil || l.Env[j].ValueFrom == nil {
+				continue
+			}
+			if d.Env[j].ValueFrom.FieldRef != nil && l.Env[j].ValueFrom.FieldRef != nil &&
+				d.Env[j].ValueFrom.FieldRef.APIVersion == "" {
+				l.Env[j].ValueFrom.FieldRef.APIVersion = ""
+			}
+		}
+	}
+}
+
+// normalizeProbeForCompare clears the API-server probe defaults (success
+// threshold 1, timeout 1s, period 10s, failure threshold 3) wherever the
+// desired probe leaves them unset.
+func normalizeProbeForCompare(live, desired *v1.Probe) {
+	if live == nil || desired == nil {
+		return
+	}
+	if desired.SuccessThreshold == 0 {
+		live.SuccessThreshold = 0
+	}
+	if desired.TimeoutSeconds == 0 {
+		live.TimeoutSeconds = 0
+	}
+	if desired.PeriodSeconds == 0 {
+		live.PeriodSeconds = 0
+	}
+	if desired.FailureThreshold == 0 {
+		live.FailureThreshold = 0
+	}
+	if desired.InitialDelaySeconds == 0 {
+		live.InitialDelaySeconds = 0
+	}
+}
+
+// normalizeVolumesForCompare clears the API-server secret volume defaultMode
+// (420) wherever the desired volume leaves it unset, for the volume source
+// types the API server defaults.
+func normalizeVolumesForCompare(live, desired []v1.Volume) {
+	if len(live) != len(desired) {
+		return
+	}
+	for i := range desired {
+		lv := &live[i].VolumeSource
+		dv := &desired[i].VolumeSource
+		if lv.Secret != nil && dv.Secret != nil && dv.Secret.DefaultMode == nil {
+			lv.Secret.DefaultMode = nil
+		}
+		if lv.ConfigMap != nil && dv.ConfigMap != nil && dv.ConfigMap.DefaultMode == nil {
+			lv.ConfigMap.DefaultMode = nil
+		}
+		if lv.Projected != nil && dv.Projected != nil && dv.Projected.DefaultMode == nil {
+			lv.Projected.DefaultMode = nil
+		}
+		if lv.DownwardAPI != nil && dv.DownwardAPI != nil && dv.DownwardAPI.DefaultMode == nil {
+			lv.DownwardAPI.DefaultMode = nil
+		}
+	}
 }
 
 // deploymentSelectorMatches reports whether the existing Deployment's
