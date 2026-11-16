@@ -1817,27 +1817,16 @@ func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregi
 	return dep, nil
 }
 
-// writeStringMapToHash writes a string map to the hash in sorted key order so
-// hashing is deterministic regardless of map iteration order.
-func writeStringMapToHash(h io.Writer, m map[string]string) error {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		if _, err := fmt.Fprintf(h, "%s=%s", key, m[key]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // computeSpecHash computes a hash of the relevant spec fields to detect changes.
 // The hash covers CompatibilityLevel, SecureHTTP, ClientAuth, HeapOpts, Listener,
 // SecurityProtocol, TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor,
 // SchemaRegistryGroupID, MasterEligibility, Configuration, and the full PodTemplateSpec —
 // all fields that affect the deployment spec or service ports.
+//
+// Service passthrough annotations/labels and NetworkPolicy enablement are
+// deliberately excluded: they change the Service or NetworkPolicy objects but
+// never the Schema Registry pods, and both are reconciled independently, so
+// including them would cause full pod restarts on unrelated metadata edits.
 //
 // FNV-64a is used instead of the former FNV-32 to reduce the collision
 // probability across spec versions (64-bit vs 32-bit digest). Changing the
@@ -1928,22 +1917,6 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 		if _, err := fmt.Fprintf(h, "%s=%s", key, instance.Spec.Configuration[key]); err != nil {
 			return "", fmt.Errorf("failed to write configuration entry to hash: %w", err)
 		}
-	}
-
-	// Service passthrough annotations/labels affect the rendered Service, so
-	// they participate in the hash (in sorted key order for determinism).
-	if instance.Spec.Service != nil {
-		if err := writeStringMapToHash(h, instance.Spec.Service.Annotations); err != nil {
-			return "", fmt.Errorf("failed to write service annotations to hash: %w", err)
-		}
-		if err := writeStringMapToHash(h, instance.Spec.Service.Labels); err != nil {
-			return "", fmt.Errorf("failed to write service labels to hash: %w", err)
-		}
-	}
-
-	// NetworkPolicy enablement affects whether the NetworkPolicy is created.
-	if _, err := fmt.Fprintf(h, "%t", networkPolicyEnabled(instance)); err != nil {
-		return "", fmt.Errorf("failed to write NetworkPolicy enabled to hash: %w", err)
 	}
 
 	// Include the full PodTemplateSpec so that container image, resources,
