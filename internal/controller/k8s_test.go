@@ -2692,6 +2692,308 @@ func TestCreateServiceTypePortPassthrough(t *testing.T) {
 	})
 }
 
+// TestServiceValidationError covers the controller-side defense for the
+// nodeport+ClusterIP combination the API server rejects with
+// "nodePort: Forbidden", deadlocking reconciliation.
+func TestServiceValidationError(t *testing.T) {
+	nodePort := int32(30123)
+	tests := []struct {
+		name    string
+		service *strimziregistryoperatorv1alpha1.Service
+		want    string
+	}{
+		{name: "no service block is valid", service: nil, want: ""},
+		{name: "nodeport unset is valid", service: &strimziregistryoperatorv1alpha1.Service{Type: "ClusterIP"}, want: ""},
+		{name: "nodeport with default (ClusterIP) type is invalid",
+			service: &strimziregistryoperatorv1alpha1.Service{NodePort: &nodePort},
+			want:    "spec.service.nodeport is only valid when spec.service.type is NodePort or LoadBalancer, not ClusterIP"},
+		{name: "nodeport with explicit ClusterIP is invalid",
+			service: &strimziregistryoperatorv1alpha1.Service{Type: "ClusterIP", NodePort: &nodePort},
+			want:    "spec.service.nodeport is only valid when spec.service.type is NodePort or LoadBalancer, not ClusterIP"},
+		{name: "nodeport with NodePort is valid", service: &strimziregistryoperatorv1alpha1.Service{Type: "NodePort", NodePort: &nodePort}, want: ""},
+		{name: "nodeport with LoadBalancer is valid", service: &strimziregistryoperatorv1alpha1.Service{Type: "LoadBalancer", NodePort: &nodePort}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inst := newTestInstance()
+			inst.Spec.Service = tt.service
+			if got := serviceValidationError(inst); got != tt.want {
+				t.Errorf("serviceValidationError() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMergeServiceAnnotations verifies the update-path merge: operator-managed
+// keys are added or updated in place and foreign keys are never deleted.
+func TestMergeServiceAnnotations(t *testing.T) {
+	t.Run("foreign annotation survives and operator keys are updated", func(t *testing.T) {
+		existing := map[string]string{
+			"type":              "http",
+			"example.com/owner": "platform-team",
+		}
+		desired := map[string]string{
+			"type":                 "https",
+			"prometheus.io/scrape": "false",
+		}
+
+		merged := mergeServiceAnnotations(existing, desired)
+
+		if merged["type"] != "https" {
+			t.Errorf("expected the operator type annotation updated to https, got %q", merged["type"])
+		}
+		if merged["prometheus.io/scrape"] != "false" {
+			t.Errorf("expected the passthrough annotation added, got %q", merged["prometheus.io/scrape"])
+		}
+		if merged["example.com/owner"] != "platform-team" {
+			t.Errorf("expected the foreign annotation preserved, got %v", merged)
+		}
+	})
+
+	t.Run("nil existing annotations are handled", func(t *testing.T) {
+		merged := mergeServiceAnnotations(nil, map[string]string{"type": "http"})
+		if len(merged) != 1 || merged["type"] != "http" {
+			t.Errorf("expected only the operator annotation, got %v", merged)
+		}
+	})
+}
+
+// TestServiceAnnotationsDrifted verifies the diff only considers
+// operator-managed (desired) keys: foreign annotations neither trigger an
+// update nor mask operator drift.
+func TestServiceAnnotationsDrifted(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing map[string]string
+		desired  map[string]string
+		want     bool
+	}{
+		{name: "identical maps are not drifted", existing: map[string]string{"type": "http"}, desired: map[string]string{"type": "http"}, want: false},
+		{name: "operator key changed is drifted", existing: map[string]string{"type": "http"}, desired: map[string]string{"type": "https"}, want: true},
+		{name: "operator key missing is drifted", existing: map[string]string{}, desired: map[string]string{"type": "http"}, want: true},
+		{name: "foreign-only difference is not drifted", existing: map[string]string{"type": "http", "example.com/owner": "platform-team"}, desired: map[string]string{"type": "http"}, want: false},
+		{name: "nil maps are not drifted", existing: nil, desired: nil, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serviceAnnotationsDrifted(tt.existing, tt.desired); got != tt.want {
+				t.Errorf("serviceAnnotationsDrifted(%v, %v) = %v, want %v", tt.existing, tt.desired, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReconcileServiceDriftAndAnnotationPreservation covers the Service
+// reconciliation hardening: Protocol and named-TargetPort drift are corrected,
+// foreign annotations survive the update, and operator-managed annotations are
+// corrected in place.
+func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	ctx := context.Background()
+
+	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.UID = "cr-uid"
+		inst.Spec.SecurityProtocol = "PLAINTEXT"
+		inst.Spec.Listener = "tls"
+		inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+			},
+		}
+		return inst
+	}
+
+	// A Deployment in its desired shape (stable selector, current spec hash,
+	// current bootstrap env) so reconciliation reaches the Service block.
+	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+		t.Helper()
+		hash, err := computeSpecHash(inst)
+		if err != nil {
+			t.Fatalf("failed to compute spec hash: %v", err)
+		}
+		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
+		return &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        inst.Name + deploySuffix,
+				Namespace:   inst.Namespace,
+				Annotations: map[string]string{keyPrefix + "/specHash": hash},
+			},
+			Spec: apps.DeploymentSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1",
+							Env: []corev1.EnvVar{{Name: bootstrapServersEnv, Value: bootstrap}}},
+					}},
+				},
+			},
+		}
+	}
+
+	// driftedService builds the desired Service (without the controller
+	// reference) and applies the given drift to it.
+	driftedService := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, drift func(*corev1.Service)) *corev1.Service {
+		t.Helper()
+		emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		r0 := &StrimziSchemaRegistryReconciler{Client: emptyClient, Scheme: scheme}
+		svc, err := r0.createService(inst, logr.Logger{})
+		if err != nil {
+			t.Fatalf("failed to build the desired service: %v", err)
+		}
+		svc.OwnerReferences = nil
+		drift(svc)
+		return svc
+	}
+
+	reconcileOnce := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, svc *corev1.Service) client.Client {
+		t.Helper()
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), newDeployment(t, inst), svc).
+			WithStatusSubresource(inst).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+		}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return c
+	}
+
+	fetchService := func(t *testing.T, c client.Client, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *corev1.Service {
+		t.Helper()
+		svc := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, svc); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		return svc
+	}
+
+	t.Run("protocol drift is corrected", func(t *testing.T) {
+		inst := newInst()
+		svc := driftedService(t, inst, func(s *corev1.Service) { s.Spec.Ports[0].Protocol = "UDP" })
+
+		c := reconcileOnce(t, inst, svc)
+		got := fetchService(t, c, inst)
+		if got.Spec.Ports[0].Protocol != corev1.ProtocolTCP {
+			t.Errorf("expected the protocol corrected to TCP, got %q", got.Spec.Ports[0].Protocol)
+		}
+	})
+
+	t.Run("named targetPort drift is corrected", func(t *testing.T) {
+		inst := newInst()
+		svc := driftedService(t, inst, func(s *corev1.Service) { s.Spec.Ports[0].TargetPort = intstr.FromString("schema-registry") })
+
+		c := reconcileOnce(t, inst, svc)
+		got := fetchService(t, c, inst)
+		if got.Spec.Ports[0].TargetPort.IntVal != 8081 || got.Spec.Ports[0].TargetPort.StrVal != "" {
+			t.Errorf("expected the targetPort corrected to 8081, got %+v", got.Spec.Ports[0].TargetPort)
+		}
+	})
+
+	t.Run("foreign annotation survives and operator annotations are corrected", func(t *testing.T) {
+		inst := newInst()
+		inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+			Annotations: map[string]string{"prometheus.io/scrape": "false"},
+		}
+		svc := driftedService(t, inst, func(s *corev1.Service) {
+			s.Annotations["type"] = "https"                      // stale operator annotation
+			s.Annotations["prometheus.io/scrape"] = "true"       // stale passthrough value
+			s.Annotations["example.com/owner"] = "platform-team" // foreign
+			s.Spec.Ports[0].Port = 8080                          // port drift so an update is required
+		})
+
+		c := reconcileOnce(t, inst, svc)
+		got := fetchService(t, c, inst)
+		if got.Annotations["type"] != "http" {
+			t.Errorf("expected the operator type annotation corrected to http, got %q", got.Annotations["type"])
+		}
+		if got.Annotations["prometheus.io/scrape"] != "false" {
+			t.Errorf("expected the passthrough annotation corrected, got %q", got.Annotations["prometheus.io/scrape"])
+		}
+		if got.Annotations["example.com/owner"] != "platform-team" {
+			t.Errorf("expected the foreign annotation preserved, got %v", got.Annotations)
+		}
+		if got.Spec.Ports[0].Port != 80 {
+			t.Errorf("expected the port corrected to 80, got %d", got.Spec.Ports[0].Port)
+		}
+	})
+}
+
+// TestReconcileSkipsNodePortWithClusterIP covers the controller-side
+// validation: spec.service.nodeport combined with the default ClusterIP type
+// is reported as InvalidSpec and reconciliation is skipped before any
+// Deployment or Service is created or updated.
+func TestReconcileSkipsNodePortWithClusterIP(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	nodePort := int32(30123)
+	inst := newTestInstance()
+	inst.UID = "cr-uid"
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Type: "ClusterIP", NodePort: &nodePort}
+
+	recorder := eventsfake.NewFakeRecorder(16)
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace)).
+		WithStatusSubresource(inst).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme, Recorder: recorder}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for an invalid spec, got %v", result.RequeueAfter)
+	}
+
+	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
+		t.Fatalf("failed to get the CR: %v", err)
+	}
+	if updated.Status.Status != "InvalidSpec" {
+		t.Errorf("expected status.status InvalidSpec, got %q", updated.Status.Status)
+	}
+	var ready *metav1.Condition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == "Ready" {
+			ready = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	if ready == nil || ready.Reason != "NodePortRequiresNonClusterIP" {
+		t.Errorf("expected a Ready condition with reason NodePortRequiresNonClusterIP, got %+v", ready)
+	}
+
+	// Reconciliation is skipped: no Deployment and no Service may exist.
+	dep := &apps.Deployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err == nil {
+		t.Error("expected no Deployment to be created for an invalid spec")
+	}
+	svc := &corev1.Service{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, svc); err == nil {
+		t.Error("expected no Service to be created for an invalid spec")
+	}
+}
+
 func TestBuildNetworkPolicyCrossNamespaceIngress(t *testing.T) {
 	inst := newTestInstance()
 	inst.Spec.SecureHTTP = false

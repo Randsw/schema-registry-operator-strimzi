@@ -120,6 +120,24 @@ func httpsMultiReplicaValidationError(instance *strimziregistryoperatorv1alpha1.
 	return ""
 }
 
+// serviceValidationError returns a non-empty message describing why the
+// spec.service configuration is invalid, or an empty string when it is valid.
+// A node port can only be set on Service types that expose one (NodePort,
+// LoadBalancer); on the default ClusterIP the API server rejects the field
+// with "nodePort: Forbidden", which would deadlock reconciliation in a
+// ReconcileError loop. Controller-side defense-in-depth — the CRD CEL rule
+// rejects the combination at admission time.
+func serviceValidationError(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+	if instance.Spec.Service == nil || instance.Spec.Service.NodePort == nil {
+		return ""
+	}
+	switch instance.Spec.Service.Type {
+	case "", "ClusterIP":
+		return "spec.service.nodeport is only valid when spec.service.type is NodePort or LoadBalancer, not ClusterIP"
+	}
+	return ""
+}
+
 // userTLSSecretValidationError returns a non-empty message describing why the
 // user-provided REST API TLS secret (spec.tlssecretname) cannot be used, or an
 // empty string when it is valid. A nil secret means the secret does not exist.
@@ -280,6 +298,36 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReplicasRequireUserTLSSecret", "Validate", "%s", msg)
 			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "Validate",
 				"reconciliation is skipped until the unsupported spec.replicas/spec.securehttp/spec.tlssecretname combination is fixed; an existing Deployment (if any) keeps running with its current configuration and is no longer reconciled")
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Validate that spec.service.nodeport is not combined with a ClusterIP
+	// service: the API server rejects nodePort on a ClusterIP Service
+	// ("nodePort: Forbidden"), which would deadlock reconciliation in a
+	// ReconcileError loop. Skip reconciliation entirely, mirroring the other
+	// invalid-spec handling, so an existing Deployment keeps serving.
+	if msg := serviceValidationError(instance); msg != "" {
+		logger.Info("Invalid Service nodePort configuration; skipping reconciliation")
+		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "NodePortRequiresNonClusterIP",
+			Message:            msg,
+			ObservedGeneration: instance.Generation,
+		})
+		instance.Status.Status = "InvalidSpec"
+		if !equality.Semantic.DeepEqual(origStatus, &instance.Status) {
+			if err := r.Status().Update(ctx, instance); err != nil {
+				logger.Error(err, "Failed to update CR status")
+				monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+				return ctrl.Result{}, err
+			}
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "NodePortRequiresNonClusterIP", "Validate", "%s", msg)
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "Validate",
+				"reconciliation is skipped until the invalid spec.service.nodeport/spec.service.type combination is fixed; an existing Deployment (if any) keeps running with its current configuration and is no longer reconciled")
 		}
 		return ctrl.Result{}, nil
 	}
@@ -535,9 +583,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			// unset, the API server allocates a node port into the existing
 			// spec and that allocation must not be treated as drift.
 			nodePortChanged := desiredPort.NodePort != 0 && existingPort.NodePort != desiredPort.NodePort
+			// TargetPort is compared as a whole so a named target port
+			// (StrVal) drifts just like a numeric one (IntVal), and Protocol
+			// is compared so a manual protocol edit is corrected too.
 			if existingPort.Port != desiredPort.Port ||
-				existingPort.TargetPort.IntVal != desiredPort.TargetPort.IntVal ||
+				existingPort.TargetPort != desiredPort.TargetPort ||
 				existingPort.Name != desiredPort.Name ||
+				existingPort.Protocol != desiredPort.Protocol ||
 				nodePortChanged {
 				serviceChanged = true
 				break
@@ -547,7 +599,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if !equality.Semantic.DeepEqual(foundSvc.Labels, desiredSvc.Labels) {
 		serviceChanged = true
 	}
-	if !equality.Semantic.DeepEqual(foundSvc.Annotations, desiredSvc.Annotations) {
+	// Only operator-managed annotations are compared: foreign annotations are
+	// preserved on update and must not mark the Service as drifted (which
+	// would cause an endless update loop, since the update never removes
+	// them).
+	if serviceAnnotationsDrifted(foundSvc.Annotations, desiredSvc.Annotations) {
 		serviceChanged = true
 	}
 
@@ -562,7 +618,10 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		foundSvc.Spec.Ports = mergeServicePorts(desiredSvc.Spec.Type, desiredSvc.Spec.Ports, foundSvc.Spec.Ports)
 		foundSvc.Spec.Type = desiredSvc.Spec.Type
 		foundSvc.Labels = desiredSvc.Labels
-		foundSvc.Annotations = desiredSvc.Annotations
+		// Merge instead of overwrite so annotations set by users or other
+		// controllers (cloud LoadBalancer, ExternalDNS) survive the update;
+		// operator-managed keys are added or updated in place.
+		foundSvc.Annotations = mergeServiceAnnotations(foundSvc.Annotations, desiredSvc.Annotations)
 		err = r.Update(ctx, foundSvc)
 		if err != nil {
 			logger.Error(err, "Failed to update service after spec change")

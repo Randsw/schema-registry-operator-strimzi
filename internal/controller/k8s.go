@@ -1359,6 +1359,34 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 	return svc, nil
 }
 
+// mergeServiceAnnotations merges the desired operator-managed Service
+// annotations over the existing ones without deleting keys the operator does
+// not currently manage. Foreign annotations (set by users or other
+// controllers, e.g. cloud LoadBalancer or ExternalDNS) are preserved;
+// operator-managed keys (the "type" marker and the spec.service.annotations
+// passthrough) are added or updated in place.
+//
+// Known limitation: a passthrough annotation that the user later removes from
+// spec.service.annotations lingers on the Service — without tracking state
+// the operator cannot distinguish it from a foreign key, and it must never
+// delete keys it does not currently manage.
+func mergeServiceAnnotations(existing, desired map[string]string) map[string]string {
+	return mergeStringMaps(existing, desired)
+}
+
+// serviceAnnotationsDrifted reports whether any operator-managed annotation —
+// every key present in the desired set — differs on the existing Service.
+// Foreign annotations are deliberately ignored: they are not operator-managed,
+// must be preserved on update, and must never trigger an update loop.
+func serviceAnnotationsDrifted(existing, desired map[string]string) bool {
+	for key, want := range desired {
+		if existing[key] != want {
+			return true
+		}
+	}
+	return false
+}
+
 // mergeServicePorts returns the desired service ports with API-server-allocated
 // node ports preserved from the existing service. The allocation is carried
 // over only when the target service type still uses node ports (NodePort or
