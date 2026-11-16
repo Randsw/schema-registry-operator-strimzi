@@ -138,29 +138,25 @@ func TestUpdateExistingDeploymentBootstrapDrift(t *testing.T) {
 	kafkaCR := newTestKafkaCR("kafka-cluster", inst.Namespace)
 	currentBootstrap := kafkaCR.Status.Listeners[0].BootstrapServers
 
+	// The fixture is operator-complete (built by buildDeploymentSpec) so a
+	// steady-state reconcile reports no drift; the bootstrap env value and
+	// the spec hash are then adjusted per scenario.
 	newDeployment := func(hash, bootstrapEnv string) *apps.Deployment {
-		env := []corev1.EnvVar{}
-		if bootstrapEnv != "" {
-			env = append(env, corev1.EnvVar{Name: bootstrapServersEnv, Value: bootstrapEnv})
+		dep := newOperatorDeployment(t, scheme, inst, currentBootstrap, "")
+		if bootstrapEnv != "" && bootstrapEnv != currentBootstrap {
+			// Simulate a stale bootstrap address rendered into the env.
+			env := dep.Spec.Template.Spec.Containers[0].Env
+			for i := range env {
+				if env[i].Name == bootstrapServersEnv {
+					env[i].Value = bootstrapEnv
+				}
+			}
 		}
-		return &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				// Operator-created deployments carry the stable identity
-				// selector (F1); without it updateExistingDeployment would
-				// treat this fixture as a legacy selector and migrate it.
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{
-						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1", Env: env},
-					}},
-				},
-			},
+		if hash != "" {
+			dep.Annotations[keyPrefix+"/specHash"] = hash
+			dep.Spec.Template.Annotations[keyPrefix+"/specHash"] = hash
 		}
+		return dep
 	}
 
 	newReconciler := func(dep *apps.Deployment) *StrimziSchemaRegistryReconciler {
@@ -261,23 +257,12 @@ func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
 		t.Fatalf("failed to compute spec hash: %v", err)
 	}
 
+	// The fixture is operator-complete (built by buildDeploymentSpec) so a
+	// steady-state reconcile reports no drift; the spec hash is adjusted per
+	// scenario.
 	newDeployment := func(hash string) *apps.Deployment {
-		return &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				// Operator-created deployments carry the stable identity
-				// selector (F1); without it updateExistingDeployment would
-				// treat this fixture as a legacy selector and migrate it.
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
-				},
-			},
-		}
+		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
+		return newOperatorDeployment(t, scheme, inst, bootstrap, hash)
 	}
 
 	newReconciler := func(dep *apps.Deployment) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
@@ -384,24 +369,14 @@ func TestUpdateExistingDeploymentPreservesManualReplicas(t *testing.T) {
 		t.Fatalf("failed to compute spec hash: %v", err)
 	}
 
+	// The fixture is operator-complete (built by buildDeploymentSpec) so a
+	// steady-state reconcile reports no drift; the spec hash and the replica
+	// count are adjusted per scenario.
 	newDeployment := func(hash string, replicas *int32) *apps.Deployment {
-		return &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				// Operator-created deployments carry the stable identity
-				// selector (F1); without it updateExistingDeployment would
-				// treat this fixture as a legacy selector and migrate it.
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Replicas: replicas,
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
-				},
-			},
-		}
+		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
+		dep := newOperatorDeployment(t, scheme, inst, bootstrap, hash)
+		dep.Spec.Replicas = replicas
+		return dep
 	}
 
 	newReconciler := func(dep *apps.Deployment) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
@@ -825,11 +800,9 @@ func TestUpdateExistingDeploymentRecreatesLegacySelector(t *testing.T) {
 
 	t.Run("steady state with a stable selector does nothing", func(t *testing.T) {
 		deletes := 0
-		desiredHash, err := computeSpecHash(inst)
-		if err != nil {
-			t.Fatalf("failed to compute spec hash: %v", err)
-		}
-		dep := newDeployment(selectorLabelsForStrimziSchemaRegistryOperator(inst.Name), desiredHash)
+		// An operator-complete fixture (built by buildDeploymentSpec) so the
+		// steady-state reconcile reports no drift.
+		dep := newOperatorDeployment(t, scheme, inst, kafkaCR.Status.Listeners[0].BootstrapServers, "")
 		client := fake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(inst, kafkaCR, dep).
 			WithInterceptorFuncs(countDeploymentDeletes(&deletes)).
@@ -2904,31 +2877,12 @@ func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
 		return inst
 	}
 
-	// A Deployment in its desired shape (stable selector, current spec hash,
-	// current bootstrap env) so reconciliation reaches the Service block.
+	// A Deployment in its desired shape (operator-complete, built by
+	// buildDeploymentSpec) so reconciliation reaches the Service block.
 	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
 		t.Helper()
-		hash, err := computeSpecHash(inst)
-		if err != nil {
-			t.Fatalf("failed to compute spec hash: %v", err)
-		}
 		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
-		return &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{
-						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1",
-							Env: []corev1.EnvVar{{Name: bootstrapServersEnv, Value: bootstrap}}},
-					}},
-				},
-			},
-		}
+		return newOperatorDeployment(t, scheme, inst, bootstrap, "")
 	}
 
 	// driftedService builds the desired Service (without the controller
@@ -4680,31 +4634,12 @@ func TestReconcileServiceOwnership(t *testing.T) {
 		return svc
 	}
 
-	// A Deployment in its desired shape (stable selector, current spec hash,
-	// current bootstrap env) so reconciliation reaches the Service block.
+	// A Deployment in its desired shape (operator-complete, built by
+	// buildDeploymentSpec) so reconciliation reaches the Service block.
 	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
 		t.Helper()
-		hash, err := computeSpecHash(inst)
-		if err != nil {
-			t.Fatalf("failed to compute spec hash: %v", err)
-		}
 		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
-		return &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{
-						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1",
-							Env: []corev1.EnvVar{{Name: bootstrapServersEnv, Value: bootstrap}}},
-					}},
-				},
-			},
-		}
+		return newOperatorDeployment(t, scheme, inst, bootstrap, "")
 	}
 
 	reconcile := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, svc *corev1.Service) (client.Client, *eventsfake.FakeRecorder, reconcile.Result, error) {

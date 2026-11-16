@@ -188,3 +188,114 @@ func TestReconcileAppliesSpecChangeBeforeRotationRollout(t *testing.T) {
 		t.Error("expected no further deployment update once the spec and the rotation marker are reconciled")
 	}
 }
+
+// TestUpdateExistingDeploymentPreservesTLSVersionMarker covers the 1.8
+// metadata preservation: when the operator-managed REST API TLS secret is
+// temporarily missing (recreation pending in the rotation handlers), a spec
+// patch must not drop the tlsVersion rollout marker the rotation handlers
+// maintain — dropping it would make the next renewal check see a missing
+// marker and roll the pods a second time.
+func TestUpdateExistingDeploymentPreservesTLSVersionMarker(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	cluster := "kafka-cluster"
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+	}
+
+	kafkaCR := newTestKafkaCR(cluster, inst.Namespace)
+	bootstrap := kafkaCR.Status.Listeners[0].BootstrapServers
+
+	// Operator-complete deployment with a stale spec hash and a tlsVersion
+	// marker recorded by a previous renewal; the -tls secret itself is
+	// missing (deleted, recreation pending).
+	dep := newOperatorDeployment(t, scheme, inst, bootstrap, "stale-hash")
+	dep.Spec.Template.Annotations[tlsVersionKey] = "recorded-by-renewal"
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, kafkaCR, dep).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+	updated, specChanged, err := r.updateExistingDeployment(inst, context.Background(), logr.Logger{}, dep)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !specChanged {
+		t.Fatal("expected specChanged=true for a stale spec hash")
+	}
+	if got := updated.Spec.Template.Annotations[tlsVersionKey]; got != "recorded-by-renewal" {
+		t.Errorf("expected the tlsVersion marker to be preserved, got %q", got)
+	}
+}
+
+// TestUpdateExistingDeploymentSyncsLabels covers the 1.8 label sync: the
+// Deployment labels carry the image-derived version and the strimzi.io/cluster
+// label, neither of which participates in the spec hash, so a CR label change
+// must still propagate to the Deployment metadata.
+func TestUpdateExistingDeploymentSyncsLabels(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	cluster := "kafka-cluster"
+	inst := newTestInstance()
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+	}
+
+	// A second Kafka CR under the renamed cluster label keeps the bootstrap
+	// resolution working, so the label change is the only drift.
+	otherKafka := newTestKafkaCR("other-cluster", inst.Namespace)
+
+	bootstrap := newTestKafkaCR(cluster, inst.Namespace).Status.Listeners[0].BootstrapServers
+	dep := newOperatorDeployment(t, scheme, inst, bootstrap, "")
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, newTestKafkaCR(cluster, inst.Namespace), otherKafka, dep).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+	ctx := context.Background()
+
+	t.Run("steady state with matching labels does nothing", func(t *testing.T) {
+		_, specChanged, err := r.updateExistingDeployment(inst, ctx, logr.Logger{}, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if specChanged {
+			t.Fatal("expected specChanged=false when the labels match")
+		}
+	})
+
+	t.Run("cluster label change propagates to the deployment", func(t *testing.T) {
+		inst.Labels[strimziClusterLabel] = "other-cluster"
+		updated, specChanged, err := r.updateExistingDeployment(inst, ctx, logr.Logger{}, dep)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !specChanged {
+			t.Fatal("expected specChanged=true when the cluster label changed")
+		}
+		if got := updated.Labels[strimziClusterLabel]; got != "other-cluster" {
+			t.Errorf("expected the deployment label to be synced to %q, got %q", "other-cluster", got)
+		}
+		if got := updated.Spec.Template.Labels[strimziClusterLabel]; got != "other-cluster" {
+			t.Errorf("expected the pod template label to be synced to %q, got %q", "other-cluster", got)
+		}
+	})
+}

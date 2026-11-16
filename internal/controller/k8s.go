@@ -2072,6 +2072,22 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 		return nil, false, err
 	}
 
+	// Preserve the operator-managed rollout markers the desired build cannot
+	// determine because their secret is currently missing (recreation
+	// pending in the rotation handlers). buildDeploymentSpec records the
+	// secret's ResourceVersion whenever the secret exists, so a spec patch
+	// would otherwise drop the marker — and the next rotation check would
+	// see it missing and roll the pods a second time. When the secret
+	// exists, the desired value (the current ResourceVersion) is fresher and
+	// wins, so a pending rollout is never suppressed.
+	if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName == "" && tlsResourceVersion == "" {
+		preservePodTemplateAnnotation(found, desired, tlsVersionKey)
+	}
+	if jksResourceVersion == "" &&
+		(auth.NeedsTruststore || auth.NeedsKeystore || clientAuthNeedsTruststoreSecret(instance, auth)) {
+		preservePodTemplateAnnotation(found, desired, jksVersionKey)
+	}
+
 	// Compute desired spec hash
 	desiredHash, err := computeSpecHash(instance)
 	if err != nil {
@@ -2093,31 +2109,46 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	// var changes; without the comparison below the pods would keep the
 	// stale bootstrap address forever, because the Kafka watch re-enqueues
 	// reconciliation but every pass short-circuits on the unchanged hash.
-	if existingHash == desiredHash {
+	// The Deployment labels are compared too: they carry the image-derived
+	// version and the strimzi.io/cluster label, neither of which
+	// participates in the spec hash, so a CR label change must still
+	// propagate to the Deployment metadata.
+	bootstrapDrift := false
+	if current := deploymentBootstrapServers(found); current != "" && current != kafkaBootstrapServer {
 		// The comparison only applies when the deployment actually carries
 		// the operator-managed env var: an absent variable (a deployment
 		// predating the check, or stripped by hand) must not be treated as
 		// drift, which would roll pods on the very first reconcile after an
 		// operator upgrade.
-		if current := deploymentBootstrapServers(found); current != "" && current != kafkaBootstrapServer {
-			logger.Info(deploymentUpdateReason(existingHash, desiredHash),
-				"oldBootstrapServers", current, "newBootstrapServers", kafkaBootstrapServer)
-		} else {
-			// Steady state: do NOT emit ConfigKeyOverridden events here. The
-			// desired spec is rebuilt on every reconcile, so emitting on each
-			// pass would spam a Warning event per reserved configuration key
-			// per reconcile. The user was warned when the key was first
-			// applied (createDeployment and spec-change paths below).
-			return found, false, nil
-		}
-	} else {
+		bootstrapDrift = true
+	}
+	labelsDrifted := !equality.Semantic.DeepEqual(found.Labels, desired.Labels)
+
+	if existingHash == desiredHash && !bootstrapDrift && !labelsDrifted {
+		// Steady state: do NOT emit ConfigKeyOverridden events here. The
+		// desired spec is rebuilt on every reconcile, so emitting on each
+		// pass would spam a Warning event per reserved configuration key
+		// per reconcile. The user was warned when the key was first
+		// applied (createDeployment and spec-change paths below).
+		return found, false, nil
+	}
+	if existingHash != desiredHash {
 		logger.Info(deploymentUpdateReason(existingHash, desiredHash),
 			"oldHash", existingHash, "newHash", desiredHash)
+	} else if bootstrapDrift {
+		logger.Info(deploymentUpdateReason(existingHash, desiredHash),
+			"oldBootstrapServers", deploymentBootstrapServers(found), "newBootstrapServers", kafkaBootstrapServer)
+	} else {
+		logger.Info("Deployment labels drifted from the desired labels; updating")
 	}
 
-	// The spec actually changed: warn about operator-managed keys that were
-	// ignored while building the desired spec (B2).
-	r.emitConfigOverriddenEvents(instance, configOverridden)
+	// The CR spec actually changed: warn about operator-managed keys that
+	// were ignored while building the desired spec (B2). A labels-only or
+	// bootstrap-only drift does not touch the CR configuration, so the
+	// events are not repeated for it.
+	if existingHash != desiredHash || bootstrapDrift {
+		r.emitConfigOverriddenEvents(instance, configOverridden)
+	}
 
 	// Update the deployment spec to match desired state. When the CR sets
 	// spec.replicas (B20), the desired replica count wins and a manual
@@ -2130,6 +2161,11 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	if instance.Spec.Replicas == nil {
 		found.Spec.Replicas = replicas
 	}
+
+	// Sync the Deployment labels so CR label changes (the strimzi.io/cluster
+	// label and the image-derived version label) propagate to the
+	// Deployment metadata instead of lingering stale forever.
+	found.Labels = desired.Labels
 
 	// Update annotations to trigger rollout
 	if found.Spec.Template.Annotations == nil {
@@ -2144,6 +2180,23 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	found.Annotations[keyPrefix+"/specHash"] = desiredHash
 
 	return found, true, nil
+}
+
+// preservePodTemplateAnnotation carries an existing pod-template annotation
+// value from the live Deployment into the desired spec, so a spec patch does
+// not drop a rollout marker the desired build could not determine.
+func preservePodTemplateAnnotation(found, desired *apps.Deployment, key string) {
+	if found.Spec.Template.Annotations == nil {
+		return
+	}
+	value, ok := found.Spec.Template.Annotations[key]
+	if !ok || value == "" {
+		return
+	}
+	if desired.Spec.Template.Annotations == nil {
+		desired.Spec.Template.Annotations = make(map[string]string)
+	}
+	desired.Spec.Template.Annotations[key] = value
 }
 
 // deploymentSelectorMatches reports whether the existing Deployment's
