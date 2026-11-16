@@ -3,7 +3,10 @@
 package certprocessor
 
 import (
+	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -190,6 +193,19 @@ func opensslExportPKCS12Cmd(ctx context.Context, certPath, keyPath, caCertPath, 
 	return withPasswordEnv(cmd, password)
 }
 
+// truststoreAlias returns the alias under which the CA certificate at index
+// (of a bundle of total certificates) is imported into the truststore. A
+// single-cert bundle keeps the historical "CARoot" alias so existing
+// deployments see no change; a multi-cert bundle — the shape Strimzi
+// produces during a zero-downtime cluster CA rotation — uses "CARoot-0",
+// "CARoot-1", ... in bundle order.
+func truststoreAlias(index, total int) string {
+	if total == 1 {
+		return "CARoot"
+	}
+	return fmt.Sprintf("CARoot-%d", index)
+}
+
 // Create a JKS-formatted truststore using the cluster's CA certificate.
 // Parameters
 //     ----------
@@ -209,6 +225,14 @@ func opensslExportPKCS12Cmd(ctx context.Context, certPath, keyPath, caCertPath, 
 // Notes
 // -----
 // Internally this function calls out to the “keytool“ command-line tool.
+//
+// The cluster CA secret may hold a multi-PEM bundle (Strimzi appends the new
+// CA to the old one during a zero-downtime CA rotation). Every CERTIFICATE
+// block is imported under its own alias — "CARoot" for a single-cert bundle,
+// "CARoot-0", "CARoot-1", ... for a multi-cert bundle — because a single
+// keytool -importcert call silently keeps only the first certificate of a
+// multi-PEM file. An empty or unparseable ca.crt is rejected with an
+// actionable error before any subprocess runs.
 //
 // Security: all intermediate files are written into a per-call temporary
 // directory with 0700 permissions that is removed when the function returns.
@@ -233,6 +257,28 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 		}
 	}
 
+	// An empty ca.crt would otherwise surface as a cryptic keytool failure;
+	// reject it up front with an actionable error naming the offending input.
+	if strings.TrimSpace(cert) == "" {
+		err := errors.New("cluster CA certificate (ca.crt) is empty; the <cluster>-cluster-ca-cert secret must contain a CA certificate to build the truststore")
+		cp.log.Error(err, "Empty cluster CA certificate")
+		return nil, "", err
+	}
+
+	// keytool -importcert reads only the FIRST certificate of a multi-PEM
+	// file, so during a Strimzi zero-downtime CA rotation — when ca.crt holds
+	// the old and the new cluster CA — a single import would drop every CA
+	// after the first and clients would stop trusting servers signed by the
+	// other CA. Parse every CERTIFICATE block (this also rejects unparseable
+	// input before any subprocess runs) and import each one under its own
+	// alias (see truststoreAlias).
+	certs, err := StringToCertificates(cert)
+	if err != nil {
+		err = fmt.Errorf("invalid cluster CA certificate (ca.crt): %w", err)
+		cp.log.Error(err, "Failed to parse cluster CA certificate bundle")
+		return nil, "", err
+	}
+
 	tempDir, err := os.MkdirTemp("", "ssr-truststore-*")
 	if err != nil {
 		cp.log.Error(err, "Failed to create temp dir")
@@ -240,18 +286,25 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 	}
 	defer cp.removeTempDir(tempDir)
 
-	// Write CA certificate into the private temp dir.
-	caCertPath, err := writeTempFileIn(tempDir, "ca.crt", cert)
-	if err != nil {
-		cp.log.Error(err, "Failed to write temp file", "File", "ca.crt")
-		return nil, "", err
-	}
 	outputPath := filepath.Join(tempDir, "client.truststore.jks")
 
-	// Generate truststore
-	cmd := keytoolImportCertCmd(ctx, outputPath, "CARoot", caCertPath, password)
-	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
-		return nil, "", err
+	// Import every CA certificate into the truststore. Each certificate is
+	// written to its own temp file because keytool -importcert accepts a
+	// single certificate per invocation; the store password still travels
+	// through the process environment (passwordEnvVar) for every call.
+	for i, caCert := range certs {
+		caCertPath, err := writeTempFileIn(tempDir, fmt.Sprintf("ca-%d.crt", i),
+			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})))
+		if err != nil {
+			cp.log.Error(err, "Failed to write temp file", "File", fmt.Sprintf("ca-%d.crt", i))
+			return nil, "", err
+		}
+
+		// Generate truststore
+		cmd := keytoolImportCertCmd(ctx, outputPath, truststoreAlias(i, len(certs)), caCertPath, password)
+		if _, err := runCertCommand(ctx, cp, cmd); err != nil {
+			return nil, "", err
+		}
 	}
 
 	// Check if truststore exists
@@ -401,15 +454,41 @@ func (cp *CertProcessor) CreateKeystore(ctx context.Context, userCACert string, 
 // server certificate (key + CSR signed by the cluster CA) for the Schema
 // Registry REST API TLS endpoint.
 //
+// The cluster CA secret may hold a multi-PEM bundle (Strimzi appends the new
+// CA to the old one during a zero-downtime CA rotation). The certificate
+// whose public key matches the provided CA private key (ca.key) is used for
+// signing, so the issued server certificate always has an issuer clients
+// trust. An empty or unparseable ca.crt/ca.key, or a bundle in which no
+// certificate matches the key, is rejected with an actionable error.
+//
 // ctx bounds the openssl and keytool child processes (see CreateTruststore
 // for the deadline semantics, B5).
-func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, caKey string, password string, cn string) ([]byte, string, error) {
+func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, caKey string, password string, name string, namespace string) ([]byte, string, error) {
 	ctx, cancel := withExecDeadline(ctx)
 	defer cancel()
 
-	// Validate CN is not empty
-	if cn == "" {
+	// Validate the DNS identity inputs. name is the CR name — which may
+	// itself contain dots (e.g. my.registry) — and namespace the CR
+	// namespace; the certificate SANs are built from <name>.<namespace>, so
+	// either being empty would produce invalid names.
+	if name == "" {
 		return nil, "", fmt.Errorf("common name (CN) cannot be empty")
+	}
+	if namespace == "" {
+		return nil, "", fmt.Errorf("namespace cannot be empty; the REST API certificate DNS SANs are built from <name>.<namespace>")
+	}
+	// Empty CA material would otherwise surface as a cryptic openssl/keytool
+	// failure or an invalid signed certificate; reject it up front with an
+	// actionable error naming the offending input.
+	if strings.TrimSpace(caCert) == "" {
+		err := errors.New("cluster CA certificate (ca.crt) is empty; the <cluster>-cluster-ca-cert secret must contain a CA certificate to sign the REST API certificate")
+		cp.log.Error(err, "Empty cluster CA certificate")
+		return nil, "", err
+	}
+	if strings.TrimSpace(caKey) == "" {
+		err := errors.New("cluster CA private key (ca.key) is empty; the <cluster>-cluster-ca-key secret must contain the CA private key to sign the REST API certificate")
+		cp.log.Error(err, "Empty cluster CA private key")
+		return nil, "", err
 	}
 	// Create key, create clr. Sign clr with CACert. Create keystore.
 	if password == "" {
@@ -436,19 +515,30 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 	}
 
 	// Generate server private key and CSR
-	serverKey, csr, err := cp.generateCSR(cn)
+	serverKey, csr, err := cp.generateCSR(name, namespace)
 	if err != nil {
 		cp.log.Error(err, "Failed to generate CSR")
 		return nil, "", err
 	}
-	ca, err := StringToCertificate(caCert)
+	caCerts, err := StringToCertificates(caCert)
 	if err != nil {
-		cp.log.Error(err, "Failed to convert from string to x509 certificate")
+		err = fmt.Errorf("invalid cluster CA certificate (ca.crt): %w", err)
+		cp.log.Error(err, "Failed to parse cluster CA certificate bundle")
 		return nil, "", err
 	}
 	key, err := StringToPrivateKey(caKey)
 	if err != nil {
+		err = fmt.Errorf("invalid cluster CA private key (ca.key): %w", err)
 		cp.log.Error(err, "Failed to convert from string to x509 private key")
+		return nil, "", err
+	}
+	// During a Strimzi CA rotation ca.crt holds the old and the new CA
+	// certificate and the active one is not necessarily first; sign with the
+	// certificate whose public key matches the provided ca.key, otherwise the
+	// issued server certificate would have an issuer clients do not trust.
+	ca, err := selectCACertForKey(caCerts, key)
+	if err != nil {
+		cp.log.Error(err, "Failed to select the CA certificate matching the CA private key")
 		return nil, "", err
 	}
 	// Sign the CSR with the CA to create a server certificate
@@ -504,9 +594,12 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 
 // ConvertPEMToJKS builds a JKS keystore from a PEM-encoded certificate and
 // private key — the shape of a standard kubernetes.io/tls secret (tls.crt /
-// tls.key, as issued by cert-manager). The issuing CA certificate is not
-// required: the PKCS12 bundle is created without -chain so a leaf certificate
-// alone converts fine.
+// tls.key, as issued by cert-manager). The issuing CA certificate (the
+// secret's optional ca.crt key) is optional: when provided it must parse and
+// is embedded into the exported PKCS12 as the chain (-chain -CAfile), so TLS
+// clients validating against that CA succeed even when tls.crt holds only the
+// leaf certificate; when absent the bundle is created without -chain exactly
+// as before, so a leaf certificate alone converts fine.
 //
 // Returns
 // -------
@@ -531,7 +624,7 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 //
 // ctx bounds the openssl and keytool child processes (see CreateTruststore
 // for the deadline semantics, B5).
-func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, keyPEM string, password string) ([]byte, string, error) {
+func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, keyPEM string, caPEM string, password string) ([]byte, string, error) {
 	ctx, cancel := withExecDeadline(ctx)
 	defer cancel()
 
@@ -540,6 +633,19 @@ func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, ke
 		password, err = GeneratePassword(24, true, false)
 		if err != nil {
 			cp.log.Error(err, "Failed to generate cryptographically secure random number")
+			return nil, "", err
+		}
+	}
+
+	// The issuing CA is optional: an empty (or whitespace-only) ca.crt keeps
+	// the chain-free export of a leaf-only secret. A provided ca.crt must
+	// parse before any subprocess runs, so a broken bundle fails with an
+	// actionable error instead of a cryptic openssl failure.
+	hasCA := strings.TrimSpace(caPEM) != ""
+	if hasCA {
+		if _, err := StringToCertificates(caPEM); err != nil {
+			err = fmt.Errorf("invalid issuing CA certificate (ca.crt): %w", err)
+			cp.log.Error(err, "Failed to parse the issuing CA certificate of the user TLS secret")
 			return nil, "", err
 		}
 	}
@@ -562,10 +668,22 @@ func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, ke
 		return nil, "", err
 	}
 
+	// When the user secret carries the issuing CA, write it into the private
+	// temp dir so the PKCS12 export can embed the chain (-chain -CAfile).
+	caCertPath := ""
+	if hasCA {
+		caCertPath, err = writeTempFileIn(tempDir, "ca.crt", caPEM)
+		if err != nil {
+			cp.log.Error(err, "Failed to write temp file", "File", "ca.crt")
+			return nil, "", err
+		}
+	}
+
 	p12Path := filepath.Join(tempDir, "tls.p12")
-	// Generate p12 format bundle. No -chain/-CAfile: the issuing CA is
-	// optional in a kubernetes.io/tls secret (ca.crt).
-	cmd := opensslExportPKCS12Cmd(ctx, certPath, keyPath, "", "confluent-schema-registry", p12Path, password)
+	// Generate p12 format bundle. With a provided issuing CA the chain is
+	// embedded (-chain -CAfile); without one the export stays chain-free,
+	// exactly as before.
+	cmd := opensslExportPKCS12Cmd(ctx, certPath, keyPath, caCertPath, "confluent-schema-registry", p12Path, password)
 	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
 		return nil, "", err
 	}
@@ -645,22 +763,47 @@ func (cp *CertProcessor) KeystoreCertExpiry(ctx context.Context, keystore []byte
 	return cert.NotAfter, nil
 }
 
-func (cp *CertProcessor) generateCSR(cn string) (*rsa.PrivateKey, *x509.CertificateRequest, error) {
+// maxCommonNameLen is the PKI length limit for the certificate Subject
+// CommonName. CR names longer than this are truncated in the CN while the
+// DNS SANs keep the full name.
+const maxCommonNameLen = 64
+
+// clampCommonName truncates the CSR subject CommonName to the 64-character
+// PKI limit; the DNS SANs always keep the full, untruncated name.
+func clampCommonName(name string) string {
+	if len(name) > maxCommonNameLen {
+		return name[:maxCommonNameLen]
+	}
+	return name
+}
+
+// generateCSR creates the REST API server private key and the CSR for it.
+// name is the CR name — which may itself contain dots (e.g. my.registry) —
+// and namespace the CR namespace; both are passed separately so a dotted CR
+// name is never truncated at the first dot. The DNS SANs cover the standard
+// Kubernetes service DNS forms built from the full <name>.<namespace>
+// service name; the non-standard <name>.<namespace>.svc.cluster entry is not
+// included (B22) — it is not a resolvable name and only added noise. The
+// Subject CommonName carries the full CR name clamped to the 64-character
+// PKI limit.
+func (cp *CertProcessor) generateCSR(name, namespace string) (*rsa.PrivateKey, *x509.CertificateRequest, error) {
 	// Generate server private key. The key size is the package-level
 	// rsaKeyBits (2048 by default, B18) instead of a hardcoded 4096.
 	serverKey, err := rsa.GenerateKey(cryptorand.Reader, rsaKeyBits)
 	if err != nil {
 		return nil, nil, err
 	}
+	serviceName := name + "." + namespace
 	// Create CSR template. The DNS names cover the standard Kubernetes
-	// service DNS forms; the non-standard <cn>.svc.cluster entry is not
-	// included (B22) — it is not a resolvable name and only added noise.
+	// service DNS forms; the non-standard <name>.<namespace>.svc.cluster
+	// entry is not included (B22) — it is not a resolvable name and only
+	// added noise.
 	csrTemplate := &x509.CertificateRequest{
 		Subject: pkix.Name{
 			Organization: []string{"Schema Registry"},
-			CommonName:   strings.Split(cn, ".")[0],
+			CommonName:   clampCommonName(name),
 		},
-		DNSNames: []string{strings.Split(cn, ".")[0], cn, cn + ".svc", cn + ".svc.cluster.local"},
+		DNSNames: []string{name, serviceName, serviceName + ".svc", serviceName + ".svc.cluster.local"},
 	}
 	// Create CSR
 	csrDER, err := x509.CreateCertificateRequest(cryptorand.Reader, csrTemplate, serverKey)
@@ -674,7 +817,12 @@ func (cp *CertProcessor) generateCSR(cn string) (*rsa.PrivateKey, *x509.Certific
 	return serverKey, csr, nil
 }
 
-func signCSR(caCert *x509.Certificate, caKey *rsa.PrivateKey, csr *x509.CertificateRequest) (*x509.Certificate, error) {
+// signCSR issues the REST API server certificate from the CSR, signed by the
+// provided cluster CA. caKey is the CA private key as a crypto.Signer, so
+// both RSA and ECDSA cluster CA keys are supported (x509.CreateCertificate
+// picks the signature algorithm from the signer); the CSR's public key may
+// be of any algorithm the CA can sign for.
+func signCSR(caCert *x509.Certificate, caKey crypto.Signer, csr *x509.CertificateRequest) (*x509.Certificate, error) {
 	// Generate a random serial number
 	serialNumber, err := cryptorand.Int(cryptorand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
@@ -704,29 +852,68 @@ func signCSR(caCert *x509.Certificate, caKey *rsa.PrivateKey, csr *x509.Certific
 	return serverCert, nil
 }
 
-func StringToCertificate(certString string) (*x509.Certificate, error) {
-	block, _ := pem.Decode([]byte(certString))
-	if block == nil {
-		return nil, errors.New("failed to parse PEM block containing the certificate")
+// StringToCertificates decodes every CERTIFICATE PEM block in certString and
+// parses each into an x509.Certificate, preserving bundle order. PEM blocks
+// of any other type and any data between blocks are skipped, matching
+// pem.Decode's lenient leading-garbage behavior. An error is returned when no
+// CERTIFICATE block is present or a certificate block fails to parse; the
+// message names the 0-based position of the offending certificate.
+func StringToCertificates(certString string) ([]*x509.Certificate, error) {
+	var certs []*x509.Certificate
+	rest := []byte(certString)
+	for {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse certificate #%d of the PEM bundle: %w", len(certs), err)
+		}
+		certs = append(certs, cert)
 	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	if len(certs) == 0 {
+		return nil, errors.New("no CERTIFICATE PEM block found in the provided data")
+	}
+	return certs, nil
+}
+
+// StringToCertificate parses the first CERTIFICATE PEM block of certString.
+// For multi-PEM CA bundles use StringToCertificates instead: during a Strimzi
+// CA rotation the certificate matching the CA private key is not necessarily
+// the first one.
+func StringToCertificate(certString string) (*x509.Certificate, error) {
+	certs, err := StringToCertificates(certString)
 	if err != nil {
 		return nil, err
 	}
-	return cert, nil
+	return certs[0], nil
 }
 
-func StringToPrivateKey(privateKeyString string) (*rsa.PrivateKey, error) {
+// StringToPrivateKey parses a PEM-encoded private key. RSA keys (PKCS#1
+// "RSA PRIVATE KEY" and PKCS#8 "PRIVATE KEY") and ECDSA keys (SEC1
+// "EC PRIVATE KEY" and PKCS#8) are supported, so a Strimzi cluster CA
+// generated with an ECDSA key can sign the REST API certificate. The
+// returned key always implements crypto.Signer.
+func StringToPrivateKey(privateKeyString string) (crypto.Signer, error) {
 	block, _ := pem.Decode([]byte(privateKeyString))
 	if block == nil {
 		return nil, errors.New("failed to parse PEM block containing the private key")
 	}
-	// Try PKCS1 first
+	// Try PKCS1 first (the traditional "RSA PRIVATE KEY" encoding)
 	priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err == nil {
 		return priv, nil
 	}
-	// If PKCS1 fails, try PKCS8
+	// SEC1 "EC PRIVATE KEY" (the traditional OpenSSL EC encoding)
+	if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	// If PKCS1 and SEC1 fail, try PKCS8 (covers RSA and ECDSA keys)
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		return nil, err
@@ -734,9 +921,41 @@ func StringToPrivateKey(privateKeyString string) (*rsa.PrivateKey, error) {
 	switch key := key.(type) {
 	case *rsa.PrivateKey:
 		return key, nil
+	case *ecdsa.PrivateKey:
+		return key, nil
 	default:
-		return nil, errors.New("key type is not RSA private key")
+		return nil, errors.New("key type is not RSA or ECDSA private key")
 	}
+}
+
+// publicKeyMatches reports whether the two public keys are the same key,
+// compared via their PKIX DER encodings so every public key algorithm found
+// in a CA certificate (RSA and ECDSA) is handled uniformly.
+func publicKeyMatches(a, b crypto.PublicKey) bool {
+	aDER, err := x509.MarshalPKIXPublicKey(a)
+	if err != nil {
+		return false
+	}
+	bDER, err := x509.MarshalPKIXPublicKey(b)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(aDER, bDER)
+}
+
+// selectCACertForKey returns the certificate from the ca.crt bundle whose
+// public key matches the provided ca.key private key (RSA or ECDSA). During
+// a Strimzi CA rotation the bundle holds the old and the new CA certificate
+// and the one matching the active private key is not necessarily first;
+// signing with a non-matching certificate would issue server certificates
+// whose issuer clients do not trust.
+func selectCACertForKey(caCerts []*x509.Certificate, caKey crypto.Signer) (*x509.Certificate, error) {
+	for _, cert := range caCerts {
+		if publicKeyMatches(cert.PublicKey, caKey.Public()) {
+			return cert, nil
+		}
+	}
+	return nil, fmt.Errorf("no certificate in the CA bundle (ca.crt) matches the provided CA private key (ca.key); ensure ca.crt and ca.key come from the same CA generation so the REST API certificate is signed by a CA clients trust")
 }
 
 // saveFiles writes the server private key and certificate into dir using

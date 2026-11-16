@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"strings"
 
@@ -39,17 +41,24 @@ import (
 // (idempotent, no reconcile loops).
 const userSecretVersionKey = keyPrefix + "/user-secret-resourceVersion"
 
-// hasPEMTLSSecretKeys reports whether the secret carries the standard
-// kubernetes.io/tls keys (tls.crt and tls.key), regardless of their values.
-// It is used by validation to recognize a secret that is *intended* as a PEM
-// secret so it can produce a precise error message for a partial shape.
+// hasPEMTLSSecretKeys reports whether the secret is *intended* as a PEM TLS
+// secret: it either carries any of the standard kubernetes.io/tls keys
+// (tls.crt and/or tls.key — a single one means a partially populated TLS
+// secret) or is typed kubernetes.io/tls, which by definition holds PEM
+// material. It is used by validation to recognize such secrets so they are
+// handled as user TLS secrets with precise error messages (missing/empty
+// keys, unparseable PEM) instead of being silently misread as pre-built
+// keystores and ignored.
 func hasPEMTLSSecretKeys(secret *v1.Secret) bool {
 	if secret == nil {
 		return false
 	}
 	_, hasCert := secret.Data["tls.crt"]
 	_, hasKey := secret.Data["tls.key"]
-	return hasCert && hasKey
+	if hasCert || hasKey {
+		return true
+	}
+	return secret.Type == v1.SecretTypeTLS
 }
 
 // isPEMTLSSecret reports whether the user TLS secret carries the standard
@@ -110,15 +119,61 @@ func validateUserTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSche
 			return fmt.Sprintf("user-provided TLS secret %q looks like a kubernetes.io/tls secret but is missing required key(s) or has empty values: %s",
 				instance.Spec.TLSSecretName, strings.Join(missing, ", "))
 		}
+		if msg := pemTLSSecretMaterialError(instance.Spec.TLSSecretName, secret); msg != "" {
+			return msg
+		}
 		return derivedSecretNameValid(instance)
 	}
 	return userTLSSecretValidationError(instance.Spec.TLSSecretName, secret, effectiveKeystoreType(instance))
 }
 
+// pemTLSSecretMaterialError returns a non-empty message when the PEM material
+// of a kubernetes.io/tls-shaped user TLS secret does not parse. Validating
+// the material here surfaces a broken secret as Ready=False/InvalidTLSSecret
+// (with a Warning event) before any resource is created, instead of a late
+// ReconcileError from the openssl/keytool conversion deep in the certificate
+// pipeline. tls.crt must parse as a certificate chain (the same parser the
+// conversion pipeline applies to ca.crt); tls.key must decode as a PEM
+// private key in a format the pipeline's openssl accepts.
+func pemTLSSecretMaterialError(secretName string, secret *v1.Secret) string {
+	if _, err := certprocessor.StringToCertificates(string(secret.Data["tls.crt"])); err != nil {
+		return fmt.Sprintf("user-provided TLS secret %q has an unparseable tls.crt: %v", secretName, err)
+	}
+	if !pemPrivateKeyParses(string(secret.Data["tls.key"])) {
+		return fmt.Sprintf("user-provided TLS secret %q has an unparseable tls.key: no PEM private key block (PKCS#1, SEC1 EC or PKCS#8) could be parsed", secretName)
+	}
+	return ""
+}
+
+// pemPrivateKeyParses reports whether keyPEM holds a PEM block that parses as
+// a private key in any of the formats the conversion pipeline's openssl
+// accepts: PKCS#1 RSA, SEC1 EC and PKCS#8 (which also covers Ed25519). The
+// check is deliberately more permissive than the cluster CA key parser
+// (certprocessor.StringToPrivateKey, which only needs RSA and ECDSA): a user
+// TLS key in another openssl-supported format must not be rejected at
+// validation time when the pipeline could consume it.
+func pemPrivateKeyParses(keyPEM string) bool {
+	block, _ := pem.Decode([]byte(keyPEM))
+	if block == nil {
+		return false
+	}
+	if _, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return true
+	}
+	if _, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return true
+	}
+	_, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	return err == nil
+}
+
 // buildDerivedJKSSecret converts the PEM user TLS secret into the JKS
 // keystore contract and returns the desired derived secret. The user
 // secret's resourceVersion is recorded in an annotation so the conversion is
-// regenerated only when the user secret changes. ctx bounds the openssl and
+// regenerated only when the user secret changes. The secret's optional
+// ca.crt is threaded through as the issuing chain of the exported PKCS12, so
+// the derived keystore validates for clients trusting that CA even when
+// tls.crt holds only the leaf certificate. ctx bounds the openssl and
 // keytool child processes in the conversion (B5).
 func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
 	ctx context.Context,
@@ -131,6 +186,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
 		ctx,
 		string(userSecret.Data["tls.crt"]),
 		string(userSecret.Data["tls.key"]),
+		string(userSecret.Data["ca.crt"]),
 		"",
 	)
 	if err != nil {

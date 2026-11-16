@@ -1,8 +1,23 @@
 package certprocessor
 
 import (
+	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 	"unicode"
@@ -154,7 +169,7 @@ func TestCreateTLSKeystore(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
 	if err != nil {
 		t.Error(err)
 	}
@@ -186,7 +201,7 @@ func TestConvertPEMToJKS(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
 
 	t.Run("converts PEM cert and key into a parseable JKS", func(t *testing.T) {
-		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "test1234")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -208,7 +223,7 @@ func TestConvertPEMToJKS(t *testing.T) {
 	})
 
 	t.Run("wrong password cannot open the keystore", func(t *testing.T) {
-		keystore, _, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "test1234")
+		keystore, _, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -218,7 +233,7 @@ func TestConvertPEMToJKS(t *testing.T) {
 	})
 
 	t.Run("empty password is auto-generated", func(t *testing.T) {
-		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "")
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -231,8 +246,80 @@ func TestConvertPEMToJKS(t *testing.T) {
 	})
 
 	t.Run("invalid PEM certificate fails", func(t *testing.T) {
-		if _, _, err := cp.ConvertPEMToJKS(context.Background(), "not a valid PEM certificate", uc.UserKeyPEM, "test1234"); err == nil {
+		if _, _, err := cp.ConvertPEMToJKS(context.Background(), "not a valid PEM certificate", uc.UserKeyPEM, "", "test1234"); err == nil {
 			t.Error("expected error when converting invalid PEM data, got nil")
+		}
+	})
+}
+
+// TestConvertPEMToJKS_WithCACert covers the user-provided issuing CA (the
+// optional ca.crt key of a kubernetes.io/tls secret): when present it must be
+// embedded into the exported PKCS12 as the chain so the derived keystore
+// validates for clients trusting that CA even when tls.crt holds only the
+// leaf; when absent the keystore keeps holding only the leaf, exactly as
+// before; and an unparseable ca.crt is rejected with an actionable error.
+func TestConvertPEMToJKS_WithCACert(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+
+	t.Run("includes the issuing CA chain in the keystore", func(t *testing.T) {
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, ca.CACertPEM, "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keystore) == 0 {
+			t.Fatal("empty keystore")
+		}
+		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+		if len(certs) != 2 {
+			t.Fatalf("expected the keystore to hold the leaf and the CA chain, got %d certs: %s", len(certs), certSubjects(certs))
+		}
+		got := certRawSet(certs)
+		if _, ok := got[string(uc.UserCert.Raw)]; !ok {
+			t.Errorf("expected the leaf certificate in the keystore, got %s", certSubjects(certs))
+		}
+		if _, ok := got[string(ca.CACert.Raw)]; !ok {
+			t.Errorf("expected the provided ca.crt certificate in the keystore chain, got %s", certSubjects(certs))
+		}
+	})
+
+	t.Run("without ca.crt the keystore holds only the leaf", func(t *testing.T) {
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, uc.UserCert.Raw) {
+			t.Errorf("expected the keystore to hold only the leaf certificate, got %d certs: %s", len(certs), certSubjects(certs))
+		}
+	})
+
+	t.Run("whitespace-only ca.crt is treated as absent", func(t *testing.T) {
+		keystore, password, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "  \n\t ", "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, uc.UserCert.Raw) {
+			t.Errorf("expected the keystore to hold only the leaf certificate, got %d certs: %s", len(certs), certSubjects(certs))
+		}
+	})
+
+	t.Run("invalid ca.crt fails with an actionable error", func(t *testing.T) {
+		_, _, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "not a valid PEM certificate", "test1234")
+		if err == nil {
+			t.Fatal("expected an error for an unparseable ca.crt, got nil")
+		}
+		if !strings.Contains(err.Error(), "ca.crt") {
+			t.Errorf("expected the error to name the offending input ca.crt, got: %v", err)
 		}
 	})
 }
@@ -286,7 +373,7 @@ func TestKeystoreCertExpiry(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
 	if err != nil {
 		t.Fatalf("failed to generate TLS keystore: %v", err)
 	}
@@ -327,7 +414,7 @@ func TestGenerateCSRKeyBits(t *testing.T) {
 
 	t.Run("default key size is 2048 bits", func(t *testing.T) {
 		rsaKeyBits = 2048
-		key, _, err := cp.generateCSR("schema-registry.kafka.svc")
+		key, _, err := cp.generateCSR("schema-registry", "kafka")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -340,7 +427,7 @@ func TestGenerateCSRKeyBits(t *testing.T) {
 		// A distinct value proves the variable is honored (and documents the
 		// supported way to raise the key size).
 		rsaKeyBits = 3072
-		key, _, err := cp.generateCSR("schema-registry.kafka.svc")
+		key, _, err := cp.generateCSR("schema-registry", "kafka")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -355,7 +442,7 @@ func TestGenerateCSRKeyBits(t *testing.T) {
 // <cn>.svc.cluster entry, which is not a resolvable name.
 func TestGenerateCSRDNSNames(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
-	_, csr, err := cp.generateCSR("test-sr.default")
+	_, csr, err := cp.generateCSR("test-sr", "default")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -373,6 +460,51 @@ func TestGenerateCSRDNSNames(t *testing.T) {
 	if _, ok := got["test-sr.default.svc.cluster"]; ok {
 		t.Errorf("expected the non-standard <cn>.svc.cluster DNS name to be dropped, got %v", csr.DNSNames)
 	}
+	// The subject CN carries the full CR name (clamped to the PKI limit).
+	if csr.Subject.CommonName != "test-sr" {
+		t.Errorf("expected the CN to be the full CR name %q, got %q", "test-sr", csr.Subject.CommonName)
+	}
+}
+
+// TestGenerateCSRDottedName covers the dot-in-CR-name fix: a CR named
+// my.registry in namespace ns must get DNS SANs built from the FULL name
+// (my.registry, my.registry.ns, ...) and the full name as the subject CN —
+// the pre-fix code split the combined name.namespace argument on the first
+// dot and produced my everywhere.
+func TestGenerateCSRDottedName(t *testing.T) {
+	cp := NewCertProcessor(logr.Logger{})
+	_, csr, err := cp.generateCSR("my.registry", "ns")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []string{"my.registry", "my.registry.ns", "my.registry.ns.svc", "my.registry.ns.svc.cluster.local"}
+	if !slices.Equal(csr.DNSNames, want) {
+		t.Errorf("expected DNS SANs %v, got %v", want, csr.DNSNames)
+	}
+	if csr.Subject.CommonName != "my.registry" {
+		t.Errorf("expected the CN to be the full CR name %q, got %q", "my.registry", csr.Subject.CommonName)
+	}
+}
+
+// TestGenerateCSRCommonNameClamped covers the 64-character PKI limit of the
+// subject CommonName: a CR name longer than 64 characters is truncated in the
+// CN while the DNS SANs keep the full, untruncated name.
+func TestGenerateCSRCommonNameClamped(t *testing.T) {
+	cp := NewCertProcessor(logr.Logger{})
+	longName := strings.Repeat("a", 70)
+	_, csr, err := cp.generateCSR(longName, "ns")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if csr.Subject.CommonName != longName[:64] {
+		t.Errorf("expected the CN to be clamped to the 64-character prefix %q, got %q", longName[:64], csr.Subject.CommonName)
+	}
+	want := []string{longName, longName + ".ns", longName + ".ns.svc", longName + ".ns.svc.cluster.local"}
+	if !slices.Equal(csr.DNSNames, want) {
+		t.Errorf("expected the DNS SANs to keep the full name %v, got %v", want, csr.DNSNames)
+	}
 }
 
 // TestSignCSRNotBeforeSkewMargin covers B9: the signed REST API certificate
@@ -386,7 +518,7 @@ func TestSignCSRNotBeforeSkewMargin(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	_, csr, err := cp.generateCSR("schema-registry.kafka.svc")
+	_, csr, err := cp.generateCSR("schema-registry", "kafka")
 	if err != nil {
 		t.Fatalf("failed to generate CSR: %v", err)
 	}
@@ -454,7 +586,7 @@ func TestConcurrentCertGeneration(t *testing.T) {
 				return
 			}
 
-			tlsKeystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry.kafka")
+			tlsKeystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
 			if err != nil {
 				errCh <- fmt.Errorf("GenerateTLSforHTTP: %w", err)
 				return
@@ -487,7 +619,7 @@ func TestGenerateTLSforHTTP_EmptyCN(t *testing.T) {
 	}
 
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "")
+	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "", "default")
 	if err == nil {
 		// If no error returned, verify the keystore is empty (indicating failure)
 		if len(keystore) == 0 {
@@ -496,4 +628,757 @@ func TestGenerateTLSforHTTP_EmptyCN(t *testing.T) {
 			t.Error("expected error when generating TLS with empty CN, got nil")
 		}
 	}
+}
+
+// TestGenerateTLSforHTTP_EmptyNamespace verifies that GenerateTLSforHTTP
+// rejects an empty namespace with an actionable error: the certificate DNS
+// SANs are built from <name>.<namespace>.
+func TestGenerateTLSforHTTP_EmptyNamespace(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "")
+	if err == nil {
+		t.Fatal("expected an error for an empty namespace, got nil")
+	}
+	if len(keystore) != 0 {
+		t.Error("expected no keystore on invalid input")
+	}
+	if !strings.Contains(err.Error(), "namespace") {
+		t.Errorf("expected the error to name the namespace, got: %v", err)
+	}
+}
+
+// listStoreEntries runs keytool -list -rfc on the JKS file at path and
+// returns the alias names (as keytool displays them) and the certificates the
+// store contains. It is a test helper for asserting the truststore and
+// keystore contents produced by CreateTruststore and GenerateTLSforHTTP.
+func listStoreEntries(t *testing.T, cp *CertProcessor, path, password string) ([]string, []*x509.Certificate) {
+	t.Helper()
+	out, err := runCertCommand(context.Background(), cp, keytoolListCmd(context.Background(), path, password))
+	if err != nil {
+		t.Fatalf("keytool -list failed: %v", err)
+	}
+	var aliases []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if alias, ok := strings.CutPrefix(line, "Alias name: "); ok {
+			aliases = append(aliases, strings.TrimSpace(alias))
+		}
+	}
+	var certs []*x509.Certificate
+	rest := out
+	for {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatalf("failed to parse a certificate from the keytool -list output: %v", err)
+		}
+		certs = append(certs, cert)
+	}
+	return aliases, certs
+}
+
+// writeStoreFile writes JKS bytes to a fresh temporary file and returns its
+// path, ready for a keytool -list inspection.
+func writeStoreFile(t *testing.T, data []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "store.jks")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("failed to write the store temp file: %v", err)
+	}
+	return path
+}
+
+// certRawSet maps the DER encodings of certs into a set for comparisons.
+func certRawSet(certs []*x509.Certificate) map[string]struct{} {
+	set := make(map[string]struct{}, len(certs))
+	for _, c := range certs {
+		set[string(c.Raw)] = struct{}{}
+	}
+	return set
+}
+
+// certSubjects renders the subjects of certs for test failure messages.
+func certSubjects(certs []*x509.Certificate) string {
+	names := make([]string, 0, len(certs))
+	for _, c := range certs {
+		names = append(names, c.Subject.String())
+	}
+	return strings.Join(names, ", ")
+}
+
+// TestStringToCertificates covers the multi-PEM bundle parser used by
+// CreateTruststore and GenerateTLSforHTTP: it must decode every CERTIFICATE
+// block (Strimzi CA rotation bundles hold the old and the new CA), skip other
+// content, and reject empty or unparseable input.
+func TestStringToCertificates(t *testing.T) {
+	ca1, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA 1: %v", err)
+	}
+	ca2, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA 2: %v", err)
+	}
+
+	t.Run("parses every certificate of a multi-PEM bundle in order", func(t *testing.T) {
+		certs, err := StringToCertificates(ca1.CACertPEM + ca2.CACertPEM)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(certs) != 2 {
+			t.Fatalf("expected 2 certificates, got %d", len(certs))
+		}
+		if !bytes.Equal(certs[0].Raw, ca1.CACert.Raw) || !bytes.Equal(certs[1].Raw, ca2.CACert.Raw) {
+			t.Error("expected the certificates in bundle order")
+		}
+	})
+
+	t.Run("parses a single-certificate bundle", func(t *testing.T) {
+		certs, err := StringToCertificates(ca1.CACertPEM)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, ca1.CACert.Raw) {
+			t.Errorf("expected the single CA certificate, got %d certs", len(certs))
+		}
+	})
+
+	t.Run("skips non-certificate PEM blocks and surrounding data", func(t *testing.T) {
+		noise := "leading garbage\n" + string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: []byte("not-a-key")})) + "\n"
+		certs, err := StringToCertificates(noise + ca1.CACertPEM)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, ca1.CACert.Raw) {
+			t.Errorf("expected only the CA certificate, got %d certs", len(certs))
+		}
+	})
+
+	t.Run("errors when no certificate block is present", func(t *testing.T) {
+		for _, in := range []string{"", "plain garbage", string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: []byte("x")}))} {
+			if _, err := StringToCertificates(in); err == nil {
+				t.Errorf("expected an error for input %q, got nil", in)
+			}
+		}
+	})
+
+	t.Run("errors on an unparseable certificate block", func(t *testing.T) {
+		broken := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("junk-der")}))
+		_, err := StringToCertificates(broken)
+		if err == nil {
+			t.Fatal("expected an error for an unparseable certificate block, got nil")
+		}
+		if !strings.Contains(err.Error(), "#0") {
+			t.Errorf("expected the error to name the offending certificate position, got: %v", err)
+		}
+	})
+
+	t.Run("StringToCertificate returns the first certificate", func(t *testing.T) {
+		cert, err := StringToCertificate(ca1.CACertPEM + ca2.CACertPEM)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !bytes.Equal(cert.Raw, ca1.CACert.Raw) {
+			t.Error("expected StringToCertificate to return the first bundle certificate")
+		}
+	})
+}
+
+// TestCreateTruststore_MultiCertBundle covers the Strimzi cluster CA rotation
+// shape: ca.crt holds several concatenated PEM certificates (old + new CA).
+// Every certificate must land in the truststore under its own CARoot-<index>
+// alias — a single keytool -importcert call silently keeps only the first
+// one, which made clients stop trusting servers signed by the other CA
+// during rotation.
+func TestCreateTruststore_MultiCertBundle(t *testing.T) {
+	caOld, err := testutil.GenerateClusterCACert("rotation-old-ca")
+	if err != nil {
+		t.Fatalf("failed to generate old CA: %v", err)
+	}
+	caNew, err := testutil.GenerateClusterCACert("rotation-new-ca")
+	if err != nil {
+		t.Fatalf("failed to generate new CA: %v", err)
+	}
+	caSpare, err := testutil.GenerateClusterCACert("rotation-spare-ca")
+	if err != nil {
+		t.Fatalf("failed to generate spare CA: %v", err)
+	}
+
+	bundle := caOld.CACertPEM + caNew.CACertPEM + caSpare.CACertPEM
+
+	cp := NewCertProcessor(logr.Logger{})
+	truststore, password, err := cp.CreateTruststore(context.Background(), bundle, "test1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(truststore) == 0 {
+		t.Fatal("empty truststore")
+	}
+
+	aliases, certs := listStoreEntries(t, cp, writeStoreFile(t, truststore), password)
+
+	// keytool displays JKS aliases lowercased; compare case-insensitively.
+	gotAliases := make(map[string]struct{}, len(aliases))
+	for _, alias := range aliases {
+		gotAliases[strings.ToLower(alias)] = struct{}{}
+	}
+	if len(aliases) != 3 {
+		t.Errorf("expected 3 truststore entries, got %d (%v)", len(aliases), aliases)
+	}
+	for _, alias := range []string{"caroot-0", "caroot-1", "caroot-2"} {
+		if _, ok := gotAliases[alias]; !ok {
+			t.Errorf("expected alias %q in the truststore, got %v", alias, aliases)
+		}
+	}
+
+	// Every certificate of the bundle must be present in the truststore.
+	wantCerts := certRawSet([]*x509.Certificate{caOld.CACert, caNew.CACert, caSpare.CACert})
+	gotCerts := certRawSet(certs)
+	for raw := range wantCerts {
+		if _, ok := gotCerts[raw]; !ok {
+			t.Errorf("a bundle CA certificate is missing from the truststore; got %s", certSubjects(certs))
+		}
+	}
+	if len(gotCerts) != len(wantCerts) {
+		t.Errorf("truststore contains unexpected certificates: got %d, want %d", len(gotCerts), len(wantCerts))
+	}
+}
+
+// TestCreateTruststore_SingleCertAliasPreserved pins the alias scheme for the
+// common single-cert ca.crt: the certificate is imported under the historical
+// "CARoot" alias, so existing deployments see no change.
+func TestCreateTruststore_SingleCertAliasPreserved(t *testing.T) {
+	ca, err := testutil.GenerateClusterCACert("single-ca")
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	truststore, password, err := cp.CreateTruststore(context.Background(), ca.CACertPEM, "test1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	aliases, certs := listStoreEntries(t, cp, writeStoreFile(t, truststore), password)
+	if len(aliases) != 1 {
+		t.Fatalf("expected exactly 1 truststore entry, got %d (%v)", len(aliases), aliases)
+	}
+	if !strings.EqualFold(aliases[0], "CARoot") {
+		t.Errorf("expected the single-cert bundle to keep the CARoot alias, got %q", aliases[0])
+	}
+	if len(certs) != 1 || !bytes.Equal(certs[0].Raw, ca.CACert.Raw) {
+		t.Errorf("expected the truststore to hold the CA certificate, got %s", certSubjects(certs))
+	}
+}
+
+// TestCreateTruststore_EmptyCert verifies that an empty or whitespace-only
+// ca.crt is rejected with an actionable error naming the offending input,
+// instead of surfacing as a cryptic keytool failure.
+func TestCreateTruststore_EmptyCert(t *testing.T) {
+	cp := NewCertProcessor(logr.Logger{})
+	tests := []struct {
+		name string
+		cert string
+	}{
+		{"empty ca.crt", ""},
+		{"whitespace-only ca.crt", "  \n\t "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := cp.CreateTruststore(context.Background(), tt.cert, "test1234")
+			if err == nil {
+				t.Fatal("expected an error for an empty ca.crt, got nil")
+			}
+			if !strings.Contains(err.Error(), "ca.crt") {
+				t.Errorf("expected the error to name the offending input ca.crt, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestGenerateTLSforHTTP_SelectsCAMatchingKey covers the CA-selection fix:
+// when ca.crt is a multi-PEM bundle whose FIRST certificate does not match
+// the provided ca.key but a later one does, the matching CA must be used for
+// signing. Before the fix the first certificate was used blindly, producing
+// server certificates with an issuer clients do not trust.
+func TestGenerateTLSforHTTP_SelectsCAMatchingKey(t *testing.T) {
+	caOld, err := testutil.GenerateClusterCACert("rotation-old-ca")
+	if err != nil {
+		t.Fatalf("failed to generate old CA: %v", err)
+	}
+	caNew, err := testutil.GenerateClusterCACert("rotation-new-ca")
+	if err != nil {
+		t.Fatalf("failed to generate new CA: %v", err)
+	}
+
+	// The first certificate in the bundle belongs to the old CA, but the
+	// provided private key is the new (active) CA's key.
+	bundle := caOld.CACertPEM + caNew.CACertPEM
+
+	cp := NewCertProcessor(logr.Logger{})
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), bundle, caNew.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(keystore) == 0 {
+		t.Fatal("empty keystore")
+	}
+
+	_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+	var leaf *x509.Certificate
+	for _, cert := range certs {
+		// The REST API server certificate carries the CSR's subject CN; the
+		// CA certificates in the keystore have the cluster CA CNs.
+		if cert.Subject.CommonName == "confluent-schema-registry" {
+			leaf = cert
+			break
+		}
+	}
+	if leaf == nil {
+		t.Fatalf("server certificate not found in the keystore; entries: %s", certSubjects(certs))
+	}
+
+	// The issued certificate must be signed by the CA whose key was provided
+	// (the second bundle entry), not by the first bundle entry.
+	if err := leaf.CheckSignatureFrom(caNew.CACert); err != nil {
+		t.Errorf("expected the server certificate to be signed by the CA matching ca.key, but signature verification against it failed: %v", err)
+	}
+	if err := leaf.CheckSignatureFrom(caOld.CACert); err == nil {
+		t.Error("expected the server certificate NOT to be signed by the first (non-matching) bundle certificate, but it verifies against it")
+	}
+	if leaf.Issuer.CommonName != "rotation-new-ca" {
+		t.Errorf("expected the issuer to be the matching CA %q, got %q", "rotation-new-ca", leaf.Issuer.CommonName)
+	}
+	// The full chain must validate against the matching CA as root.
+	roots := x509.NewCertPool()
+	roots.AddCert(caNew.CACert)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+		t.Errorf("expected the server certificate chain to validate against the matching CA, got: %v", err)
+	}
+}
+
+// TestGenerateTLSforHTTP_NoCertMatchesKey verifies the actionable error when
+// no certificate of the ca.crt bundle matches the provided ca.key: the
+// operator must not silently issue server certificates with an issuer
+// clients do not trust.
+func TestGenerateTLSforHTTP_NoCertMatchesKey(t *testing.T) {
+	caOld, err := testutil.GenerateClusterCACert("rotation-old-ca")
+	if err != nil {
+		t.Fatalf("failed to generate old CA: %v", err)
+	}
+	caNew, err := testutil.GenerateClusterCACert("rotation-new-ca")
+	if err != nil {
+		t.Fatalf("failed to generate new CA: %v", err)
+	}
+	caOther, err := testutil.GenerateClusterCACert("unrelated-ca")
+	if err != nil {
+		t.Fatalf("failed to generate unrelated CA: %v", err)
+	}
+
+	bundle := caOld.CACertPEM + caNew.CACertPEM
+
+	cp := NewCertProcessor(logr.Logger{})
+	keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), bundle, caOther.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
+	if err == nil {
+		t.Fatal("expected an error when no bundle certificate matches ca.key, got nil")
+	}
+	if len(keystore) != 0 {
+		t.Error("expected no keystore when no bundle certificate matches ca.key")
+	}
+	if !strings.Contains(err.Error(), "ca.crt") || !strings.Contains(err.Error(), "ca.key") {
+		t.Errorf("expected an actionable error naming ca.crt and ca.key, got: %v", err)
+	}
+}
+
+// TestGenerateTLSforHTTP_EmptyInputs verifies that empty, whitespace-only or
+// unparseable CA material is rejected with an actionable error naming the
+// offending input (ca.crt or ca.key) instead of a cryptic tool failure.
+func TestGenerateTLSforHTTP_EmptyInputs(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	tests := []struct {
+		name            string
+		caCert          string
+		caKey           string
+		wantErrContains string
+	}{
+		{"empty ca.crt", "", ca.CAKeyPEM, "ca.crt"},
+		{"whitespace-only ca.crt", "  \n\t ", ca.CAKeyPEM, "ca.crt"},
+		{"unparseable ca.crt", "not a valid PEM certificate", ca.CAKeyPEM, "ca.crt"},
+		{"empty ca.key", ca.CACertPEM, "", "ca.key"},
+		{"whitespace-only ca.key", ca.CACertPEM, " \n\t ", "ca.key"},
+		{"unparseable ca.key", ca.CACertPEM, "not a valid PEM private key", "ca.key"},
+		{"both empty", "", "", "ca.crt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keystore, _, err := cp.GenerateTLSforHTTP(context.Background(), tt.caCert, tt.caKey, "test1234", "confluent-schema-registry", "kafka")
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if len(keystore) != 0 {
+				t.Error("expected no keystore on invalid input")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Errorf("expected the error to name %s, got: %v", tt.wantErrContains, err)
+			}
+		})
+	}
+}
+
+// ecdsaTestCA is an ECDSA cluster CA fixture: the certificate plus the
+// private key in both PEM encodings an ECDSA Strimzi cluster CA may ship
+// (SEC1 "EC PRIVATE KEY" and PKCS#8 "PRIVATE KEY").
+type ecdsaTestCA struct {
+	CertPEM     string
+	SEC1KeyPEM  string
+	PKCS8KeyPEM string
+	Cert        *x509.Certificate
+	Key         *ecdsa.PrivateKey
+}
+
+// generateECDSATestCA creates a self-signed ECDSA P-256 cluster CA for the
+// ECDSA support tests (the shared testutil helpers only generate RSA CAs).
+func generateECDSATestCA(t *testing.T, commonName string) *ecdsaTestCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate the ECDSA CA key: %v", err)
+	}
+	serialNumber, err := cryptorand.Int(cryptorand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("failed to generate the serial number: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"io.strimzi"},
+			CommonName:   commonName,
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLenZero:        true,
+	}
+	der, err := x509.CreateCertificate(cryptorand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to self-sign the ECDSA CA certificate: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("failed to parse the ECDSA CA certificate: %v", err)
+	}
+	sec1, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("failed to marshal the ECDSA CA key (SEC1): %v", err)
+	}
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("failed to marshal the ECDSA CA key (PKCS#8): %v", err)
+	}
+	return &ecdsaTestCA{
+		CertPEM:     string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		SEC1KeyPEM:  string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: sec1})),
+		PKCS8KeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8})),
+		Cert:        cert,
+		Key:         key,
+	}
+}
+
+// TestStringToPrivateKey covers the cluster CA private key parser: RSA keys
+// in both the PKCS#1 and PKCS#8 encodings keep parsing (unchanged behavior),
+// ECDSA keys parse from both the SEC1 "EC PRIVATE KEY" and the PKCS#8
+// encoding so an ECDSA Strimzi cluster CA is supported, and garbage,
+// non-key PEM or unsupported key types are rejected.
+func TestStringToPrivateKey(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(cryptorand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate the RSA fixture key: %v", err)
+	}
+	pkcs1DER := x509.MarshalPKCS1PrivateKey(rsaKey)
+	rsaPKCS8DER, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+	if err != nil {
+		t.Fatalf("failed to marshal the RSA fixture key (PKCS#8): %v", err)
+	}
+	ecCA := generateECDSATestCA(t, "ecdsa-ca")
+	_, ed25519Key, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate the Ed25519 fixture key: %v", err)
+	}
+	ed25519DER, err := x509.MarshalPKCS8PrivateKey(ed25519Key)
+	if err != nil {
+		t.Fatalf("failed to marshal the Ed25519 fixture key: %v", err)
+	}
+
+	pkixOf := func(t *testing.T, key crypto.PublicKey) string {
+		t.Helper()
+		der, err := x509.MarshalPKIXPublicKey(key)
+		if err != nil {
+			t.Fatalf("failed to marshal the public key: %v", err)
+		}
+		return string(der)
+	}
+	rsaPKIX := pkixOf(t, rsaKey.Public())
+	ecPKIX := pkixOf(t, ecCA.Key.Public())
+
+	tests := []struct {
+		name   string
+		keyPEM string
+		verify func(t *testing.T, key crypto.Signer)
+	}{
+		{
+			name:   "RSA PKCS#1 (RSA PRIVATE KEY)",
+			keyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: pkcs1DER})),
+			verify: func(t *testing.T, key crypto.Signer) {
+				rsaParsed, ok := key.(*rsa.PrivateKey)
+				if !ok {
+					t.Fatalf("expected *rsa.PrivateKey, got %T", key)
+				}
+				if got := pkixOf(t, rsaParsed.Public()); got != rsaPKIX {
+					t.Error("parsed RSA key does not match the fixture")
+				}
+			},
+		},
+		{
+			name:   "RSA PKCS#8 (PRIVATE KEY)",
+			keyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: rsaPKCS8DER})),
+			verify: func(t *testing.T, key crypto.Signer) {
+				rsaParsed, ok := key.(*rsa.PrivateKey)
+				if !ok {
+					t.Fatalf("expected *rsa.PrivateKey, got %T", key)
+				}
+				if got := pkixOf(t, rsaParsed.Public()); got != rsaPKIX {
+					t.Error("parsed RSA key does not match the fixture")
+				}
+			},
+		},
+		{
+			name:   "ECDSA SEC1 (EC PRIVATE KEY)",
+			keyPEM: ecCA.SEC1KeyPEM,
+			verify: func(t *testing.T, key crypto.Signer) {
+				ecParsed, ok := key.(*ecdsa.PrivateKey)
+				if !ok {
+					t.Fatalf("expected *ecdsa.PrivateKey, got %T", key)
+				}
+				if got := pkixOf(t, ecParsed.Public()); got != ecPKIX {
+					t.Error("parsed ECDSA key does not match the fixture")
+				}
+			},
+		},
+		{
+			name:   "ECDSA PKCS#8 (PRIVATE KEY)",
+			keyPEM: ecCA.PKCS8KeyPEM,
+			verify: func(t *testing.T, key crypto.Signer) {
+				ecParsed, ok := key.(*ecdsa.PrivateKey)
+				if !ok {
+					t.Fatalf("expected *ecdsa.PrivateKey, got %T", key)
+				}
+				if got := pkixOf(t, ecParsed.Public()); got != ecPKIX {
+					t.Error("parsed ECDSA key does not match the fixture")
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := StringToPrivateKey(tt.keyPEM)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			tt.verify(t, key)
+		})
+	}
+
+	t.Run("garbage input is rejected", func(t *testing.T) {
+		if _, err := StringToPrivateKey("not a valid PEM private key"); err == nil {
+			t.Error("expected an error for garbage input, got nil")
+		}
+	})
+	t.Run("a certificate PEM block is not a private key", func(t *testing.T) {
+		if _, err := StringToPrivateKey(ecCA.CertPEM); err == nil {
+			t.Error("expected an error for a CERTIFICATE block, got nil")
+		}
+	})
+	t.Run("unsupported PKCS#8 key types are rejected", func(t *testing.T) {
+		_, err := StringToPrivateKey(string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: ed25519DER})))
+		if err == nil {
+			t.Fatal("expected an error for an Ed25519 PKCS#8 key, got nil")
+		}
+		if !strings.Contains(err.Error(), "not RSA or ECDSA") {
+			t.Errorf("expected the error to name the supported key types, got: %v", err)
+		}
+	})
+}
+
+// TestSignCSRWithECDSACA covers the ECDSA cluster CA signing path: an
+// ECDSA CA key must be able to sign the REST API server CSR, producing a
+// certificate that verifies against the ECDSA CA and carries the CSR's
+// public key. The RSA CA path is asserted unchanged in the same test.
+func TestSignCSRWithECDSACA(t *testing.T) {
+	ecCA := generateECDSATestCA(t, "ecdsa-cluster-ca")
+	rsaCA, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate the RSA CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	serverKey, csr, err := cp.generateCSR("schema-registry", "kafka")
+	if err != nil {
+		t.Fatalf("failed to generate the CSR: %v", err)
+	}
+
+	t.Run("an ECDSA CA signs the CSR", func(t *testing.T) {
+		serverCert, err := signCSR(ecCA.Cert, ecCA.Key, csr)
+		if err != nil {
+			t.Fatalf("failed to sign the CSR with the ECDSA CA: %v", err)
+		}
+		if err := serverCert.CheckSignatureFrom(ecCA.Cert); err != nil {
+			t.Errorf("expected the server certificate to be signed by the ECDSA CA, but signature verification failed: %v", err)
+		}
+		roots := x509.NewCertPool()
+		roots.AddCert(ecCA.Cert)
+		if _, err := serverCert.Verify(x509.VerifyOptions{Roots: roots, DNSName: "schema-registry"}); err != nil {
+			t.Errorf("expected the certificate chain to validate against the ECDSA CA, got: %v", err)
+		}
+		if !publicKeyMatches(serverCert.PublicKey, serverKey.Public()) {
+			t.Error("expected the server certificate to carry the CSR's public key")
+		}
+	})
+
+	t.Run("the RSA CA path is unchanged", func(t *testing.T) {
+		serverCert, err := signCSR(rsaCA.CACert, rsaCA.CAKey, csr)
+		if err != nil {
+			t.Fatalf("failed to sign the CSR with the RSA CA: %v", err)
+		}
+		if err := serverCert.CheckSignatureFrom(rsaCA.CACert); err != nil {
+			t.Errorf("expected the server certificate to be signed by the RSA CA, but signature verification failed: %v", err)
+		}
+	})
+}
+
+// TestSelectCACertForKeyECDSA covers the CA-cert/key matching with an ECDSA
+// key: in a mixed RSA+ECDSA rotation bundle the ECDSA key must select the
+// ECDSA certificate, and a non-matching key is still rejected.
+func TestSelectCACertForKeyECDSA(t *testing.T) {
+	ecCA := generateECDSATestCA(t, "ecdsa-new-ca")
+	rsaCA, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate the RSA CA: %v", err)
+	}
+	otherEC := generateECDSATestCA(t, "other-ecdsa-ca")
+
+	certs, err := StringToCertificates(rsaCA.CACertPEM + ecCA.CertPEM)
+	if err != nil {
+		t.Fatalf("failed to parse the CA bundle: %v", err)
+	}
+
+	selected, err := selectCACertForKey(certs, ecCA.Key)
+	if err != nil {
+		t.Fatalf("failed to select the CA certificate for the ECDSA key: %v", err)
+	}
+	if selected.Subject.CommonName != "ecdsa-new-ca" {
+		t.Errorf("expected the ECDSA certificate to be selected, got %q", selected.Subject.CommonName)
+	}
+
+	if _, err := selectCACertForKey(certs, otherEC.Key); err == nil {
+		t.Error("expected an error when no bundle certificate matches the ECDSA key, got nil")
+	}
+}
+
+// TestGenerateTLSforHTTP_ECDSACA covers the full REST API TLS pipeline with
+// an ECDSA Strimzi cluster CA: the SEC1- and PKCS#8-encoded ECDSA CA keys
+// must both produce a keystore whose server certificate is signed by the
+// ECDSA CA, and a mixed RSA+ECDSA rotation bundle must be signed by the
+// ECDSA CA matching the provided key.
+func TestGenerateTLSforHTTP_ECDSACA(t *testing.T) {
+	ecCA := generateECDSATestCA(t, "ecdsa-cluster-ca")
+	rsaOld, err := testutil.GenerateClusterCACert("rotation-old-rsa-ca")
+	if err != nil {
+		t.Fatalf("failed to generate the old RSA CA: %v", err)
+	}
+
+	findLeaf := func(t *testing.T, keystore []byte, password string) *x509.Certificate {
+		t.Helper()
+		cp := NewCertProcessor(logr.Logger{})
+		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+		for _, cert := range certs {
+			if cert.Subject.CommonName == "confluent-schema-registry" {
+				return cert
+			}
+		}
+		t.Fatalf("server certificate not found in the keystore; entries: %s", certSubjects(certs))
+		return nil
+	}
+	verifyAgainst := func(t *testing.T, leaf *x509.Certificate, ca *x509.Certificate) {
+		t.Helper()
+		if err := leaf.CheckSignatureFrom(ca); err != nil {
+			t.Errorf("expected the server certificate to be signed by %q, but signature verification failed: %v", ca.Subject.CommonName, err)
+		}
+		roots := x509.NewCertPool()
+		roots.AddCert(ca)
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+			t.Errorf("expected the certificate chain to validate against %q, got: %v", ca.Subject.CommonName, err)
+		}
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+
+	t.Run("SEC1-encoded ECDSA CA key", func(t *testing.T) {
+		keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ecCA.CertPEM, ecCA.SEC1KeyPEM, "test1234", "confluent-schema-registry", "kafka")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keystore) == 0 {
+			t.Fatal("empty keystore")
+		}
+		verifyAgainst(t, findLeaf(t, keystore, password), ecCA.Cert)
+	})
+
+	t.Run("PKCS#8-encoded ECDSA CA key", func(t *testing.T) {
+		keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ecCA.CertPEM, ecCA.PKCS8KeyPEM, "test1234", "confluent-schema-registry", "kafka")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keystore) == 0 {
+			t.Fatal("empty keystore")
+		}
+		verifyAgainst(t, findLeaf(t, keystore, password), ecCA.Cert)
+	})
+
+	t.Run("mixed RSA+ECDSA rotation bundle is signed by the matching ECDSA CA", func(t *testing.T) {
+		bundle := rsaOld.CACertPEM + ecCA.CertPEM
+		keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), bundle, ecCA.SEC1KeyPEM, "test1234", "confluent-schema-registry", "kafka")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keystore) == 0 {
+			t.Fatal("empty keystore")
+		}
+		leaf := findLeaf(t, keystore, password)
+		verifyAgainst(t, leaf, ecCA.Cert)
+		if leaf.Issuer.CommonName != "ecdsa-cluster-ca" {
+			t.Errorf("expected the issuer to be the matching ECDSA CA, got %q", leaf.Issuer.CommonName)
+		}
+		if err := leaf.CheckSignatureFrom(rsaOld.CACert); err == nil {
+			t.Error("expected the server certificate NOT to be signed by the non-matching RSA CA, but it verifies against it")
+		}
+	})
 }

@@ -17,7 +17,16 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -590,6 +599,43 @@ func TestMapSecretToRequests(t *testing.T) {
 			t.Errorf("expected exactly 1 List call (the label path) for a CA secret, got %d", listCalls)
 		}
 	})
+
+	t.Run("labeled cluster CA key secret enqueues the CRs of the cluster", func(t *testing.T) {
+		// Strimzi creates and rotates the CA key and cert secrets
+		// independently; a <cluster>-cluster-ca event must converge the CRs
+		// of the cluster (CA-key convergence).
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name:      "kafka-cluster-cluster-ca",
+			Namespace: "default",
+			Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+		}}
+		expectRequests(t, reconciler.mapSecretToRequests(ctx, secret), "sr-name", "sr-labeled")
+	})
+
+	t.Run("cluster CA key secret skips the name-path List", func(t *testing.T) {
+		// Like the CA cert secret, the CA key secret can only match via the
+		// label path, so the namespace-wide spec.tlssecretname List must not
+		// run for it.
+		listCalls := 0
+		r := newCountingReconciler(t, &listCalls, srName, srLabeled)
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name:      "kafka-cluster-cluster-ca",
+			Namespace: "default",
+			Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+		}}
+		expectRequests(t, r.mapSecretToRequests(ctx, secret), "sr-name", "sr-labeled")
+		if listCalls != 1 {
+			t.Errorf("expected exactly 1 List call (the label path) for a CA key secret, got %d", listCalls)
+		}
+	})
+
+	t.Run("unlabeled cluster CA key secret enqueues nothing", func(t *testing.T) {
+		// Without the Strimzi label the CA key secret cannot match the label
+		// path, and the name path is skipped for CA secrets: no CR can
+		// reference a CA secret via spec.tlssecretname.
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: "default"}}
+		expectRequests(t, reconciler.mapSecretToRequests(ctx, secret))
+	})
 }
 
 // TestSecretWatchPredicate covers the Secret watch predicate paired with
@@ -745,6 +791,78 @@ func TestSecretEventPipelineBounded(t *testing.T) {
 	}
 }
 
+// TestCASecretEventPipelineBounded guards the CA-key convergence mapping end
+// to end: a <cluster>-cluster-ca secret event (Create/Update/Generic —
+// Strimzi owns that secret, so every event type flows) enqueues the CRs of
+// the cluster exactly once per event, while the operator's own output-secret
+// writes issued during the resulting reconciles stay suppressed by
+// secretWatchPredicate — the pipeline stays bounded (no reconcile storm) when
+// the CA key secret is created after the CA cert secret.
+func TestCASecretEventPipelineBounded(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+
+	sr := newTestInstance()
+	sr.Name = "sr-name"
+	sr.Labels = map[string]string{"strimzi.io/cluster": "kafka-cluster"}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sr).Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+	ctx := context.Background()
+
+	p := secretWatchPredicate()
+	caKeySecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      "kafka-cluster-cluster-ca",
+		Namespace: "default",
+		Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+	}}
+
+	// Every CA key secret event flows — Strimzi owns the secret, the
+	// operator never writes it — and each enqueues the CR exactly once.
+	enqueued := 0
+	if !p.Create(event.CreateEvent{Object: caKeySecret}) {
+		t.Fatal("expected the Create event of a Strimzi CA key secret to pass through")
+	}
+	enqueued += len(r.mapSecretToRequests(ctx, caKeySecret))
+	for i := 0; i < 10; i++ {
+		if !p.Update(event.UpdateEvent{ObjectOld: caKeySecret, ObjectNew: caKeySecret}) {
+			t.Fatal("expected the Update event of a Strimzi CA key secret to pass through")
+		}
+		enqueued += len(r.mapSecretToRequests(ctx, caKeySecret))
+	}
+	if !p.Generic(event.GenericEvent{Object: caKeySecret}) {
+		t.Fatal("expected the Generic event of a Strimzi CA key secret to pass through")
+	}
+	enqueued += len(r.mapSecretToRequests(ctx, caKeySecret))
+	if enqueued != 12 {
+		t.Fatalf("expected 12 enqueued requests (exactly 1 per CA key secret event), got %d", enqueued)
+	}
+
+	// The reconciles triggered by those events write the operator's own
+	// output secrets; their Create/Update events must stay suppressed so the
+	// pipeline converges instead of looping (1.7 loop prevention).
+	for _, name := range []string{"sr-name-jks", "sr-name-tls"} {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					Kind:       "StrimziSchemaRegistry",
+					Name:       "sr-name",
+					UID:        "test-uid",
+					Controller: ptr.To(true),
+				}},
+			},
+		}
+		if p.Create(event.CreateEvent{Object: secret}) {
+			t.Errorf("expected the Create event of the operator-owned %s to be suppressed", name)
+		}
+		if p.Update(event.UpdateEvent{ObjectOld: secret, ObjectNew: secret}) {
+			t.Errorf("expected the Update event of the operator-owned %s to be suppressed", name)
+		}
+	}
+}
+
 // realPEMSecretData generates a real certificate and key with the shared
 // testutil helpers so the PEM → JKS conversion under test actually runs the
 // openssl/keytool pipeline.
@@ -764,9 +882,238 @@ func realPEMSecretData(t *testing.T) map[string][]byte {
 	}
 }
 
+// realPEMSecretDataWithCA is realPEMSecretData plus the issuing CA under the
+// optional ca.crt key — the full shape cert-manager writes for a
+// kubernetes.io/tls secret. It also returns the generated CA so tests can
+// assert on the threaded chain.
+func realPEMSecretDataWithCA(t *testing.T) (map[string][]byte, *testutil.TestCA) {
+	t.Helper()
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+	return map[string][]byte{
+		"tls.crt": []byte(uc.UserCertPEM),
+		"tls.key": []byte(uc.UserKeyPEM),
+		"ca.crt":  []byte(ca.CACertPEM),
+	}, ca
+}
+
+// jksCertificates runs keytool -list -rfc on JKS keystore bytes and returns
+// the certificates the store holds — for the derived keystore that is the
+// private key entry's full certificate chain. The certProcessor test helper
+// cannot be reused because its keytool command builders are unexported.
+func jksCertificates(t *testing.T, keystore []byte, password string) []*x509.Certificate {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "derived.jks")
+	if err := os.WriteFile(path, keystore, 0o600); err != nil {
+		t.Fatalf("failed to write the derived keystore temp file: %v", err)
+	}
+	out, err := exec.Command("keytool", "-list", "-rfc", "-keystore", path, "-storepass", password, "-noprompt").Output()
+	if err != nil {
+		t.Fatalf("keytool -list failed on the derived keystore: %v", err)
+	}
+	var certs []*x509.Certificate
+	rest := out
+	for {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatalf("failed to parse a certificate from the keytool -list output: %v", err)
+		}
+		certs = append(certs, cert)
+	}
+	return certs
+}
+
+// TestBuildDerivedJKSSecretThreadCACert covers the ca.crt threading: the user
+// TLS secret's optional ca.crt must reach the JKS conversion so the derived
+// keystore carries the issuing chain; without ca.crt the derived keystore is
+// unchanged (leaf only); and an unparseable ca.crt fails with an actionable
+// error naming the offending key.
+func TestBuildDerivedJKSSecretThreadCACert(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = true
+		inst.Spec.TLSSecretName = "user-tls"
+		return inst
+	}
+	newUserSecret := func(data map[string][]byte) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+			Data:       data,
+		}
+	}
+
+	t.Run("with ca.crt the derived keystore carries the issuing chain", func(t *testing.T) {
+		inst := newInstance()
+		data, ca := realPEMSecretDataWithCA(t)
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		derived, err := reconciler.buildDerivedJKSSecret(context.Background(), inst, newUserSecret(data), logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		certs := jksCertificates(t, derived.Data["tls-keystore.jks"], string(derived.Data["keystore_password"]))
+		if len(certs) != 2 {
+			t.Fatalf("expected the derived keystore to hold the leaf and the CA chain, got %d certs", len(certs))
+		}
+		var leaf *x509.Certificate
+		foundCA := false
+		for _, cert := range certs {
+			if bytes.Equal(cert.Raw, ca.CACert.Raw) {
+				foundCA = true
+			} else {
+				leaf = cert
+			}
+		}
+		if !foundCA {
+			t.Fatal("expected the provided ca.crt certificate to be part of the derived keystore chain")
+		}
+		if leaf == nil {
+			t.Fatal("expected the leaf certificate in the derived keystore")
+		}
+		// The threaded chain must make the leaf validate against the CA the
+		// user provided.
+		roots := x509.NewCertPool()
+		roots.AddCert(ca.CACert)
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+			t.Errorf("expected the leaf certificate to validate against the threaded CA, got: %v", err)
+		}
+	})
+
+	t.Run("without ca.crt the derived keystore holds only the leaf", func(t *testing.T) {
+		inst := newInstance()
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		derived, err := reconciler.buildDerivedJKSSecret(context.Background(), inst, newUserSecret(realPEMSecretData(t)), logr.Logger{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		certs := jksCertificates(t, derived.Data["tls-keystore.jks"], string(derived.Data["keystore_password"]))
+		if len(certs) != 1 {
+			t.Fatalf("expected the derived keystore to hold only the leaf certificate, got %d certs", len(certs))
+		}
+	})
+
+	t.Run("invalid ca.crt fails with an actionable error", func(t *testing.T) {
+		inst := newInstance()
+		data := realPEMSecretData(t)
+		data["ca.crt"] = []byte("not a valid PEM certificate")
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, err := reconciler.buildDerivedJKSSecret(context.Background(), inst, newUserSecret(data), logr.Logger{})
+		if err == nil {
+			t.Fatal("expected an error for an unparseable ca.crt, got nil")
+		}
+		if !strings.Contains(err.Error(), "ca.crt") {
+			t.Errorf("expected the error to name the offending key ca.crt, got: %v", err)
+		}
+	})
+}
+
+// sec1ECPrivateKeyPEM generates an ECDSA P-256 key and encodes it in the
+// traditional SEC1 "EC PRIVATE KEY" PEM format openssl writes for EC keys —
+// one of the private key formats the PEM material validation must accept.
+func sec1ECPrivateKeyPEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate EC key: %v", err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("failed to marshal EC key: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+}
+
+// TestHasPEMTLSSecretKeys covers the TLS-secret detection used by the user
+// TLS secret validation: a secret carrying any of the standard
+// kubernetes.io/tls keys — including a partially populated one — and a
+// secret typed kubernetes.io/tls are recognized as PEM TLS secrets so they
+// get precise error paths, while unrelated secrets are not.
+func TestHasPEMTLSSecretKeys(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret *corev1.Secret
+		want   bool
+	}{
+		{name: "nil secret", secret: nil, want: false},
+		{
+			name:   "both tls.crt and tls.key",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k")}},
+			want:   true,
+		},
+		{
+			name:   "partial: tls.crt only",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("c")}},
+			want:   true,
+		},
+		{
+			name:   "partial: tls.key only",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls.key": []byte("k")}},
+			want:   true,
+		},
+		{
+			name:   "empty-valued tls keys still mark the shape",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls.crt": {}, "tls.key": {}}},
+			want:   true,
+		},
+		{
+			name:   "kubernetes.io/tls type without keys",
+			secret: &corev1.Secret{Type: corev1.SecretTypeTLS, Data: map[string][]byte{}},
+			want:   true,
+		},
+		{
+			name:   "kubernetes.io/tls type with unrelated keys only",
+			secret: &corev1.Secret{Type: corev1.SecretTypeTLS, Data: map[string][]byte{"unrelated": []byte("x")}},
+			want:   true,
+		},
+		{
+			name:   "opaque secret with keystore keys only",
+			secret: &corev1.Secret{Data: map[string][]byte{"tls-keystore.jks": []byte("jks"), "keystore_password": []byte("pw")}},
+			want:   false,
+		},
+		{
+			name:   "opaque empty secret",
+			secret: &corev1.Secret{Data: map[string][]byte{}},
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasPEMTLSSecretKeys(tt.secret); got != tt.want {
+				t.Errorf("hasPEMTLSSecretKeys() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestValidateUserTLSSecret covers the shape-dispatching validation wrapper:
 // standard kubernetes.io/tls (PEM) secrets, pre-built keystores following
-// spec.keystoretype, and the derived-secret name collision guard.
+// spec.keystoretype, and the derived-secret name collision guard. The PEM
+// cases use real certificate/key material because the validation now parses
+// the PEM content, and partial PEM secrets must surface the missing key
+// instead of falling back to the keystore contract.
 func TestValidateUserTLSSecret(t *testing.T) {
 	newInstance := func(tlsSecretName string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
 		inst := newTestInstance()
@@ -774,6 +1121,13 @@ func TestValidateUserTLSSecret(t *testing.T) {
 		inst.Spec.TLSSecretName = tlsSecretName
 		return inst
 	}
+
+	// Real PEM material: the validation parses tls.crt/tls.key, so the
+	// fixtures must be genuine certificate and key PEM.
+	realPEM := realPEMSecretData(t)
+	realCertPEM := realPEM["tls.crt"]
+	realKeyPEM := realPEM["tls.key"]
+	realPEMWithCA, _ := realPEMSecretDataWithCA(t)
 
 	tests := []struct {
 		name         string
@@ -792,32 +1146,64 @@ func TestValidateUserTLSSecret(t *testing.T) {
 		{
 			name:     "valid PEM secret (with optional ca.crt) passes",
 			instance: newInstance("user-tls"),
+			secret:   &corev1.Secret{Data: realPEMWithCA},
+		},
+		{
+			name:     "valid PEM secret with a SEC1 EC private key passes",
+			instance: newInstance("user-tls"),
 			secret: &corev1.Secret{Data: map[string][]byte{
-				"tls.crt": []byte("pem-cert"),
-				"tls.key": []byte("pem-key"),
-				"ca.crt":  []byte("ca-pem"),
+				"tls.crt": realCertPEM,
+				"tls.key": sec1ECPrivateKeyPEM(t),
 			}},
 		},
 		{
 			name:         "PEM secret with empty tls.key is invalid",
 			instance:     newInstance("user-tls"),
-			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": {}}},
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM, "tls.key": {}}},
 			wantInvalid:  true,
 			wantMentions: []string{"tls.key"},
 		},
 		{
 			name:         "PEM secret with empty tls.crt is invalid",
 			instance:     newInstance("user-tls"),
-			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": {}, "tls.key": []byte("pem-key")}},
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": {}, "tls.key": realKeyPEM}},
 			wantInvalid:  true,
 			wantMentions: []string{"tls.crt"},
 		},
 		{
-			name:         "secret with only tls.crt falls back to the keystore contract",
+			name:         "partial PEM secret with only tls.crt reports the missing tls.key",
 			instance:     newInstance("user-tls"),
-			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert")}},
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM}},
 			wantInvalid:  true,
-			wantMentions: []string{"tls-keystore.jks"},
+			wantMentions: []string{"tls.key"},
+		},
+		{
+			name:         "partial PEM secret with only tls.key reports the missing tls.crt",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.key": realKeyPEM}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.crt"},
+		},
+		{
+			name:         "kubernetes.io/tls-typed secret without keys is invalid",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Type: corev1.SecretTypeTLS, Data: map[string][]byte{}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.crt", "tls.key"},
+		},
+		{
+			name:         "PEM secret with unparseable tls.crt is invalid",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("not a valid PEM certificate"), "tls.key": realKeyPEM}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.crt"},
+		},
+		{
+			name:         "PEM secret with unparseable tls.key is invalid",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM, "tls.key": []byte("not a valid PEM private key")}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls.key"},
 		},
 		{
 			name: "tlssecretname equal to the CR name no longer collides (per-registry derived name)",
@@ -825,7 +1211,7 @@ func TestValidateUserTLSSecret(t *testing.T) {
 			// tlssecretname == CR name cannot collide with the
 			// operator-managed <name>-jks / <name>-tls secrets.
 			instance: newInstance("test-sr"),
-			secret:   &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": []byte("pem-key")}},
+			secret:   &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM, "tls.key": realKeyPEM}},
 		},
 		{
 			name: "derived secret name exceeding the 253-character limit is invalid",
@@ -834,7 +1220,7 @@ func TestValidateUserTLSSecret(t *testing.T) {
 				inst.Name = strings.Repeat("a", 241)
 				return inst
 			}(),
-			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": []byte("pem-cert"), "tls.key": []byte("pem-key")}},
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls.crt": realCertPEM, "tls.key": realKeyPEM}},
 			wantInvalid:  true,
 			wantMentions: []string{"253"},
 		},
