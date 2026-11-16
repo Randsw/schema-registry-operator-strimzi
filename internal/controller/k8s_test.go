@@ -1699,6 +1699,70 @@ func TestConfluentPropertyToEnvName(t *testing.T) {
 	}
 }
 
+// TestIsReservedConfigurationKey covers the reserved-key lookup that filters
+// spec.configuration: exact reserved keys, case-insensitive and dash-vs-dot
+// variants (every spelling converts to the same SCHEMA_REGISTRY_* env var, so
+// all of them must be caught), prefix matches including the reserved
+// ssl.truststore. prefix, and non-reserved keys that must stay settable.
+func TestIsReservedConfigurationKey(t *testing.T) {
+	tests := []struct {
+		key      string
+		reserved bool
+	}{
+		// Exact reserved keys.
+		{"kafkastore.bootstrap.servers", true},
+		{"kafkastore.security.protocol", true},
+		{"listeners", true},
+		{"host.name", true},
+		{"kafkastore.topic", true},
+		{"schema.registry.group.id", true},
+		{"master.eligibility", true},
+		{"schema.compatibility.level", true},
+		{"heap.opts", true},
+		{"schema.registry.inter.instance.protocol", true},
+		{"inter.instance.protocol", true},
+		{"ssl.client.authentication", true},
+		{"ssl.keystore.type", true},
+		{"ssl.key.password", true},
+		// Newly reserved keys.
+		{"ssl.client.auth", true},
+		{"kafkastore.topic.replication.factor", true},
+		// Case-insensitive matches.
+		{"SSL.KEYSTORE.TYPE", true},
+		{"SSL.CLIENT.AUTH", true},
+		{"KAFKASTORE.TOPIC.REPLICATION.FACTOR", true},
+		{"Listeners", true},
+		// Dash-vs-dot variants.
+		{"ssl-keystore-location", true},
+		{"SSL-CLIENT-AUTH", true},
+		{"kafkastore-topic-replication-factor", true},
+		{"schema-registry-inter-instance-protocol", true},
+		// Prefix matches, including the reserved ssl.truststore. prefix.
+		{"kafkastore.ssl.keystore.location", true},
+		{"kafkastore.sasl.jaas.config", true},
+		{"ssl.keystore.password", true},
+		{"ssl.truststore.location", true},
+		{"ssl.truststore.type", true},
+		{"SSL-TRUSTSTORE-PASSWORD", true},
+		// Non-reserved keys must stay settable.
+		{"access.control.allow.origin", false},
+		{"debug", false},
+		{"authentication.realm", false},
+		{"avro.compression.level", false},
+		// Boundary: the ssl.truststore. prefix requires the trailing dot, so
+		// the bare key (not a real Confluent property) is not reserved.
+		{"ssl.truststore", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			if got := isReservedConfigurationKey(tt.key); got != tt.reserved {
+				t.Errorf("isReservedConfigurationKey(%q) = %v, want %v", tt.key, got, tt.reserved)
+			}
+		})
+	}
+}
+
 func TestBuildPodEnvConfigurationReserved(t *testing.T) {
 	auth := kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}
 
@@ -1775,19 +1839,75 @@ func TestBuildPodEnvConfigurationReserved(t *testing.T) {
 		}
 	})
 
-	t.Run("non-reserved key colliding with managed env is skipped", func(t *testing.T) {
+	t.Run("reserved replication-factor key is ignored even when the managed env var is absent", func(t *testing.T) {
+		// The operator omits SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR
+		// when spec.kafkastoretopicreplicationfactor is unset, so before the
+		// key was reserved a user-supplied value leaked straight into the pod
+		// env and overrode Confluent's built-in default.
 		inst := newTestInstance()
-		rf := int32(1)
-		inst.Spec.KafkastoreTopicReplicationFactor = &rf
+		inst.Spec.KafkastoreTopicReplicationFactor = nil
 		inst.Spec.Configuration = map[string]string{
 			"kafkastore.topic.replication.factor": "3",
 		}
 
 		env, overridden := buildPodEnv(inst, "kafka:9092", "", auth)
 
-		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR", "1")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR")
 		if len(overridden) != 1 || overridden[0] != "kafkastore.topic.replication.factor" {
-			t.Errorf("expected overridden to contain the replication-factor collision, got %v", overridden)
+			t.Errorf("expected overridden to contain the reserved replication-factor key, got %v", overridden)
+		}
+	})
+
+	t.Run("newly reserved keys and dash/case variants are ignored", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.Configuration = map[string]string{
+			"ssl.client.auth":                     "REQUIRED",
+			"SSL-CLIENT-AUTH":                     "NONE",
+			"ssl.truststore.location":             "/tmp/evil.jks",
+			"ssl.truststore.type":                 "JKS",
+			"ssl-keystore-type":                   "PKCS12",
+			"kafkastore.topic.replication.factor": "5",
+		}
+
+		env, overridden := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		// No spelling of the reserved keys may reach the pod env; the
+		// operator-managed configuration wins.
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_TYPE")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR")
+
+		wantOverridden := []string{
+			"SSL-CLIENT-AUTH",
+			"kafkastore.topic.replication.factor",
+			"ssl-keystore-type",
+			"ssl.client.auth",
+			"ssl.truststore.location",
+			"ssl.truststore.type",
+		}
+		if len(overridden) != len(wantOverridden) {
+			t.Fatalf("expected %d overridden keys, got %d: %v", len(wantOverridden), len(overridden), overridden)
+		}
+		for i := range wantOverridden {
+			if overridden[i] != wantOverridden[i] {
+				t.Errorf("overridden[%d] = %q, want %q", i, overridden[i], wantOverridden[i])
+			}
+		}
+	})
+
+	t.Run("non-reserved key colliding with a managed env var is skipped", func(t *testing.T) {
+		// Defense-in-depth beyond the reserved list: a key that is not
+		// reserved but whose converted env name matches an operator-managed
+		// env var must not override the managed value.
+		podEnv := []corev1.EnvVar{{Name: "SCHEMA_REGISTRY_DEBUG", Value: "true"}}
+		env, overridden := appendConfigurationEnv(podEnv, map[string]string{"debug": "false"})
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_DEBUG", "true")
+		if len(overridden) != 1 || overridden[0] != "debug" {
+			t.Errorf("expected overridden to contain the colliding key, got %v", overridden)
 		}
 	})
 }

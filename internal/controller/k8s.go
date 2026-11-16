@@ -452,17 +452,22 @@ func restAPIKeystoreLocation(keystoreType string) string {
 // reservedConfigurationKeys are Confluent Schema Registry properties managed by
 // the operator and therefore not settable through spec.configuration.
 //
-// The deprecated spellings (schema.registry.inter.instance.protocol) stay
-// reserved until a release note announces their removal; the modern
-// equivalents (ssl.client.authentication, inter.instance.protocol) are
-// operator-managed from the start. ssl.keystore.type is operator-managed
-// because it follows spec.keystoretype.
+// The deprecated spellings (schema.registry.inter.instance.protocol,
+// ssl.client.auth) stay reserved until a release note announces their removal;
+// the modern equivalents (ssl.client.authentication, inter.instance.protocol)
+// are operator-managed from the start. ssl.keystore.type is operator-managed
+// because it follows spec.keystoretype, and
+// kafkastore.topic.replication.factor follows
+// spec.kafkastoretopicreplicationfactor — the operator omits that env var
+// entirely when the spec field is unset, so a user-supplied value must not
+// leak through and override Confluent's built-in default.
 var reservedConfigurationKeys = map[string]struct{}{
 	"kafkastore.bootstrap.servers":            {},
 	"kafkastore.security.protocol":            {},
 	"listeners":                               {},
 	"host.name":                               {},
 	"kafkastore.topic":                        {},
+	"kafkastore.topic.replication.factor":     {},
 	"schema.registry.group.id":                {},
 	"master.eligibility":                      {},
 	"schema.compatibility.level":              {},
@@ -470,25 +475,38 @@ var reservedConfigurationKeys = map[string]struct{}{
 	"schema.registry.inter.instance.protocol": {},
 	"inter.instance.protocol":                 {},
 	"ssl.client.authentication":               {},
+	"ssl.client.auth":                         {},
 	"ssl.keystore.type":                       {},
 	"ssl.key.password":                        {},
 }
 
-// reservedConfigurationPrefixes are property key prefixes managed by the operator.
+// reservedConfigurationPrefixes are property key prefixes managed by the
+// operator. ssl.truststore.* is reserved because the REST API TLS setup is
+// rendered by the operator (and ssl.truststore.type must follow the keystore
+// type when REST API mutual TLS is enabled), so user-supplied truststore
+// properties must not bypass the operator-managed env vars.
 var reservedConfigurationPrefixes = []string{
 	"kafkastore.ssl.",
 	"kafkastore.sasl.",
 	"ssl.keystore.",
+	"ssl.truststore.",
 }
 
 // isReservedConfigurationKey reports whether the given Confluent property key is
 // operator-managed and must be ignored when supplied through spec.configuration.
+//
+// The key is normalized before matching: Confluent property names are
+// case-insensitive and tolerate dashes in place of dots (both spellings
+// convert to the same SCHEMA_REGISTRY_* env var), so inputs like
+// SSL-CLIENT-AUTH or Ssl.ClientAuth must be caught exactly like the canonical
+// lowercase dot-separated form.
 func isReservedConfigurationKey(key string) bool {
-	if _, ok := reservedConfigurationKeys[key]; ok {
+	normalized := strings.ToLower(strings.ReplaceAll(key, "-", "."))
+	if _, ok := reservedConfigurationKeys[normalized]; ok {
 		return true
 	}
 	for _, prefix := range reservedConfigurationPrefixes {
-		if strings.HasPrefix(key, prefix) {
+		if strings.HasPrefix(normalized, prefix) {
 			return true
 		}
 	}
