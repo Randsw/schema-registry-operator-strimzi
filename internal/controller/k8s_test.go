@@ -2577,43 +2577,58 @@ func TestBuildDeploymentSpecMergesUserTemplateFields(t *testing.T) {
 
 // TestReadyCondition is a table-driven test for the Ready condition helper: a
 // Deployment with zero replicas (as observed immediately after creation) must
-// not be reported as Ready, partial readiness must report NotReady, and a
+// not be reported as Ready, partial readiness must report NotReady, a
 // scale-down in progress (surplus replicas still running) must not report
-// Ready prematurely (B14).
+// Ready prematurely (B14), a rollout still replacing pods (UpdatedReplicas
+// below the desired count) must not report Ready, and a generation the
+// Deployment controller has not observed yet must not report Ready.
 func TestReadyCondition(t *testing.T) {
 	tests := []struct {
 		name            string
 		desiredReplicas int32
 		replicas        int32
 		readyReplicas   int32
+		updatedReplicas int32
+		depGeneration   int64
+		observedGen     int64
 		wantStatus      metav1.ConditionStatus
 		wantReason      string
+		wantObservedGen int64
 	}{
-		{name: "0/0 replicas (fresh Deployment) is NotReady", desiredReplicas: 1, replicas: 0, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
-		{name: "1/2 replicas is NotReady", desiredReplicas: 2, replicas: 2, readyReplicas: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
-		{name: "2/2 replicas is Ready", desiredReplicas: 2, replicas: 2, readyReplicas: 2, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
-		{name: "1/1 replica is Ready", desiredReplicas: 1, replicas: 1, readyReplicas: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
-		{name: "0 ready of 1 replica is NotReady", desiredReplicas: 1, replicas: 1, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "0/0 replicas (fresh Deployment) is NotReady", desiredReplicas: 1, replicas: 0, readyReplicas: 0, updatedReplicas: 0, depGeneration: 1, observedGen: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		{name: "1/2 replicas is NotReady", desiredReplicas: 2, replicas: 2, readyReplicas: 1, updatedReplicas: 2, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		{name: "2/2 replicas is Ready", desiredReplicas: 2, replicas: 2, readyReplicas: 2, updatedReplicas: 2, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready", wantObservedGen: 7},
+		{name: "1/1 replica is Ready", desiredReplicas: 1, replicas: 1, readyReplicas: 1, updatedReplicas: 1, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready", wantObservedGen: 7},
+		{name: "0 ready of 1 replica is NotReady", desiredReplicas: 1, replicas: 1, readyReplicas: 0, updatedReplicas: 1, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
 		// B14: during a scale-down from 3 to 1 the old replicas are still
 		// running and ready; the deployment has not converged on the desired
 		// count and must not be reported as Ready.
-		{name: "scale-down in progress (3 running/ready, 1 desired) is NotReady", desiredReplicas: 1, replicas: 3, readyReplicas: 3, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "scale-down in progress (3 running/ready, 1 desired) is NotReady", desiredReplicas: 1, replicas: 3, readyReplicas: 3, updatedReplicas: 1, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		// A rollout still replacing pods: the updated count is below the
+		// desired count even though every current replica is ready.
+		{name: "rollout in progress (2 updated of 3 desired) is NotReady", desiredReplicas: 3, replicas: 3, readyReplicas: 3, updatedReplicas: 2, depGeneration: 2, observedGen: 2, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		// A spec change the Deployment controller has not observed yet: the
+		// status may still describe the previous generation.
+		{name: "generation not observed is NotReady", desiredReplicas: 1, replicas: 1, readyReplicas: 1, updatedReplicas: 1, depGeneration: 2, observedGen: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		// The observed generation catching up (>=) makes the converged state
+		// Ready again.
+		{name: "observed generation caught up is Ready", desiredReplicas: 1, replicas: 1, readyReplicas: 1, updatedReplicas: 1, depGeneration: 2, observedGen: 2, wantStatus: metav1.ConditionTrue, wantReason: "Ready", wantObservedGen: 7},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cond := readyCondition(tt.desiredReplicas, tt.replicas, tt.readyReplicas, 7)
+			cond := readyCondition(tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.updatedReplicas, 7, tt.depGeneration, tt.observedGen)
 			if cond.Type != "Ready" {
 				t.Errorf("expected condition type Ready, got %q", cond.Type)
 			}
 			if cond.Status != tt.wantStatus {
-				t.Errorf("desired=%d replicas=%d readyReplicas=%d: expected status %v, got %v", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.wantStatus, cond.Status)
+				t.Errorf("desired=%d replicas=%d readyReplicas=%d updated=%d: expected status %v, got %v", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.updatedReplicas, tt.wantStatus, cond.Status)
 			}
 			if cond.Reason != tt.wantReason {
-				t.Errorf("desired=%d replicas=%d readyReplicas=%d: expected reason %q, got %q", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.wantReason, cond.Reason)
+				t.Errorf("desired=%d replicas=%d readyReplicas=%d updated=%d: expected reason %q, got %q", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.updatedReplicas, tt.wantReason, cond.Reason)
 			}
-			if cond.ObservedGeneration != 7 {
-				t.Errorf("expected ObservedGeneration 7, got %d", cond.ObservedGeneration)
+			if cond.ObservedGeneration != tt.wantObservedGen {
+				t.Errorf("expected ObservedGeneration %d, got %d", tt.wantObservedGen, cond.ObservedGeneration)
 			}
 		})
 	}

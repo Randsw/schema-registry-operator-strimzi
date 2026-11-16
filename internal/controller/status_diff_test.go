@@ -230,8 +230,12 @@ func TestReconcileStatusUpdateCounting(t *testing.T) {
 		if err := f.r.Get(context.Background(), types.NamespacedName{Name: f.inst.Name + deploySuffix, Namespace: f.inst.Namespace}, dep); err != nil {
 			t.Fatalf("failed to get the Deployment: %v", err)
 		}
+		// The rollout has fully converged: every replica updated and ready,
+		// and the status reflects the current generation.
 		dep.Status.Replicas = 1
 		dep.Status.ReadyReplicas = 1
+		dep.Status.UpdatedReplicas = 1
+		dep.Status.ObservedGeneration = dep.Generation
 		if err := f.r.Status().Update(context.Background(), dep); err != nil {
 			t.Fatalf("failed to update the Deployment status: %v", err)
 		}

@@ -340,8 +340,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment); err != nil {
 					return err
 				}
+				// A fully converged rollout: every replica updated and ready,
+				// and the status reflects the current generation — the Ready
+				// condition requires all three.
 				deployment.Status.Replicas = 1
 				deployment.Status.ReadyReplicas = 1
+				deployment.Status.UpdatedReplicas = 1
+				deployment.Status.ObservedGeneration = deployment.Generation
 				return k8sClient.Status().Update(ctx, deployment)
 			}, time.Minute, time.Second).Should(Succeed())
 

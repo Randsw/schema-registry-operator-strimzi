@@ -494,7 +494,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if updatedDep.Spec.Replicas != nil {
 		desiredReplicas = *updatedDep.Spec.Replicas
 	}
-	condition := readyCondition(desiredReplicas, updatedDep.Status.Replicas, updatedDep.Status.ReadyReplicas, instance.Generation)
+	condition := readyCondition(desiredReplicas, updatedDep.Status.Replicas, updatedDep.Status.ReadyReplicas,
+		updatedDep.Status.UpdatedReplicas, instance.Generation, updatedDep.Generation, updatedDep.Status.ObservedGeneration)
 	meta.SetStatusCondition(&instance.Status.Conditions, condition)
 	if condition.Status == metav1.ConditionTrue {
 		instance.Status.Status = "Ok"
@@ -701,15 +702,26 @@ func (r *StrimziSchemaRegistryReconciler) setReconcileErrorStatus(
 
 // readyCondition builds the Ready status condition for the Schema Registry
 // Deployment. The Deployment is only Ready when it has converged on the
-// desired replica count: exactly the desired number of replicas exist and
-// all of them are ready. Immediately after creation Replicas and
-// ReadyReplicas are both 0, which must not be reported as Ready; and
-// comparing Status.Replicas with ReadyReplicas alone reported Ready
-// prematurely during scale-down windows, while surplus replicas from a
-// previous scale were still terminating (B14). desiredReplicas is the
-// Deployment's Spec.Replicas (1 when unset, the operator default).
-func readyCondition(desiredReplicas, replicas, readyReplicas int32, generation int64) metav1.Condition {
-	if desiredReplicas > 0 && replicas == desiredReplicas && readyReplicas == desiredReplicas {
+// desired replica count AND the API server has observed the current
+// generation: exactly the desired number of replicas exist, all of them are
+// ready, the updated count matches the desired count (a rollout still in
+// progress — new pods replacing old ones — reports NotReady), and
+// Status.ObservedGeneration has caught up with metadata.Generation (a spec
+// change the Deployment controller has not processed yet must never read as
+// Ready). Immediately after creation Replicas and ReadyReplicas are both 0,
+// which must not be reported as Ready; and comparing Status.Replicas with
+// ReadyReplicas alone reported Ready prematurely during scale-down windows,
+// while surplus replicas from a previous scale were still terminating (B14).
+// desiredReplicas is the Deployment's Spec.Replicas (1 when unset, the
+// operator default); generation is the CR generation recorded on the
+// condition.
+func readyCondition(desiredReplicas, replicas, readyReplicas, updatedReplicas int32,
+	generation, depGeneration, depObservedGeneration int64) metav1.Condition {
+	if desiredReplicas > 0 &&
+		replicas == desiredReplicas &&
+		readyReplicas == desiredReplicas &&
+		updatedReplicas == desiredReplicas &&
+		depObservedGeneration >= depGeneration {
 		return metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionTrue,
@@ -722,8 +734,8 @@ func readyCondition(desiredReplicas, replicas, readyReplicas int32, generation i
 		Type:   "Ready",
 		Status: metav1.ConditionFalse,
 		Reason: "NotReady",
-		Message: fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready (%d running, %d desired)",
-			readyReplicas, desiredReplicas, replicas, desiredReplicas),
+		Message: fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready (%d updated, %d running, %d desired; observed generation %d of %d)",
+			readyReplicas, desiredReplicas, updatedReplicas, replicas, desiredReplicas, depObservedGeneration, depGeneration),
 		ObservedGeneration: generation,
 	}
 }
