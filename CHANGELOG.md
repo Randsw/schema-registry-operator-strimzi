@@ -1,3 +1,14 @@
+## [1.19.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.19.0...1.19.1) (2026-11-17)
+
+### 🛠 Fixes
+
+* **chart:** derive resource names from fullname and qualify cluster-scoped RBAC ([a82b704](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a82b704e88d2a0c41d9945edefbc741426fb44f5))
+* **chart:** gate role bindings on the role's enabled flag ([1b63479](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1b63479e3b8aab8fa4b3b361c73135952ed033dd))
+* **chart:** raise default memory limits to cover keytool JVM overhead ([3223ea7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3223ea7d7aa1c5a5a59a1a0704e53ade8bcee5e7))
+* **ci:** close test-release path filters and gate deploy/release jobs explicitly ([9648bbe](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9648bbe8b5352423cc19747475007ccb27a8fd64))
+* **ci:** stop forcing the latest image tag on prerelease builds ([343a947](https://github.com/Randsw/schema-registry-operator-strimzi/commit/343a947996c41b46925f1363da2c343004d5f4bc))
+* **release:** always bump the chart version when the app version changes ([8a63a7b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8a63a7bf7c2778d49cddc7f0f4328967ffbe5684))
+
 ## [1.19.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.18.0...1.19.0) (2026-11-17)
 
 ### 📔 Docs
