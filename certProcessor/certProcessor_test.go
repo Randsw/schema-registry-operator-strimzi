@@ -139,17 +139,37 @@ func TestCreateKeystore(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
 	keystore, password, err := cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	if len(keystore) <= 0 {
-		t.Error("Empty Keystore")
-		return
+		t.Fatal("Empty Keystore")
 	}
 	if password != "test1234" {
 		t.Errorf("Password no equal. Want - %s, got - %s", "test1234", password)
-		return
 	}
-	t.Log("Keystore is created")
+	// The JKS must decode in Go with the returned password and hold the user
+	// certificate and its CA under the confluent-schema-registry alias.
+	entries := decodeJKS(t, keystore, password)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 keystore entry, got %d (%s)", len(entries), jksAliases(entries))
+	}
+	entry := findJKSEntry(entries, "confluent-schema-registry")
+	if entry == nil {
+		t.Fatalf("expected the confluent-schema-registry alias in the keystore, got %s", jksAliases(entries))
+	}
+	if !entry.isKey {
+		t.Error("expected a private key entry")
+	}
+	if len(entry.chain) != 2 {
+		t.Fatalf("expected the keystore chain to hold the leaf and the CA, got %d certs: %s", len(entry.chain), certSubjects(entry.chain))
+	}
+	if !bytes.Equal(entry.chain[0].Raw, uc.UserCert.Raw) {
+		t.Errorf("expected the leaf certificate in the keystore, got %s", certSubjects(entry.chain))
+	}
+	if !bytes.Equal(entry.chain[1].Raw, ca.CACert.Raw) {
+		t.Errorf("expected the CA certificate in the keystore chain, got %s", certSubjects(entry.chain))
+	}
+	assertJKSKeyMatches(t, entry, uc.UserKey.Public())
 }
 
 func TestCreateKeystorep12(t *testing.T) {
@@ -166,17 +186,37 @@ func TestCreateKeystorep12(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
 	keystore, password, err := cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, string(uc.PKCS12Data), "test1234")
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	if len(keystore) <= 0 {
-		t.Error("Empty Keystore. Bad")
-		return
+		t.Fatal("Empty Keystore. Bad")
 	}
 	if password != "test1234" {
 		t.Errorf("Password no equal. Want - %s, got - %s", "test1234", password)
-		return
 	}
-	t.Log("Keystore is created")
+	// The pre-built PKCS12 must produce the same JKS shape as the PEM path:
+	// one private key entry holding the user certificate and its CA.
+	entries := decodeJKS(t, keystore, password)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 keystore entry, got %d (%s)", len(entries), jksAliases(entries))
+	}
+	entry := findJKSEntry(entries, "confluent-schema-registry")
+	if entry == nil {
+		t.Fatalf("expected the confluent-schema-registry alias in the keystore, got %s", jksAliases(entries))
+	}
+	if !entry.isKey {
+		t.Error("expected a private key entry")
+	}
+	if len(entry.chain) != 2 {
+		t.Fatalf("expected the keystore chain to hold the leaf and the CA, got %d certs: %s", len(entry.chain), certSubjects(entry.chain))
+	}
+	if !bytes.Equal(entry.chain[0].Raw, uc.UserCert.Raw) {
+		t.Errorf("expected the leaf certificate in the keystore, got %s", certSubjects(entry.chain))
+	}
+	if !bytes.Equal(entry.chain[1].Raw, ca.CACert.Raw) {
+		t.Errorf("expected the CA certificate in the keystore chain, got %s", certSubjects(entry.chain))
+	}
+	assertJKSKeyMatches(t, entry, uc.UserKey.Public())
 }
 
 func TestCreateTLSKeystore(t *testing.T) {
@@ -377,6 +417,62 @@ func TestCreateKeystore_EmptyPassword(t *testing.T) {
 	}
 	if password == "" {
 		t.Error("password should be auto-generated when empty password is provided")
+	}
+}
+
+// TestCreateKeystore_KeyCertMismatch pins the validation the openssl
+// pkcs12 -export pipeline used to enforce: a private key that matches none
+// of the provided certificates must fail the call instead of producing a
+// keystore whose entry cannot be used.
+func TestCreateKeystore_KeyCertMismatch(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+	other, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate a second user cert: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	_, _, err = cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, other.UserKeyPEM, "", "test1234")
+	if err == nil {
+		t.Fatal("expected an error when the private key matches no provided certificate, got nil")
+	}
+	if !strings.Contains(err.Error(), "matches the provided private key") {
+		t.Errorf("expected the error to name the key/certificate mismatch, got: %v", err)
+	}
+}
+
+// TestCreateKeystore_UnrelatedCA pins the chain validation the openssl
+// -chain -CAfile pipeline used to enforce: a user CA certificate that does
+// not issue the user certificate must fail the call instead of producing a
+// keystore whose chain clients cannot validate.
+func TestCreateKeystore_UnrelatedCA(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	other, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate an unrelated CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	_, _, err = cp.CreateKeystore(context.Background(), other.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, "", "test1234")
+	if err == nil {
+		t.Fatal("expected an error when the CA certificate does not issue the user certificate, got nil")
+	}
+	if !strings.Contains(err.Error(), "ca.crt") {
+		t.Errorf("expected the error to name the offending input ca.crt, got: %v", err)
 	}
 }
 
@@ -835,6 +931,19 @@ func jksAliases(entries []jksEntry) string {
 		names = append(names, e.alias)
 	}
 	return strings.Join(names, ", ")
+}
+
+// assertJKSKeyMatches fails the test when the decrypted private key of the
+// entry does not carry the expected public key.
+func assertJKSKeyMatches(t *testing.T, entry *jksEntry, want crypto.PublicKey) {
+	t.Helper()
+	signer, ok := entry.key.(crypto.Signer)
+	if !ok {
+		t.Fatalf("the private key of the entry %q does not implement crypto.Signer: %T", entry.alias, entry.key)
+	}
+	if !publicKeyMatches(signer.Public(), want) {
+		t.Errorf("the keystore private key of the entry %q does not match the expected key", entry.alias)
+	}
 }
 
 // TestStringToCertificates covers the multi-PEM bundle parser used by
