@@ -531,3 +531,130 @@ func TestDependabotDockerEntriesHaveDockerfiles(t *testing.T) {
 		t.Error(".github/dependabot.yml has no docker ecosystem entry; the root Dockerfile must stay covered")
 	}
 }
+
+// workflowTriggers is the subset of the GitHub Actions workflow schema
+// needed to inspect the push/pull_request path filters. The top-level "on"
+// key is resolved to the boolean true by the YAML 1.1 parser underneath
+// sigs.k8s.io/yaml, so the decoded document carries it under the "true"
+// key (with an "on" fallback should the resolver change).
+type workflowTriggers struct {
+	Push struct {
+		Paths []string `json:"paths"`
+	} `json:"push"`
+	PullRequest struct {
+		Paths []string `json:"paths"`
+	} `json:"pull_request"`
+}
+
+func loadWorkflowTriggers(t *testing.T, name string) workflowTriggers {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", name))
+	if err != nil {
+		t.Fatalf("failed to read workflow %s: %v", name, err)
+	}
+	// The document is decoded key-by-key: the other top-level keys (name,
+	// jobs, ...) have unrelated shapes, so only the trigger document is
+	// unmarshaled into the struct.
+	var raw map[string]json.RawMessage
+	if err := sigsyaml.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to parse workflow %s: %v", name, err)
+	}
+	doc, ok := raw["true"]
+	if !ok {
+		doc, ok = raw["on"]
+	}
+	if !ok {
+		t.Fatalf("workflow %s has no push/pull_request triggers (on: key not found)", name)
+	}
+	var triggers workflowTriggers
+	if err := json.Unmarshal(doc, &triggers); err != nil {
+		t.Fatalf("failed to parse workflow %s triggers: %v", name, err)
+	}
+	return triggers
+}
+
+// TestTestReleasePathFiltersCoverConfigReleasercAndMakefile guards the
+// trigger contract: config/** carries the CRD/RBAC manifests asserted by
+// internal/chart/chart_test.go, .releaserc.yaml the release automation
+// asserted by internal/ci/ci_test.go, and the Makefile the build/test
+// entry points. A change touching only those files must trigger this
+// workflow on pushes and pull requests instead of bypassing CI entirely.
+func TestTestReleasePathFiltersCoverConfigReleasercAndMakefile(t *testing.T) {
+	triggers := loadWorkflowTriggers(t, "test-release.yaml")
+
+	for _, filter := range []struct {
+		event string
+		paths []string
+	}{
+		{"push", triggers.Push.Paths},
+		{"pull_request", triggers.PullRequest.Paths},
+	} {
+		if len(filter.paths) == 0 {
+			t.Fatalf("test-release.yaml %s trigger has no paths filter", filter.event)
+		}
+		for _, entry := range []string{"config/**", ".releaserc.yaml", "Makefile"} {
+			found := false
+			for _, p := range filter.paths {
+				if p == entry {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("test-release.yaml %s paths filter is missing %q; changes to that file alone would bypass CI", filter.event, entry)
+			}
+		}
+	}
+}
+
+// TestDeployAndSemanticReleaseJobsCarryExplicitGates guards the explicit
+// job gates: Deploy and Semantic-Release previously relied on the implicit
+// needs-skip cascade when a semantic-release commit ("chore(release):
+// x.y.z") was pushed, which is fragile — the gates must be spelled out in
+// the job if expressions (mirroring the Lint/e2e_gate style) so a release
+// commit push can never re-publish a branch image or re-run a release.
+func TestDeployAndSemanticReleaseJobsCarryExplicitGates(t *testing.T) {
+	wf := loadWorkflow(t, "test-release.yaml")
+
+	for _, name := range []string{"Deploy", "Semantic-Release"} {
+		job, ok := wf.Jobs[name]
+		if !ok {
+			t.Fatalf("%s job missing from test-release.yaml", name)
+		}
+		needsTest := false
+		for _, n := range job.Needs {
+			if n == "Test" {
+				needsTest = true
+			}
+		}
+		if !needsTest {
+			t.Errorf("%s job must need Test so needs.Test.result is a valid gate", name)
+		}
+		if !strings.Contains(job.If, "needs.Test.result == 'success'") {
+			t.Errorf("%s job if expression must require a successful Test (needs.Test.result == 'success')", name)
+		}
+		if !strings.Contains(job.If, "!startsWith(github.event.head_commit.message, 'chore(release):')") {
+			t.Errorf("%s job if expression must skip semantic-release commits (!startsWith(github.event.head_commit.message, 'chore(release):'))", name)
+		}
+	}
+}
+
+// TestE2EDiagnosticsReferenceCurrentOperatorDeploymentName guards the
+// diagnostics collection: the chart rename derives resource names from the
+// fullname template, so the e2e release "ssr-operator" deploys the operator
+// as "ssr-operator" and the pre-rename strimzi-schema-registry-operator
+// deployment no longer exists. A stale kubectl logs reference would
+// silently collect nothing (the step tolerates failure with || true).
+func TestE2EDiagnosticsReferenceCurrentOperatorDeploymentName(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "test-release.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read workflow test-release.yaml: %v", err)
+	}
+	content := string(data)
+	if strings.Contains(content, "deployment/strimzi-schema-registry-operator") {
+		t.Error("test-release.yaml still references deployment/strimzi-schema-registry-operator; the chart rename derives resource names from fullname (ssr-operator for the e2e release), so the diagnostics kubectl logs would silently collect nothing")
+	}
+	if !strings.Contains(content, "deployment/ssr-operator") {
+		t.Error("test-release.yaml diagnostics must log the operator deployment via its fullname-derived name (deployment/ssr-operator for the e2e release name)")
+	}
+}
