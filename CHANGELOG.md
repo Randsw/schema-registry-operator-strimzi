@@ -1,3 +1,28 @@
+## [1.19.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.18.0...1.19.0) (2026-11-17)
+
+### 📔 Docs
+
+* **readme:** document truststore and endpoint identification requirements ([33b7876](https://github.com/Randsw/schema-registry-operator-strimzi/commit/33b7876d3628a0a90d54334903c17eca7406e601))
+
+### 🚀 Features
+
+* **api:** enforce cross-field invariants via CRD validation rules ([92db20f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/92db20f0d691a43fc3f378dc9435e542c970475d))
+
+### 🛠 Fixes
+
+* **controller:** harden Service reconciliation validation, drift and annotations ([ad5ee42](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ad5ee42584a21d504ba22310fd21ac9794e725ef))
+* **controller:** patch only drifted deployment spec fields instead of wholesale replace ([8b8bb12](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8b8bb120920ff70a4265d8f637829f5bdccc7578))
+* **controller:** reconcile deployment spec changes before rotation rollouts ([0b8efa9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0b8efa916132767a93841d11644b90cd51aa9a4d))
+* **controller:** report Ready only when the rollout converged and the generation is observed ([054b93b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/054b93b31991971091be64c6baf889f2c9814e18))
+* **controller:** reserve ssl.truststore.*, ssl.client.auth and replication-factor config keys ([8b2cbe2](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8b2cbe202a4d34441c64449981d5b1d44a9b8455))
+* **controller:** roll mTLS keystore rotation from the jksVersion pod-template annotation ([4a64b8a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/4a64b8a01156296145cf466947343e49376f58e0))
+* **controller:** roll SASL and client-auth truststore rotations from pod-template annotations ([f0f4de4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/f0f4de4a96e4ce72b2d573784d0f0b4e5aa759c4))
+* **controller:** roll TLS renewal and secret recreation from the tlsVersion annotation ([218ee45](https://github.com/Randsw/schema-registry-operator-strimzi/commit/218ee4583845280751d919253f82b3577ccd86c3))
+* **controller:** stop hashing Service metadata and NetworkPolicy enablement ([6fdee3f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6fdee3f7d483095dfa2214e80f8b5d67a4d6db2a))
+* **controller:** sync deployment labels and preserve rollout markers on spec patches ([71e765f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/71e765f62d51df688a6dd6b81f905d1010943483))
+* **controller:** use TCP probes with configured authentication and widen the startup budget ([3c3712a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3c3712a02d4194a92019bc814d6c414be8024ad5))
+* **e2e:** expect admission rejection of clientauth without securehttp ([ead32a2](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ead32a2e82c9f9190369c7c15ac17054658dc78d))
+
 ## [1.18.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.17.9...1.18.0) (2026-11-16)
 
 ### 🚀 Features
