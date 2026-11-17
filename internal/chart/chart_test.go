@@ -1120,3 +1120,59 @@ func TestRenderedBindingsGateOnRoleEnabled(t *testing.T) {
 		})
 	}
 }
+
+// TestValuesMemoryDefaultsCoverKeytoolOverhead guards the memory contract:
+// the operator spawns keytool (a JVM from default-jre-headless) and openssl
+// as child processes during reconciliation, and the old 128Mi limit left no
+// headroom for JVM startup next to the Go runtime — the operator pod gets
+// OOMKilled (exit 137) mid-reconciliation. The defaults must stay at a
+// 512Mi limit / 256Mi request (the plan's 256Mi–512Mi range) until the
+// keytool subprocesses are replaced with pure-Go keystore generation, and
+// the Deployment must render them into the operator container.
+func TestValuesMemoryDefaultsCoverKeytoolOverhead(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+	var values struct {
+		Image struct {
+			Resources struct {
+				Limits   map[string]string `json:"limits"`
+				Requests map[string]string `json:"requests"`
+			} `json:"resources"`
+		} `json:"image"`
+	}
+	if err := sigsyaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+	if got := values.Image.Resources.Limits["memory"]; got != "512Mi" {
+		t.Errorf("values.yaml image.resources.limits.memory = %q, want 512Mi: the operator spawns keytool (a JVM) and openssl subprocesses, and a smaller limit OOMKills the pod mid-reconciliation", got)
+	}
+	if got := values.Image.Resources.Requests["memory"]; got != "256Mi" {
+		t.Errorf("values.yaml image.resources.requests.memory = %q, want 256Mi", got)
+	}
+
+	// The defaults must survive rendering into the operator container.
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	docs := renderedDocs(t, renderChart(t))
+	dep := findRendered(t, docs, "Deployment", "")
+	spec, _ := dep["spec"].(map[string]any)
+	template, _ := spec["template"].(map[string]any)
+	podSpec, _ := template["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	if len(containers) == 0 {
+		t.Fatal("rendered Deployment has no containers")
+	}
+	container, _ := containers[0].(map[string]any)
+	resources, _ := container["resources"].(map[string]any)
+	limits, _ := resources["limits"].(map[string]any)
+	requests, _ := resources["requests"].(map[string]any)
+	if got, _ := limits["memory"].(string); got != "512Mi" {
+		t.Errorf("rendered Deployment container resources.limits.memory = %v, want 512Mi (the values.yaml default)", limits["memory"])
+	}
+	if got, _ := requests["memory"].(string); got != "256Mi" {
+		t.Errorf("rendered Deployment container resources.requests.memory = %v, want 256Mi (the values.yaml default)", requests["memory"])
+	}
+}
