@@ -26,6 +26,13 @@ import (
 // keystore/truststore generation automatically.
 
 // StrimziSchemaRegistrySpec defines the desired state of StrimziSchemaRegistry
+//
+// Cross-field invariants are enforced at admission time by the CEL validation
+// rules below, so invalid combinations are rejected by the API server when
+// the resource is applied. The controller re-checks the same invariants as
+// defense-in-depth (e.g. for CRDs served without these rules).
+// +kubebuilder:validation:XValidation:rule="!has(self.clientauth) || !self.clientauth || self.securehttp",message="spec.clientauth requires spec.securehttp: client authentication (mTLS) is only supported over HTTPS",fieldPath=".clientauth"
+// +kubebuilder:validation:XValidation:rule="!(has(self.replicas) && self.replicas > 1 && self.securehttp) || (has(self.tlssecretname) && size(self.tlssecretname) > 0)",message="spec.replicas > 1 with spec.securehttp requires spec.tlssecretname: inter-instance HTTPS forwarding needs a user-provided TLS secret covering the replica addresses",fieldPath=".replicas"
 type StrimziSchemaRegistrySpec struct {
 	// Listener name for Kafka cluster (defaults to "tls")
 	// +kubebuilder:default="tls"
@@ -166,6 +173,10 @@ type StrimziSchemaRegistrySpec struct {
 }
 
 // Service configures the Kubernetes Service created for Schema Registry.
+//
+// A node port can only be pinned on Service types that expose one; the
+// Kubernetes API server rejects nodePort on a ClusterIP Service.
+// +kubebuilder:validation:XValidation:rule="!has(self.nodeport) || self.type != 'ClusterIP'",message="spec.service.nodeport requires spec.service.type to be NodePort or LoadBalancer: a ClusterIP Service has no node port",fieldPath=".nodeport"
 type Service struct {
 	// Type is the Kubernetes Service type. Defaults to ClusterIP.
 	// +optional

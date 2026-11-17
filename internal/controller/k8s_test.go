@@ -3055,6 +3055,73 @@ func TestReconcileSkipsNodePortWithClusterIP(t *testing.T) {
 	}
 }
 
+// TestReconcileSkipsMultiReplicaHTTPSWithoutUserTLSSecret covers the
+// controller-side validation: multiple replicas with securehttp and no
+// user-provided TLS secret cannot work (the operator-generated certificate
+// covers DNS names only, so inter-instance HTTPS forwarding fails TLS
+// verification). Reconciliation is skipped with InvalidSpec before any
+// Deployment is created. The CRD CEL validation rules reject the combination
+// at admission time (see crdvalidation_test.go); this fake-client test keeps
+// the controller-side defense-in-depth covered, mirroring
+// TestReconcileSkipsNodePortWithClusterIP.
+func TestReconcileSkipsMultiReplicaHTTPSWithoutUserTLSSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.UID = "cr-uid"
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	inst.Spec.Replicas = ptr.To(int32(2))
+
+	recorder := eventsfake.NewFakeRecorder(16)
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace)).
+		WithStatusSubresource(inst).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme, Recorder: recorder}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for an invalid spec, got %v", result.RequeueAfter)
+	}
+
+	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
+		t.Fatalf("failed to get the CR: %v", err)
+	}
+	if updated.Status.Status != "InvalidSpec" {
+		t.Errorf("expected status.status InvalidSpec, got %q", updated.Status.Status)
+	}
+	var ready *metav1.Condition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == "Ready" {
+			ready = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	if ready == nil || ready.Reason != "ReplicasRequireUserTLSSecret" {
+		t.Errorf("expected a Ready condition with reason ReplicasRequireUserTLSSecret, got %+v", ready)
+	}
+
+	// Reconciliation is skipped: no Deployment may exist.
+	dep := &apps.Deployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err == nil {
+		t.Error("expected no Deployment to be created for an invalid spec")
+	}
+}
+
 func TestBuildNetworkPolicyCrossNamespaceIngress(t *testing.T) {
 	inst := newTestInstance()
 	inst.Spec.SecureHTTP = false
