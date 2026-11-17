@@ -1006,3 +1006,117 @@ func TestRenderedServiceAccountNameFallsBackToFullname(t *testing.T) {
 		}
 	}
 }
+
+// bindingReferencesRole reports whether a rendered RoleBinding or
+// ClusterRoleBinding references a role whose name contains nameSuffix.
+func bindingReferencesRole(t *testing.T, docs []map[string]any, nameSuffix string) bool {
+	t.Helper()
+	for _, doc := range docs {
+		kind, _ := doc["kind"].(string)
+		if kind != "RoleBinding" && kind != "ClusterRoleBinding" {
+			continue
+		}
+		roleRef, _ := doc["roleRef"].(map[string]any)
+		refName, _ := roleRef["name"].(string)
+		if strings.Contains(refName, nameSuffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// valuesOverrideFile writes a copy of the chart's default values with the
+// given mutation applied and returns its path. --set cannot flip a single
+// entry of the cluster_roles/roles lists: Helm replaces the whole list,
+// dropping the other entries (and with them the very binding flag under
+// test), so the mutation must go through a values file.
+func valuesOverrideFile(t *testing.T, mutate func(values map[string]any)) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+	var values map[string]any
+	if err := sigsyaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+	mutate(values)
+	out, err := sigsyaml.Marshal(values)
+	if err != nil {
+		t.Fatalf("failed to re-marshal values: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "values-override.yaml")
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("failed to write values override: %v", err)
+	}
+	return path
+}
+
+// disableListEntry flips enabled=false on the first entry of the named
+// values list (cluster_roles or roles) while keeping every other field —
+// in particular the entry's binding flag — and every other entry intact.
+func disableListEntry(t *testing.T, values map[string]any, key string) {
+	t.Helper()
+	entries, ok := values[key].([]any)
+	if !ok || len(entries) == 0 {
+		t.Fatalf("values.yaml %s is not a non-empty list", key)
+	}
+	entry, ok := entries[0].(map[string]any)
+	if !ok {
+		t.Fatalf("values.yaml %s[0] is not a mapping", key)
+	}
+	entry["enabled"] = false
+}
+
+// TestRenderedBindingsGateOnRoleEnabled guards the binding-gating contract:
+// a RoleBinding/ClusterRoleBinding must render only when BOTH the role's
+// enabled flag and the binding flag are true. A binding rendered while its
+// role is disabled references a role that was never created and is rejected
+// by the API server, breaking the whole install.
+func TestRenderedBindingsGateOnRoleEnabled(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	for _, tc := range []struct {
+		name string
+		sets []string
+	}{
+		{name: "default cluster-scoped mode", sets: nil},
+		{name: "rbac.namespaceScoped=true", sets: []string{"--set", "rbac.namespaceScoped=true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Control: with the default values every enabled role with a
+			// binding flag renders its binding, and roles with binding=false
+			// (metrics-reader) render none.
+			docs := renderedDocs(t, renderChartAs(t, "ssr-operator", "", tc.sets...))
+			if !bindingReferencesRole(t, docs, "manager-role") {
+				t.Errorf("enabled manager role with cluster_role_binding=true renders no binding:\n%s", renderedSummary(docs))
+			}
+			if !bindingReferencesRole(t, docs, "leader-election-role") {
+				t.Errorf("enabled leader-election role with role_binding=true renders no binding:\n%s", renderedSummary(docs))
+			}
+			if bindingReferencesRole(t, docs, "metrics-reader") {
+				t.Errorf("metrics-reader with cluster_role_binding=false renders a binding:\n%s", renderedSummary(docs))
+			}
+
+			// A cluster_roles entry disabled while its binding flag stays
+			// true: neither the role nor a binding referencing it may render.
+			override := valuesOverrideFile(t, func(values map[string]any) {
+				disableListEntry(t, values, "cluster_roles")
+			})
+			docs = renderedDocs(t, renderChartAs(t, "ssr-operator", "", append(slices.Clone(tc.sets), "-f", override)...))
+			if bindingReferencesRole(t, docs, "manager-role") {
+				t.Errorf("disabled manager role still has a binding referencing it:\n%s", renderedSummary(docs))
+			}
+
+			// A roles entry disabled while its binding flag stays true.
+			override = valuesOverrideFile(t, func(values map[string]any) {
+				disableListEntry(t, values, "roles")
+			})
+			docs = renderedDocs(t, renderChartAs(t, "ssr-operator", "", append(slices.Clone(tc.sets), "-f", override)...))
+			if bindingReferencesRole(t, docs, "leader-election-role") {
+				t.Errorf("disabled leader-election role still has a binding referencing it:\n%s", renderedSummary(docs))
+			}
+		})
+	}
+}
