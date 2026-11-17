@@ -283,13 +283,29 @@ func waitForDeploymentRollout(ctx context.Context, timeout time.Duration) {
 // Kafka connection works with the scenario's security protocol.
 func verifyRoundTrip(ca *clusterCA, clientCert *tls.Certificate) {
 	withRegistryClient(ca, clientCert, func(client *registryClient) {
-		By("listing subjects")
-		_, err := client.listSubjects()
-		Expect(err).NotTo(HaveOccurred())
+		// Warm-up: Schema Registry's internal Kafka leader election can lag
+		// pod readiness, so the very first REST calls may time out or return
+		// 5xx (error code 50003, "forwarding register schema request to the
+		// leader"). Retry the initial read and the first write before the
+		// strict round-trip assertions; re-registering the same schema is
+		// idempotent (identical schemas get the same ID).
+		By("listing subjects (warm-up retry)")
+		Eventually(func() error {
+			_, err := client.listSubjects()
+			return err
+		}, 60*time.Second, 2*time.Second).Should(Succeed(),
+			"the first REST call kept failing after the warm-up window")
 
-		By("registering an Avro schema")
-		schemaID, err := client.registerSchema(testSubject, testSchema)
-		Expect(err).NotTo(HaveOccurred())
+		By("registering an Avro schema (warm-up retry)")
+		var schemaID int
+		Eventually(func() error {
+			id, err := client.registerSchema(testSubject, testSchema)
+			if err == nil {
+				schemaID = id
+			}
+			return err
+		}, 60*time.Second, 2*time.Second).Should(Succeed(),
+			"the first schema registration kept failing after the warm-up window")
 		Expect(schemaID).To(BeNumerically(">", 0))
 
 		By("fetching the schema back by ID")
