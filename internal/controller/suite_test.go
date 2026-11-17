@@ -108,14 +108,12 @@ var _ = BeforeSuite(func() {
 
 	kafkaCRD, err := DownloadCRD(ctx, kafkaCRDUrl)
 	if err != nil {
-		logf.Log.Error(err, "Failed to download KafkaCRD")
-		return
+		Fail(fmt.Sprintf("Failed to download Kafka CRD: %v", err))
 	}
 
 	kafkaUserCRD, err := DownloadCRD(ctx, kafkaUserCRDUrl)
 	if err != nil {
-		logf.Log.Error(err, "Failed to download KafkaUserCRD")
-		return
+		Fail(fmt.Sprintf("Failed to download KafkaUser CRD: %v", err))
 	}
 
 	CRDs := []*apiextensionsv1.CustomResourceDefinition{}
