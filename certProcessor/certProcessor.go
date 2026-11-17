@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/pavlo-v-chernykh/keystore-go/v4"
 )
 
 // execCommandTimeout is the defensive deadline applied to keytool/openssl
@@ -47,6 +48,19 @@ func withExecDeadline(ctx context.Context) (context.Context, context.CancelFunc)
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, execCommandTimeout)
+}
+
+// ensureContextAlive returns the caller's context error — wrapped so
+// errors.Is still matches context.Canceled / context.DeadlineExceeded — when
+// ctx is already cancelled or past its deadline, and nil otherwise. The
+// pure-Go certificate building paths check it around their expensive work so
+// caller cancellation is honoured the same way the bounded keytool/openssl
+// child processes used to be (B5).
+func ensureContextAlive(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: certificate processing aborted before it completed", err)
+	}
+	return nil
 }
 
 // runCertCommand executes an already-built command created with
@@ -206,6 +220,23 @@ func truststoreAlias(index, total int) string {
 	return fmt.Sprintf("CARoot-%d", index)
 }
 
+// jksCertificate converts an x509.Certificate into the keystore-go
+// Certificate representation stored in JKS entries: the X.509 type tag and
+// the DER content.
+func jksCertificate(cert *x509.Certificate) keystore.Certificate {
+	return keystore.Certificate{Type: "X509", Content: cert.Raw}
+}
+
+// encodeJKS serializes store into the JKS binary format, integrity-protected
+// with password — the same password a consumer later opens the store with.
+func encodeJKS(store keystore.KeyStore, password string) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := store.Store(&buf, []byte(password)); err != nil {
+		return nil, fmt.Errorf("failed to encode the JKS store: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 // Create a JKS-formatted truststore using the cluster's CA certificate.
 // Parameters
 //     ----------
@@ -224,30 +255,22 @@ func truststoreAlias(index, total int) string {
 //
 // Notes
 // -----
-// Internally this function calls out to the “keytool“ command-line tool.
+// The truststore is encoded entirely in Go with the keystore-go library — no
+// keytool/openssl subprocesses and no temporary files are involved, and the
+// aliases are stored lowercased exactly as keytool itself writes them.
 //
 // The cluster CA secret may hold a multi-PEM bundle (Strimzi appends the new
 // CA to the old one during a zero-downtime CA rotation). Every CERTIFICATE
-// block is imported under its own alias — "CARoot" for a single-cert bundle,
+// block becomes its own trusted entry — "CARoot" for a single-cert bundle,
 // "CARoot-0", "CARoot-1", ... for a multi-cert bundle — because a single
-// keytool -importcert call silently keeps only the first certificate of a
+// keytool -importcert call silently kept only the first certificate of a
 // multi-PEM file. An empty or unparseable ca.crt is rejected with an
-// actionable error before any subprocess runs.
+// actionable error before anything is encoded.
 //
-// Security: all intermediate files are written into a per-call temporary
-// directory with 0700 permissions that is removed when the function returns.
-// Per-call directories also guarantee that concurrent reconciles (e.g. two
-// StrimziSchemaRegistry CRs in the same operator pod) never share or overwrite
-// each other's files. The keystore password is passed to keytool through the
-// process environment (see passwordEnvVar), never as a command-line argument.
-//
-// ctx bounds the keytool child process: it is killed when ctx is cancelled or
-// when it exceeds ctx's deadline, or the package default execCommandTimeout
-// when ctx carries none (B5).
+// ctx is honoured with an explicit cancellation check before the store is
+// encoded: a cancelled or expired context aborts the call with the wrapped
+// context error (B5).
 func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, password string) ([]byte, string, error) {
-	ctx, cancel := withExecDeadline(ctx)
-	defer cancel()
-
 	if password == "" {
 		var err error
 		password, err = GeneratePassword(24, true, false)
@@ -257,7 +280,7 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 		}
 	}
 
-	// An empty ca.crt would otherwise surface as a cryptic keytool failure;
+	// An empty ca.crt would otherwise surface as a cryptic tool failure;
 	// reject it up front with an actionable error naming the offending input.
 	if strings.TrimSpace(cert) == "" {
 		err := errors.New("cluster CA certificate (ca.crt) is empty; the <cluster>-cluster-ca-cert secret must contain a CA certificate to build the truststore")
@@ -265,13 +288,10 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 		return nil, "", err
 	}
 
-	// keytool -importcert reads only the FIRST certificate of a multi-PEM
-	// file, so during a Strimzi zero-downtime CA rotation — when ca.crt holds
-	// the old and the new cluster CA — a single import would drop every CA
-	// after the first and clients would stop trusting servers signed by the
-	// other CA. Parse every CERTIFICATE block (this also rejects unparseable
-	// input before any subprocess runs) and import each one under its own
-	// alias (see truststoreAlias).
+	// During a Strimzi zero-downtime CA rotation ca.crt holds the old and the
+	// new cluster CA. Parse every CERTIFICATE block (this also rejects
+	// unparseable input before anything is encoded) and store each one under
+	// its own alias (see truststoreAlias).
 	certs, err := StringToCertificates(cert)
 	if err != nil {
 		err = fmt.Errorf("invalid cluster CA certificate (ca.crt): %w", err)
@@ -279,44 +299,29 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 		return nil, "", err
 	}
 
-	tempDir, err := os.MkdirTemp("", "ssr-truststore-*")
-	if err != nil {
-		cp.log.Error(err, "Failed to create temp dir")
+	// Honour caller cancellation before the JKS encoding runs (B5).
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while building the truststore")
 		return nil, "", err
 	}
-	defer cp.removeTempDir(tempDir)
 
-	outputPath := filepath.Join(tempDir, "client.truststore.jks")
-
-	// Import every CA certificate into the truststore. Each certificate is
-	// written to its own temp file because keytool -importcert accepts a
-	// single certificate per invocation; the store password still travels
-	// through the process environment (passwordEnvVar) for every call.
+	store := keystore.New()
+	now := time.Now()
 	for i, caCert := range certs {
-		caCertPath, err := writeTempFileIn(tempDir, fmt.Sprintf("ca-%d.crt", i),
-			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})))
-		if err != nil {
-			cp.log.Error(err, "Failed to write temp file", "File", fmt.Sprintf("ca-%d.crt", i))
-			return nil, "", err
-		}
-
-		// Generate truststore
-		cmd := keytoolImportCertCmd(ctx, outputPath, truststoreAlias(i, len(certs)), caCertPath, password)
-		if _, err := runCertCommand(ctx, cp, cmd); err != nil {
+		if err := store.SetTrustedCertificateEntry(truststoreAlias(i, len(certs)), keystore.TrustedCertificateEntry{
+			CreationTime: now,
+			Certificate:  jksCertificate(caCert),
+		}); err != nil {
+			err = fmt.Errorf("failed to add CA certificate #%d to the truststore: %w", i, err)
+			cp.log.Error(err, "Failed to build the JKS truststore")
 			return nil, "", err
 		}
 	}
 
-	// Check if truststore exists
-	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", outputPath)
-		return nil, "", err
-	}
-
-	// Read truststore from file to save in kubernetes secret
-	b, err := os.ReadFile(outputPath)
+	// Encode the truststore to save in kubernetes secret
+	b, err := encodeJKS(store, password)
 	if err != nil {
-		cp.log.Error(err, "File read fail", "File", outputPath)
+		cp.log.Error(err, "Failed to encode the JKS truststore")
 		return nil, "", err
 	}
 

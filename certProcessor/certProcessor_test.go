@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/go-logr/logr"
+	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 )
 
@@ -94,17 +95,34 @@ func TestCreate_truststore(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
 	truststore, password, err := cp.CreateTruststore(context.Background(), clusterCA.CACertPEM, "test1234")
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	if len(truststore) <= 0 {
-		t.Error("Empty Truststore")
-		return
+		t.Fatal("Empty Truststore")
 	}
 	if password != "test1234" {
 		t.Errorf("Password no equal. Want - %s, got - %s", "test1234", password)
-		return
 	}
-	t.Log("Truststore is created")
+	// The JKS must decode in Go with the returned password and hold the
+	// cluster CA under the historical CARoot alias.
+	entries := decodeJKS(t, truststore, password)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 truststore entry, got %d (%s)", len(entries), jksAliases(entries))
+	}
+	entry := findJKSEntry(entries, "CARoot")
+	if entry == nil {
+		t.Fatalf("expected the CARoot alias in the truststore, got %s", jksAliases(entries))
+	}
+	if entry.isKey {
+		t.Error("expected a trusted certificate entry, not a private key entry")
+	}
+	if len(entry.chain) != 1 || !bytes.Equal(entry.chain[0].Raw, clusterCA.CACert.Raw) {
+		t.Errorf("expected the truststore to hold the cluster CA certificate, got %s", certSubjects(entry.chain))
+	}
+	// A wrong password must fail the JKS integrity check.
+	if _, err := loadJKS(t, truststore, "wrong-password"); err == nil {
+		t.Error("expected the truststore to fail to open with a wrong password, got nil")
+	}
 }
 
 func TestCreateKeystore(t *testing.T) {
@@ -718,6 +736,107 @@ func certSubjects(certs []*x509.Certificate) string {
 	return strings.Join(names, ", ")
 }
 
+// jksEntry is one decoded JKS entry: its alias, whether it is a private key
+// entry, the decrypted private key (nil for trusted certificate entries), and
+// the certificates it holds — the trusted certificate, or the private key
+// certificate chain in chain order.
+type jksEntry struct {
+	alias string
+	isKey bool
+	key   crypto.PrivateKey
+	chain []*x509.Certificate
+}
+
+// loadJKS decodes JKS bytes with password using the keystore-go library — the
+// same library the certProcessor encodes with. A wrong password fails the JKS
+// integrity check and is returned as an error.
+func loadJKS(t *testing.T, data []byte, password string) (*keystore.KeyStore, error) {
+	t.Helper()
+	store := keystore.New()
+	if err := store.Load(bytes.NewReader(data), []byte(password)); err != nil {
+		return nil, err
+	}
+	return &store, nil
+}
+
+// decodeJKS decodes JKS bytes with password and returns every entry of the
+// store with its parsed certificate chain, failing the test when the store
+// cannot be opened with the given password.
+func decodeJKS(t *testing.T, data []byte, password string) []jksEntry {
+	t.Helper()
+	store, err := loadJKS(t, data, password)
+	if err != nil {
+		t.Fatalf("failed to decode the JKS with the provided password: %v", err)
+	}
+	var entries []jksEntry
+	for _, alias := range store.Aliases() {
+		switch {
+		case store.IsPrivateKeyEntry(alias):
+			pke, err := store.GetPrivateKeyEntry(alias, []byte(password))
+			if err != nil {
+				t.Fatalf("failed to decrypt the private key entry %q: %v", alias, err)
+			}
+			key, err := x509.ParsePKCS8PrivateKey(pke.PrivateKey)
+			if err != nil {
+				t.Fatalf("failed to parse the private key of the entry %q: %v", alias, err)
+			}
+			entries = append(entries, jksEntry{
+				alias: alias,
+				isKey: true,
+				key:   key,
+				chain: parseJKSCertificates(t, pke.CertificateChain),
+			})
+		case store.IsTrustedCertificateEntry(alias):
+			tce, err := store.GetTrustedCertificateEntry(alias)
+			if err != nil {
+				t.Fatalf("failed to read the trusted certificate entry %q: %v", alias, err)
+			}
+			entries = append(entries, jksEntry{
+				alias: alias,
+				chain: parseJKSCertificates(t, []keystore.Certificate{tce.Certificate}),
+			})
+		default:
+			t.Fatalf("entry %q has an unexpected type", alias)
+		}
+	}
+	return entries
+}
+
+// parseJKSCertificates parses the DER content of keystore-go Certificates.
+func parseJKSCertificates(t *testing.T, certs []keystore.Certificate) []*x509.Certificate {
+	t.Helper()
+	parsed := make([]*x509.Certificate, 0, len(certs))
+	for i, c := range certs {
+		cert, err := x509.ParseCertificate(c.Content)
+		if err != nil {
+			t.Fatalf("failed to parse certificate #%d of a JKS entry: %v", i, err)
+		}
+		parsed = append(parsed, cert)
+	}
+	return parsed
+}
+
+// findJKSEntry returns the entry with the given alias. JKS aliases are
+// case-insensitive and keytool displays them lowercased, so the lookup is
+// case-insensitive too.
+func findJKSEntry(entries []jksEntry, alias string) *jksEntry {
+	for i := range entries {
+		if strings.EqualFold(entries[i].alias, alias) {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// jksAliases renders the aliases of entries for test failure messages.
+func jksAliases(entries []jksEntry) string {
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.alias)
+	}
+	return strings.Join(names, ", ")
+}
+
 // TestStringToCertificates covers the multi-PEM bundle parser used by
 // CreateTruststore and GenerateTLSforHTTP: it must decode every CERTIFICATE
 // block (Strimzi CA rotation bundles hold the old and the new CA), skip other
@@ -827,32 +946,35 @@ func TestCreateTruststore_MultiCertBundle(t *testing.T) {
 		t.Fatal("empty truststore")
 	}
 
-	aliases, certs := listStoreEntries(t, cp, writeStoreFile(t, truststore), password)
+	entries := decodeJKS(t, truststore, password)
+	if len(entries) != 3 {
+		t.Errorf("expected 3 truststore entries, got %d (%s)", len(entries), jksAliases(entries))
+	}
 
-	// keytool displays JKS aliases lowercased; compare case-insensitively.
-	gotAliases := make(map[string]struct{}, len(aliases))
-	for _, alias := range aliases {
-		gotAliases[strings.ToLower(alias)] = struct{}{}
-	}
-	if len(aliases) != 3 {
-		t.Errorf("expected 3 truststore entries, got %d (%v)", len(aliases), aliases)
-	}
-	for _, alias := range []string{"caroot-0", "caroot-1", "caroot-2"} {
-		if _, ok := gotAliases[alias]; !ok {
-			t.Errorf("expected alias %q in the truststore, got %v", alias, aliases)
+	// Every certificate of the bundle must be present in the truststore,
+	// under its own CARoot-<index> alias (JKS aliases are case-insensitive;
+	// they are stored lowercased exactly as keytool writes them).
+	var gotCerts []*x509.Certificate
+	for _, alias := range []string{"CARoot-0", "CARoot-1", "CARoot-2"} {
+		entry := findJKSEntry(entries, alias)
+		if entry == nil {
+			t.Errorf("expected alias %q in the truststore, got %s", alias, jksAliases(entries))
+			continue
 		}
+		if entry.isKey {
+			t.Errorf("alias %q must be a trusted certificate entry, not a private key entry", alias)
+		}
+		gotCerts = append(gotCerts, entry.chain...)
 	}
-
-	// Every certificate of the bundle must be present in the truststore.
 	wantCerts := certRawSet([]*x509.Certificate{caOld.CACert, caNew.CACert, caSpare.CACert})
-	gotCerts := certRawSet(certs)
+	gotSet := certRawSet(gotCerts)
 	for raw := range wantCerts {
-		if _, ok := gotCerts[raw]; !ok {
-			t.Errorf("a bundle CA certificate is missing from the truststore; got %s", certSubjects(certs))
+		if _, ok := gotSet[raw]; !ok {
+			t.Errorf("a bundle CA certificate is missing from the truststore; got %s", certSubjects(gotCerts))
 		}
 	}
-	if len(gotCerts) != len(wantCerts) {
-		t.Errorf("truststore contains unexpected certificates: got %d, want %d", len(gotCerts), len(wantCerts))
+	if len(gotSet) != len(wantCerts) {
+		t.Errorf("truststore contains unexpected certificates: got %d, want %d", len(gotSet), len(wantCerts))
 	}
 }
 
@@ -871,15 +993,18 @@ func TestCreateTruststore_SingleCertAliasPreserved(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	aliases, certs := listStoreEntries(t, cp, writeStoreFile(t, truststore), password)
-	if len(aliases) != 1 {
-		t.Fatalf("expected exactly 1 truststore entry, got %d (%v)", len(aliases), aliases)
+	entries := decodeJKS(t, truststore, password)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 truststore entry, got %d (%s)", len(entries), jksAliases(entries))
 	}
-	if !strings.EqualFold(aliases[0], "CARoot") {
-		t.Errorf("expected the single-cert bundle to keep the CARoot alias, got %q", aliases[0])
+	if !strings.EqualFold(entries[0].alias, "CARoot") {
+		t.Errorf("expected the single-cert bundle to keep the CARoot alias, got %q", entries[0].alias)
 	}
-	if len(certs) != 1 || !bytes.Equal(certs[0].Raw, ca.CACert.Raw) {
-		t.Errorf("expected the truststore to hold the CA certificate, got %s", certSubjects(certs))
+	if entries[0].isKey {
+		t.Error("expected a trusted certificate entry, not a private key entry")
+	}
+	if len(entries[0].chain) != 1 || !bytes.Equal(entries[0].chain[0].Raw, ca.CACert.Raw) {
+		t.Errorf("expected the truststore to hold the CA certificate, got %s", certSubjects(entries[0].chain))
 	}
 }
 
