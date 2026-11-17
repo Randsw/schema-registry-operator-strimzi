@@ -169,8 +169,8 @@ func loadReleaserc(t *testing.T) releaserc {
 // automation must set appVersion to the released operator version on every
 // release. Without it the chart ships an operator binary mismatched with the
 // chart and its CRD (appVersion drifted to 1.17.0 while 1.17.1+ were out).
-// The conditional chart version bump and the release commit assets must stay
-// in place so the appVersion change is actually published.
+// The chart version bump and the release commit assets must stay in place so
+// the appVersion change is actually published.
 func TestReleasercSyncsChartAppVersion(t *testing.T) {
 	rc := loadReleaserc(t)
 
@@ -203,10 +203,12 @@ func TestReleasercSyncsChartAppVersion(t *testing.T) {
 		t.Error(".releaserc.yaml exec prepare step must set appVersion to ${nextRelease.version} (semantic-release substitution), not a hardcoded version")
 	}
 
-	// The conditional chart version bump must stay: the helm-chart workflow
-	// publishes a new chart package only when Chart.yaml changes.
+	// The chart version bump must stay: every stable release that moves
+	// appVersion must move the chart version too, or the helm-chart workflow
+	// (which publishes a new chart package only when Chart.yaml version
+	// changes) never publishes the updated default image tag.
 	if !strings.Contains(exec.Cmd, "pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch") {
-		t.Error(".releaserc.yaml exec prepare step must keep the conditional chart version bump (pybump bump --level patch)")
+		t.Error(".releaserc.yaml exec prepare step must keep the chart version bump (pybump bump --level patch)")
 	}
 
 	// The appVersion change must be committed with the release.
@@ -218,6 +220,69 @@ func TestReleasercSyncsChartAppVersion(t *testing.T) {
 	}
 	if !chartAsset {
 		t.Error("@semantic-release/git assets must include helm-chart/ssr-operator/Chart.yaml so the appVersion sync is committed with the release")
+	}
+}
+
+// releasercExecCmd returns the code of the @semantic-release/exec prepare
+// step's cmd (full-line script comments stripped), failing the test if the
+// step is missing.
+func releasercExecCmd(t *testing.T) string {
+	t.Helper()
+	rc := loadReleaserc(t)
+	for i := range rc.Prepare {
+		if rc.Prepare[i].Path != "@semantic-release/exec" {
+			continue
+		}
+		var code []string
+		for _, line := range strings.Split(rc.Prepare[i].Cmd, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			code = append(code, line)
+		}
+		return strings.Join(code, "\n")
+	}
+	t.Fatal(".releaserc.yaml prepare has no @semantic-release/exec step")
+	return ""
+}
+
+// TestReleasercBumpsChartVersionOnEveryStableRelease guards the chart
+// publication contract: the helm-chart workflow publishes a new chart
+// package only when Chart.yaml version changes, so a stable (main) release
+// that moves appVersion must always bump the chart version too — otherwise
+// chart-releaser (skip_existing) skips the publication and Helm users stay
+// on the old chart and its old default operator image. The bump must not be
+// gated on tag resolution: develop prerelease tags become ancestors of main
+// through merges, and the former git describe --tags / git diff gate let a
+// merged prerelease tag shadow the last stable tag and suppress the bump on
+// appVersion-only releases.
+func TestReleasercBumpsChartVersionOnEveryStableRelease(t *testing.T) {
+	cmd := releasercExecCmd(t)
+
+	if !strings.Contains(cmd, "pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch") {
+		t.Error(".releaserc.yaml exec prepare step must bump the chart version (pybump bump --level patch) so every appVersion change publishes a new chart package")
+	}
+	if strings.Contains(cmd, "git describe") {
+		t.Error(".releaserc.yaml exec prepare step must not resolve the version-bump decision via git describe; develop prerelease tags merged into main shadow the last stable tag and suppressed the bump on appVersion-only releases")
+	}
+	if strings.Contains(cmd, "git diff --name-only") {
+		t.Error(".releaserc.yaml exec prepare step must not gate the chart version bump on a git diff; an appVersion-only release must still bump the chart version so the new default image tag is published")
+	}
+}
+
+// TestReleasercSkipsChartVersionBumpOnPrereleases guards the prerelease
+// guard: develop prerelease versions (e.g. 1.19.1-develop.1) never publish a
+// chart (the helm-chart workflow releases from main only), so the
+// version-bump logic must branch on the release version's prerelease suffix
+// and exclude prereleases from the stable-release bump path.
+func TestReleasercSkipsChartVersionBumpOnPrereleases(t *testing.T) {
+	cmd := releasercExecCmd(t)
+
+	if !strings.Contains(cmd, "case \"${nextRelease.version}\" in") {
+		t.Error(".releaserc.yaml exec prepare step must branch the version bump on the release version (case \"${nextRelease.version}\" in) so prereleases are excluded from the stable-release bump path")
+	}
+	if !strings.Contains(cmd, "*-*)") {
+		t.Error(".releaserc.yaml exec prepare step must detect prerelease versions by their dash suffix (*-*) so develop prereleases never take the stable-release bump path")
 	}
 }
 
