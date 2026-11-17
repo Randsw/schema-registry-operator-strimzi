@@ -29,24 +29,24 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o bin/manager cmd/main.go
 
-# Use ubuntu image to install keytool binary
-# Openssl image already present in Ubuntu
-# A distroless image cannot be used here: certProcessor shells out to keytool (from the JRE)
-# and openssl at runtime to build the PKCS12/JKS keystores.
-FROM ubuntu:26.04
+# Runtime stage: distroless/static.
+# The manager is a static, CGO-free binary (CGO_ENABLED=0), and certProcessor
+# encodes the JKS/PKCS12 keystores and truststores in pure Go — it no longer
+# shells out to keytool (from the JRE) or openssl at runtime, which is what
+# makes a minimal distroless image possible: no package manager, no JVM, and
+# no TLS tooling are needed in the final image.
+# The runtime stage must match the target architecture (no --platform pin):
+# the builder cross-compiles, this stage supplies the actual target rootfs.
+FROM gcr.io/distroless/static-debian12:nonroot
 
 LABEL org.opencontainers.image.title="Strimzi Schema Registry Operator" \
       org.opencontainers.image.description="Kubernetes operator that manages Confluent Schema Registry for Strimzi Kafka, including its TLS keystores." \
       org.opencontainers.image.source="https://github.com/Randsw/schema-registry-operator-strimzi"
 
-# keytool is shipped by the headless JRE; the GUI libraries pulled in by default-jre are
-# not needed, so use the smaller default-jre-headless package instead.
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends default-jre-headless openssl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /
-COPY --from=builder /workspace/bin/manager .
+COPY --from=builder /workspace/bin/manager /manager
+
+# The nonroot tag already runs as uid/gid 65532; kept explicit so the
+# non-root contract does not depend on the base image tag alone.
 USER 65532:65532
 ENTRYPOINT ["/manager"]
