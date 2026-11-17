@@ -1,3 +1,31 @@
+## [1.20.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.19.1...1.20.0) (2026-11-17)
+
+### :scissors: Refactor
+
+* **certprocessor:** drop the keytool/openssl exec infrastructure ([02d1de1](https://github.com/Randsw/schema-registry-operator-strimzi/commit/02d1de18844bdc9b7992dc528d5fecf376d2e669))
+
+### 📔 Docs
+
+* update keystore documentation for the pure-Go pipeline ([585a114](https://github.com/Randsw/schema-registry-operator-strimzi/commit/585a114cdc74ec3d07a11e5a093cc89be0352935))
+
+### 🦊 CI/CD
+
+* **docker:** migrate the operator image to distroless ([5db4c47](https://github.com/Randsw/schema-registry-operator-strimzi/commit/5db4c4774886a0fa21a9027c43a67e20160a4cb0))
+
+### 🧪 Tests
+
+* **certprocessor:** inspect controller JKS fixtures in Go ([9f17057](https://github.com/Randsw/schema-registry-operator-strimzi/commit/9f17057423d1f6cc854c30ae467cb6ea0cef89fd))
+* **certprocessor:** pin the pure-Go keystore password semantics ([b428a2c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b428a2cfcaabe5305422be6349c67e434fe574ca))
+* **certprocessor:** replace subprocess pipeline tests with pure-Go JKS verification ([7e57af0](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7e57af0c49cc30b1d37a3456c69d48e478914b78))
+
+### 🚀 Features
+
+* **certprocessor:** convert user TLS PEM secrets to JKS in Go ([9672795](https://github.com/Randsw/schema-registry-operator-strimzi/commit/96727958b200bbd7e86e96061117b2ecd2adbf47))
+* **certprocessor:** encode JKS keystores in Go ([087df1b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/087df1bc5adc4f4fc5d3e640c056eb356ecbdc2c))
+* **certprocessor:** encode JKS truststores in Go ([647960e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/647960e5908c2437e225816e8c6fd271a3e15ba0))
+* **certprocessor:** encode the REST API TLS keystore in Go ([2aa10e6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2aa10e60613604fa52287cc1bb899a1bbf8a7e8b))
+* **certprocessor:** parse keystore expiry in Go ([6b892c6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/6b892c6b4f20712da4e531636d80bc3e8cf3fca1))
+
 ## [1.19.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.19.0...1.19.1) (2026-11-17)
 
 ### 🛠 Fixes
