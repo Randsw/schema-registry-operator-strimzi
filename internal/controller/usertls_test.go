@@ -24,14 +24,12 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	apps "k8s.io/api/apps/v1"
@@ -865,7 +863,7 @@ func TestCASecretEventPipelineBounded(t *testing.T) {
 
 // realPEMSecretData generates a real certificate and key with the shared
 // testutil helpers so the PEM → JKS conversion under test actually runs the
-// openssl/keytool pipeline.
+// pure-Go conversion pipeline.
 func realPEMSecretData(t *testing.T) map[string][]byte {
 	t.Helper()
 	ca, err := testutil.GenerateTestCA()
@@ -903,36 +901,40 @@ func realPEMSecretDataWithCA(t *testing.T) (map[string][]byte, *testutil.TestCA)
 	}, ca
 }
 
-// jksCertificates runs keytool -list -rfc on JKS keystore bytes and returns
-// the certificates the store holds — for the derived keystore that is the
-// private key entry's full certificate chain. The certProcessor test helper
-// cannot be reused because its keytool command builders are unexported.
-func jksCertificates(t *testing.T, keystore []byte, password string) []*x509.Certificate {
+// jksCertificates decodes JKS keystore bytes in Go with the keystore-go
+// library and returns the certificates the store holds — for the derived
+// keystore that is the private key entry's full certificate chain.
+func jksCertificates(t *testing.T, keystoreBytes []byte, password string) []*x509.Certificate {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "derived.jks")
-	if err := os.WriteFile(path, keystore, 0o600); err != nil {
-		t.Fatalf("failed to write the derived keystore temp file: %v", err)
-	}
-	out, err := exec.Command("keytool", "-list", "-rfc", "-keystore", path, "-storepass", password, "-noprompt").Output()
-	if err != nil {
-		t.Fatalf("keytool -list failed on the derived keystore: %v", err)
+	store := keystore.New(keystore.WithOrderedAliases())
+	if err := store.Load(bytes.NewReader(keystoreBytes), []byte(password)); err != nil {
+		t.Fatalf("failed to decode the derived keystore: %v", err)
 	}
 	var certs []*x509.Certificate
-	rest := out
-	for {
-		block, next := pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		rest = next
-		if block.Type != "CERTIFICATE" {
+	for _, alias := range store.Aliases() {
+		var chain []keystore.Certificate
+		if store.IsPrivateKeyEntry(alias) {
+			entryChain, err := store.GetPrivateKeyEntryCertificateChain(alias)
+			if err != nil {
+				t.Fatalf("failed to read the certificate chain of the keystore entry %q: %v", alias, err)
+			}
+			chain = entryChain
+		} else if store.IsTrustedCertificateEntry(alias) {
+			entry, err := store.GetTrustedCertificateEntry(alias)
+			if err != nil {
+				t.Fatalf("failed to read the keystore entry %q: %v", alias, err)
+			}
+			chain = []keystore.Certificate{entry.Certificate}
+		} else {
 			continue
 		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			t.Fatalf("failed to parse a certificate from the keytool -list output: %v", err)
+		for _, c := range chain {
+			cert, err := x509.ParseCertificate(c.Content)
+			if err != nil {
+				t.Fatalf("failed to parse a certificate from the derived keystore: %v", err)
+			}
+			certs = append(certs, cert)
 		}
-		certs = append(certs, cert)
 	}
 	return certs
 }
@@ -1031,8 +1033,8 @@ func TestBuildDerivedJKSSecretThreadCACert(t *testing.T) {
 }
 
 // sec1ECPrivateKeyPEM generates an ECDSA P-256 key and encodes it in the
-// traditional SEC1 "EC PRIVATE KEY" PEM format openssl writes for EC keys —
-// one of the private key formats the PEM material validation must accept.
+// traditional SEC1 "EC PRIVATE KEY" PEM format used for EC keys — one of the
+// private key formats the PEM material validation must accept.
 func sec1ECPrivateKeyPEM(t *testing.T) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
