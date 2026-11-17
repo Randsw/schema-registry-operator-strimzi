@@ -118,15 +118,6 @@ func GeneratePassword(length int, includeNumber bool, includeSpecial bool) (stri
 	return string(password), nil
 }
 
-// removeTempDir removes a per-call temp directory, logging a warning on
-// failure. It is intended for deferred cleanup where the error cannot be
-// returned.
-func (cp *CertProcessor) removeTempDir(dir string) {
-	if err := os.RemoveAll(dir); err != nil {
-		cp.log.V(1).Info("Failed to remove temp dir", "dir", dir, "error", err.Error())
-	}
-}
-
 // writeTempFileIn writes content to a file with the given name inside dir.
 // The file is created with 0600 permissions so certificate/key material is
 // not readable by other users. The caller is responsible for removing dir
@@ -746,47 +737,72 @@ func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, ke
 }
 
 // KeystoreCertExpiry returns the NotAfter timestamp of the first certificate
-// entry in the given JKS keystore. It shells out to keytool to export the
-// certificate chain in PEM form and parses it. This works for keystore
-// secrets produced by any operator version, so no extra data key is needed
-// in the secret.
+// in the given JKS keystore. The keystore is decoded in Go with the same
+// keystore-go library that encodes it — no keytool subprocess and no
+// temporary file is involved. This works for keystore secrets produced by any
+// operator version, so no extra data key is needed in the secret.
 //
-// ctx bounds the keytool child process (see CreateTruststore for the
-// deadline semantics, B5).
-func (cp *CertProcessor) KeystoreCertExpiry(ctx context.Context, keystore []byte, password string) (time.Time, error) {
-	ctx, cancel := withExecDeadline(ctx)
-	defer cancel()
+// The certificates are collected entry by entry in alphabetical alias order:
+// a private key entry contributes its certificate chain in chain order (the
+// end-entity certificate first), a trusted certificate entry its single
+// certificate. The keystores the operator produces hold a single private key
+// entry whose chain starts with the REST API server certificate, so the
+// returned NotAfter is the server certificate's expiry — the same first PEM
+// block the keytool -list -rfc pipeline used to parse.
+//
+// ctx is honoured with an explicit cancellation check before the keystore is
+// decoded (B5).
+func (cp *CertProcessor) KeystoreCertExpiry(ctx context.Context, keystoreBytes []byte, password string) (time.Time, error) {
+	// Honour caller cancellation before the JKS decoding runs (B5).
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while reading the keystore certificate expiry")
+		return time.Time{}, err
+	}
 
-	if len(keystore) == 0 {
+	if len(keystoreBytes) == 0 {
 		return time.Time{}, fmt.Errorf("keystore is empty")
 	}
-	tempDir, err := os.MkdirTemp("", "ssr-expiry-*")
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to create temp dir: %w", err)
-	}
-	defer cp.removeTempDir(tempDir)
 
-	ksPath := filepath.Join(tempDir, "keystore.jks")
-	if err := os.WriteFile(ksPath, keystore, 0o600); err != nil {
-		return time.Time{}, fmt.Errorf("failed to write keystore temp file: %w", err)
+	store := keystore.New(keystore.WithOrderedAliases())
+	if err := store.Load(bytes.NewReader(keystoreBytes), []byte(password)); err != nil {
+		err = fmt.Errorf("failed to decode the JKS keystore: %w", err)
+		cp.log.Error(err, "Failed to decode the JKS keystore")
+		return time.Time{}, err
 	}
 
-	cmd := keytoolListCmd(ctx, ksPath, password)
-	out, err := runCertCommand(ctx, cp, cmd)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("keytool failed to list keystore entries: %w", err)
+	for _, alias := range store.Aliases() {
+		var certs []keystore.Certificate
+		if store.IsPrivateKeyEntry(alias) {
+			chain, err := store.GetPrivateKeyEntryCertificateChain(alias)
+			if err != nil {
+				err = fmt.Errorf("failed to read the certificate chain of the keystore entry %q: %w", alias, err)
+				cp.log.Error(err, "Failed to read the keystore certificate chain")
+				return time.Time{}, err
+			}
+			certs = chain
+		} else if store.IsTrustedCertificateEntry(alias) {
+			entry, err := store.GetTrustedCertificateEntry(alias)
+			if err != nil {
+				err = fmt.Errorf("failed to read the keystore entry %q: %w", alias, err)
+				cp.log.Error(err, "Failed to read the keystore entry")
+				return time.Time{}, err
+			}
+			certs = []keystore.Certificate{entry.Certificate}
+		} else {
+			continue
+		}
+		// The first collected certificate decides: the chain order keeps the
+		// end-entity certificate first, so this is the certificate whose
+		// expiry drives the controller's renewal window.
+		for _, c := range certs {
+			cert, err := x509.ParseCertificate(c.Content)
+			if err != nil {
+				return time.Time{}, fmt.Errorf("failed to parse certificate from keystore: %w", err)
+			}
+			return cert.NotAfter, nil
+		}
 	}
-
-	// pem.Decode skips any leading keytool output before the first PEM block.
-	block, _ := pem.Decode(out)
-	if block == nil {
-		return time.Time{}, fmt.Errorf("no PEM certificate found in keytool output")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse certificate from keystore: %w", err)
-	}
-	return cert.NotAfter, nil
+	return time.Time{}, fmt.Errorf("no certificate found in the keystore")
 }
 
 // maxCommonNameLen is the PKI length limit for the certificate Subject

@@ -537,35 +537,110 @@ func TestConvertPEMToJKS_KeyCertMismatch(t *testing.T) {
 	}
 }
 
-// TestKeystoreCertExpiry verifies that KeystoreCertExpiry extracts the
-// NotAfter timestamp of the certificate inside a JKS keystore produced by
-// GenerateTLSforHTTP. The generated certificate is valid for one year, so
-// the extracted expiry must be roughly one year in the future.
+// TestKeystoreCertExpiry verifies that KeystoreCertExpiry decodes a JKS
+// keystore in Go and extracts the NotAfter timestamp of its first
+// certificate — for the operator-produced keystores that is the end-entity
+// certificate of the single private key entry, the certificate whose expiry
+// drives the controller's renewal window.
 func TestKeystoreCertExpiry(t *testing.T) {
-	ca, err := testutil.GenerateTestCA()
-	if err != nil {
-		t.Fatalf("failed to generate CA: %v", err)
-	}
-
 	cp := NewCertProcessor(logr.Logger{})
-	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
-	if err != nil {
-		t.Fatalf("failed to generate TLS keystore: %v", err)
-	}
+	ctx := context.Background()
 
-	notAfter, err := cp.KeystoreCertExpiry(context.Background(), keystore, password)
-	if err != nil {
-		t.Fatalf("unexpected error reading keystore cert expiry: %v", err)
-	}
+	t.Run("REST API TLS keystore expires in about one year", func(t *testing.T) {
+		ca, err := testutil.GenerateTestCA()
+		if err != nil {
+			t.Fatalf("failed to generate CA: %v", err)
+		}
+		keystore, password, err := cp.GenerateTLSforHTTP(ctx, ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
+		if err != nil {
+			t.Fatalf("failed to generate TLS keystore: %v", err)
+		}
 
-	now := time.Now()
-	if !notAfter.After(now) {
-		t.Errorf("expected certificate expiry in the future, got %v", notAfter)
-	}
-	// The generated certificate is valid for one year; allow some slack.
-	if notAfter.Before(now.Add(300*24*time.Hour)) || notAfter.After(now.Add(400*24*time.Hour)) {
-		t.Errorf("expected expiry about one year from now, got %v", notAfter)
-	}
+		notAfter, err := cp.KeystoreCertExpiry(ctx, keystore, password)
+		if err != nil {
+			t.Fatalf("unexpected error reading keystore cert expiry: %v", err)
+		}
+
+		now := time.Now()
+		if !notAfter.After(now) {
+			t.Errorf("expected certificate expiry in the future, got %v", notAfter)
+		}
+		// The generated certificate is valid for one year; allow some slack.
+		if notAfter.Before(now.Add(300*24*time.Hour)) || notAfter.After(now.Add(400*24*time.Hour)) {
+			t.Errorf("expected expiry about one year from now, got %v", notAfter)
+		}
+	})
+
+	t.Run("the leaf certificate of the chain is selected, not an issuer", func(t *testing.T) {
+		// A private key entry whose chain holds a short-lived leaf followed by
+		// a long-lived issuer: the returned expiry must be the leaf's, exactly
+		// like the first PEM block the keytool -list -rfc pipeline used to
+		// parse.
+		ca, err := testutil.GenerateTestCA()
+		if err != nil {
+			t.Fatalf("failed to generate CA: %v", err)
+		}
+		uc, err := testutil.GenerateTestUserCertWithValidity(ca, "test1234", time.Now(), time.Now().AddDate(0, 0, 10))
+		if err != nil {
+			t.Fatalf("failed to generate user cert: %v", err)
+		}
+		keyDER, err := x509.MarshalPKCS8PrivateKey(uc.UserKey)
+		if err != nil {
+			t.Fatalf("failed to encode the private key: %v", err)
+		}
+		keystore, err := encodeJKSKeystore("confluent-schema-registry", keyDER, jksChain([]*x509.Certificate{uc.UserCert, ca.CACert}), "test1234")
+		if err != nil {
+			t.Fatalf("failed to encode the keystore: %v", err)
+		}
+
+		notAfter, err := cp.KeystoreCertExpiry(ctx, keystore, "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error reading keystore cert expiry: %v", err)
+		}
+		if !notAfter.Equal(uc.UserCert.NotAfter) {
+			t.Errorf("expected the leaf certificate's NotAfter %v, got %v", uc.UserCert.NotAfter, notAfter)
+		}
+	})
+
+	t.Run("trusted certificate entries are inspected too", func(t *testing.T) {
+		ca, err := testutil.GenerateTestCA()
+		if err != nil {
+			t.Fatalf("failed to generate CA: %v", err)
+		}
+		truststore, _, err := cp.CreateTruststore(ctx, ca.CACertPEM, "test1234")
+		if err != nil {
+			t.Fatalf("failed to build the truststore: %v", err)
+		}
+
+		notAfter, err := cp.KeystoreCertExpiry(ctx, truststore, "test1234")
+		if err != nil {
+			t.Fatalf("unexpected error reading truststore cert expiry: %v", err)
+		}
+		if !notAfter.Equal(ca.CACert.NotAfter) {
+			t.Errorf("expected the CA certificate's NotAfter %v, got %v", ca.CACert.NotAfter, notAfter)
+		}
+	})
+
+	t.Run("a wrong password fails the JKS integrity check", func(t *testing.T) {
+		ca, err := testutil.GenerateTestCA()
+		if err != nil {
+			t.Fatalf("failed to generate CA: %v", err)
+		}
+		keystore, password, err := cp.GenerateTLSforHTTP(ctx, ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
+		if err != nil {
+			t.Fatalf("failed to generate TLS keystore: %v", err)
+		}
+
+		if _, err := cp.KeystoreCertExpiry(ctx, keystore, password+"x"); err == nil {
+			t.Fatal("expected an error for a wrong keystore password, got nil")
+		}
+	})
+
+	t.Run("unparseable keystore content is rejected", func(t *testing.T) {
+		if _, err := cp.KeystoreCertExpiry(ctx, []byte("not a keystore"), "test1234"); err == nil {
+			t.Fatal("expected an error for unparseable keystore content, got nil")
+		}
+	})
 }
 
 // TestKeystoreCertExpiry_Empty verifies that KeystoreCertExpiry returns an
