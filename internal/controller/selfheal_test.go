@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -357,6 +358,55 @@ func TestHandleTLSCertExpirySelfHeal(t *testing.T) {
 		err = client.Get(ctx, types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, &corev1.Secret{})
 		if !apierrors.IsNotFound(err) {
 			t.Errorf("expected no -tls secret to be created before the Deployment exists, got %v", err)
+		}
+	})
+}
+
+// TestRecreateMissingTLSSecretErrorPaths guards the error branches of
+// recreateMissingTLSSecret: a Deployment Get failure or a cluster CA secret
+// Get failure must be returned to the caller, not swallowed as a no-op (U-6).
+// A swallowed error would leave the deleted -tls secret unrecreated while
+// reconciliation reports success.
+func TestRecreateMissingTLSSecretErrorPaths(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	cluster := "test-cluster"
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+	deployment := &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + deploySuffix, Namespace: inst.Namespace},
+	}
+
+	t.Run("deployment get error is returned", func(t *testing.T) {
+		injected := errors.New("injected deployment get failure")
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, deployment.DeepCopy()).
+			WithInterceptorFuncs(failGets(&apps.Deployment{}, inst.Name+deploySuffix, injected)).
+			Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, err := reconciler.recreateMissingTLSSecret(context.Background(), inst, logr.Logger{}, cluster)
+		if !errors.Is(err, injected) {
+			t.Fatalf("expected the Deployment Get error to be returned, got %v", err)
+		}
+	})
+
+	t.Run("cluster CA secret get error is returned", func(t *testing.T) {
+		injected := errors.New("injected cluster CA secret get failure")
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, deployment.DeepCopy()).
+			WithInterceptorFuncs(failGets(&corev1.Secret{}, cluster+clusterCASuffix, injected)).
+			Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, err := reconciler.recreateMissingTLSSecret(context.Background(), inst, logr.Logger{}, cluster)
+		if !errors.Is(err, injected) {
+			t.Fatalf("expected the cluster CA secret Get error to be returned, got %v", err)
 		}
 	})
 }
