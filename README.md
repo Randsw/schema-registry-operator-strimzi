@@ -237,10 +237,10 @@ spec:
   See also: Schema Registry [kafkastore.security.protocol](https://docs.confluent.io/platform/current/schema-registry/installation/config.html#kafkastore-security-protocol) docs.
 
   > **Note**
-  > When building keystores and truststores, the operator passes the generated
-  > passwords to the `keytool`/`openssl` child processes through the process
-  > environment, never as command-line arguments, so they are not readable from
-  > `/proc/<pid>/cmdline` while the tools run.
+  > The generated keystore/truststore passwords are used in-memory only: the
+  > operator encodes the JKS keystores in pure Go and spawns no child
+  > processes, so the passwords never appear in command lines, logs, or error
+  > messages (pinned by `certProcessor/password_test.go`).
 
 - `compatibilityLevel` is the default schema compatibility level. Possible values:
 

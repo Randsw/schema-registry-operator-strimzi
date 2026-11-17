@@ -1121,15 +1121,14 @@ func TestRenderedBindingsGateOnRoleEnabled(t *testing.T) {
 	}
 }
 
-// TestValuesMemoryDefaultsCoverKeytoolOverhead guards the memory contract:
-// the operator spawns keytool (a JVM from default-jre-headless) and openssl
-// as child processes during reconciliation, and the old 128Mi limit left no
-// headroom for JVM startup next to the Go runtime — the operator pod gets
-// OOMKilled (exit 137) mid-reconciliation. The defaults must stay at a
-// 512Mi limit / 256Mi request (the plan's 256Mi–512Mi range) until the
-// keytool subprocesses are replaced with pure-Go keystore generation, and
-// the Deployment must render them into the operator container.
-func TestValuesMemoryDefaultsCoverKeytoolOverhead(t *testing.T) {
+// TestValuesMemoryDefaultsCoverReconciliationHeadroom guards the memory
+// contract: certificate generation (self-signed REST API certificates and
+// pure-Go JKS/PKCS12 keystore encoding) is bursty work on top of the Go
+// runtime, and the old 128Mi limit left no headroom for those spikes — the
+// operator pod gets OOMKilled (exit 137) mid-reconciliation. The defaults
+// must stay at a 512Mi limit / 256Mi request (the plan's 256Mi–512Mi range),
+// and the Deployment must render them into the operator container.
+func TestValuesMemoryDefaultsCoverReconciliationHeadroom(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
 	if err != nil {
 		t.Fatalf("failed to read values.yaml: %v", err)
@@ -1146,7 +1145,7 @@ func TestValuesMemoryDefaultsCoverKeytoolOverhead(t *testing.T) {
 		t.Fatalf("failed to parse values.yaml: %v", err)
 	}
 	if got := values.Image.Resources.Limits["memory"]; got != "512Mi" {
-		t.Errorf("values.yaml image.resources.limits.memory = %q, want 512Mi: the operator spawns keytool (a JVM) and openssl subprocesses, and a smaller limit OOMKills the pod mid-reconciliation", got)
+		t.Errorf("values.yaml image.resources.limits.memory = %q, want 512Mi: a smaller limit leaves no headroom for the bursty certificate-generation workload and OOMKills the pod mid-reconciliation", got)
 	}
 	if got := values.Image.Resources.Requests["memory"]; got != "256Mi" {
 		t.Errorf("values.yaml image.resources.requests.memory = %q, want 256Mi", got)

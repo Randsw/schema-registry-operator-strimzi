@@ -532,6 +532,50 @@ func TestDependabotDockerEntriesHaveDockerfiles(t *testing.T) {
 	}
 }
 
+// TestDockerfileRuntimeStageIsDistrolessWithoutSubprocessTools guards the
+// image contract: the manager binary is static (CGO_ENABLED=0) and
+// certProcessor encodes the JKS/PKCS12 keystores in pure Go, so the runtime
+// stage needs no package manager, JRE, or openssl. Pinning the distroless
+// base here makes a regression (re-adding apt-get/default-jre/openssl
+// install lines, or switching back to a full distro base to run subprocess
+// tooling) fail CI instead of silently reintroducing the JVM startup
+// overhead and the OOM risk the pure-Go keystore refactor eliminated.
+func TestDockerfileRuntimeStageIsDistrolessWithoutSubprocessTools(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "Dockerfile"))
+	if err != nil {
+		t.Fatalf("failed to read Dockerfile: %v", err)
+	}
+
+	// The last FROM instruction is the runtime stage (the builder stage
+	// cross-compiles on the build platform); it must be a distroless base.
+	lastFrom := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "FROM ") {
+			lastFrom = trimmed
+		}
+	}
+	if !strings.Contains(lastFrom, "distroless/") {
+		t.Errorf("Dockerfile runtime stage %q must use a distroless base image (gcr.io/distroless/...): the manager is a static CGO-free binary and certProcessor encodes keystores in pure Go, so no package manager, JRE, or openssl is needed at runtime", lastFrom)
+	}
+
+	// No instruction line may (re)install subprocess tooling. Comment lines
+	// are skipped so the stage comments can still explain why the tools are
+	// gone; any executable instruction (RUN lines and their continuations,
+	// COPY, ...) carrying one of these tokens is a regression.
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, banned := range []string{"apt-get", "default-jre", "openssl"} {
+			if strings.Contains(trimmed, banned) {
+				t.Errorf("Dockerfile instruction line %q contains %q; the operator image must stay subprocess-free (pure-Go keystore encoding on a distroless runtime)", trimmed, banned)
+			}
+		}
+	}
+}
+
 // workflowTriggers is the subset of the GitHub Actions workflow schema
 // needed to inspect the push/pull_request path filters. The top-level "on"
 // key is resolved to the boolean true by the YAML 1.1 parser underneath

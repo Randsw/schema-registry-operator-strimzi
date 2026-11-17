@@ -3601,7 +3601,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Status().Update(ctx, updateCluster)).To(Succeed())
 
 			// A real certificate and key so the PEM → JKS conversion runs the
-			// actual openssl/keytool pipeline.
+			// actual pure-Go conversion pipeline.
 			ca, err := testutil.GenerateTestCA()
 			Expect(err).NotTo(HaveOccurred())
 			uc, err := testutil.GenerateTestUserCert(ca, "")

@@ -16,24 +16,24 @@ image:
   resources:
     limits:
       cpu: 500m
-      # 512Mi (not 128Mi): during reconciliation the operator spawns keytool
-      # (a JVM from default-jre-headless) and openssl as child processes;
-      # JVM startup alone (heap + metaspace + code cache) needs far more
-      # headroom than a 128Mi limit leaves next to the Go runtime, and an
-      # OOMKilled operator pod (exit 137) aborts reconciliation mid-flight.
-      # Bounding the JVM itself is deferred until the keytool subprocesses
-      # are replaced with pure-Go keystore generation.
+      # 512Mi (not 128Mi): certificate generation (self-signed REST API
+      # certificates and pure-Go JKS/PKCS12 keystore encoding) is bursty
+      # work on top of the Go runtime, and an OOMKilled operator pod
+      # (exit 137) aborts reconciliation mid-flight. The operator image
+      # contains no JVM (keystores are encoded in pure Go, with no
+      # keytool/openssl subprocesses), so this headroom is pure Go.
       memory: 512Mi
     requests:
       cpu: 10m
       # 256Mi: steady-state Go runtime usage plus room for the bursty
-      # subprocess memory above without guaranteed-CPU-style throttling of
-      # the reconciliation loop.
+      # certificate-generation memory above without guaranteed-CPU-style
+      # throttling of the reconciliation loop.
       memory: 256Mi
   securityContext:
     allowPrivilegeEscalation: false
-    # The operator needs no Linux capabilities (it only execs keytool/openssl
-    # as child processes); dropping ALL satisfies the PSS restricted standard.
+    # The operator needs no Linux capabilities (it is a static Go binary that
+    # only reads secrets and writes Kubernetes objects); dropping ALL
+    # satisfies the PSS restricted standard.
     capabilities:
       drop:
       - ALL

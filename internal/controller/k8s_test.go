@@ -4379,10 +4379,10 @@ func TestCreateMTLSSecretFieldValidation(t *testing.T) {
 			"user.password": []byte("test1234"),
 		}, wantErrKey: ""},
 		// An empty user.password cannot unlock a pre-built user.p12 (the
-		// keytool import uses it as the source store password), so it must be
+		// PKCS12 decode uses it as the source store password), so it must be
 		// rejected with a clear validation error instead of a broken keystore
 		// generation downstream. On the PEM path an empty password is fine:
-		// the p12 is created with the generated password itself.
+		// the keystore is sealed with the generated password itself.
 		{name: "empty user.password with user.p12 is rejected", userData: map[string][]byte{
 			"user.p12":      uc.PKCS12Data,
 			"user.password": {},

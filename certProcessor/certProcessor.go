@@ -15,20 +15,13 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/pavlo-v-chernykh/keystore-go/v4"
+	"software.sslmate.com/src/go-pkcs12"
 )
-
-// execCommandTimeout is the defensive deadline applied to keytool/openssl
-// child processes when the caller's context carries none. A hung cert tool
-// must never block a reconcile worker indefinitely (B5). It is a variable so
-// tests can shorten it.
-var execCommandTimeout = 5 * time.Minute
 
 // rsaKeyBits is the RSA key size used for the REST API server certificate
 // key generated on every renewal (generateCSR). The default is 2048 bits:
@@ -38,38 +31,17 @@ var execCommandTimeout = 5 * time.Minute
 // larger key can raise it (e.g. 3072 or 4096) and so tests can pin it.
 var rsaKeyBits = 2048
 
-// withExecDeadline returns a context that enforces execCommandTimeout when
-// the incoming context has no deadline; a context that already carries one
-// (for example the reconcile context) is passed through unchanged. The caller
-// must invoke the returned cancel function.
-func withExecDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
+// ensureContextAlive returns the caller's context error — wrapped so
+// errors.Is still matches context.Canceled / context.DeadlineExceeded — when
+// ctx is already cancelled or past its deadline, and nil otherwise. The
+// pure-Go certificate building paths check it around their expensive work so
+// caller cancellation is honoured the same way the bounded keytool/openssl
+// child processes used to be (B5).
+func ensureContextAlive(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: certificate processing aborted before it completed", err)
 	}
-	return context.WithTimeout(ctx, execCommandTimeout)
-}
-
-// runCertCommand executes an already-built command created with
-// exec.CommandContext and returns its stdout. It never returns silently on
-// failure: context cancellation or the default deadline is reported as the
-// wrapped context error, and keytool/openssl diagnostics — which go to
-// stderr, never stdout — are appended to the error message and the log
-// entry (B17), because cmd.Output() only surfaces stdout.
-func runCertCommand(ctx context.Context, cp *CertProcessor, cmd *exec.Cmd) ([]byte, error) {
-	out, err := cmd.Output()
-	if err == nil {
-		return out, nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		err = fmt.Errorf("%w: cert tool process aborted before it completed", ctxErr)
-	} else {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
-	}
-	cp.log.Error(err, "Error while exec command", "cmd", filepath.Base(cmd.Path), "stdout", string(out))
-	return out, err
+	return nil
 }
 
 type CertProcessor struct {
@@ -103,96 +75,6 @@ func GeneratePassword(length int, includeNumber bool, includeSpecial bool) (stri
 	return string(password), nil
 }
 
-// removeTempDir removes a per-call temp directory, logging a warning on
-// failure. It is intended for deferred cleanup where the error cannot be
-// returned.
-func (cp *CertProcessor) removeTempDir(dir string) {
-	if err := os.RemoveAll(dir); err != nil {
-		cp.log.V(1).Info("Failed to remove temp dir", "dir", dir, "error", err.Error())
-	}
-}
-
-// writeTempFileIn writes content to a file with the given name inside dir.
-// The file is created with 0600 permissions so certificate/key material is
-// not readable by other users. The caller is responsible for removing dir
-// when it is no longer needed.
-func writeTempFileIn(dir, name, content string) (string, error) {
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return "", fmt.Errorf("failed to write temp file %q: %w", path, err)
-	}
-	return path, nil
-}
-
-// passwordEnvVar is the name of the environment variable through which
-// keystore passwords are fed to the keytool and openssl child processes.
-// Passing passwords via the process environment (instead of command-line
-// arguments) keeps them out of /proc/<pid>/cmdline, which is readable by any
-// process on the node while the tool runs.
-const passwordEnvVar = "SSR_KEYSTORE_PASSWORD"
-
-// withPasswordEnv returns cmd with passwordEnvVar=password appended to its
-// environment (inheriting the operator process environment). Any occurrence
-// of the variable already present in the parent environment is dropped first
-// so the value set here always wins. The operator process environment itself
-// is never modified (no os.Setenv).
-func withPasswordEnv(cmd *exec.Cmd, password string) *exec.Cmd {
-	prefix := passwordEnvVar + "="
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, prefix) {
-			env = append(env, entry)
-		}
-	}
-	cmd.Env = append(env, prefix+password)
-	return cmd
-}
-
-// keytoolImportCertCmd builds the keytool invocation that imports a CA
-// certificate into a JKS truststore. The store password is fed through the
-// environment (passwordEnvVar), never as a command-line argument. The
-// command is bound to ctx so a hung keytool is killed instead of blocking
-// the caller forever (B5).
-func keytoolImportCertCmd(ctx context.Context, keystorePath, alias, certPath, password string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "keytool", "-importcert", "-keystore", keystorePath, "-alias", alias, "-file",
-		certPath, "-storepass:env", passwordEnvVar, "-storetype", "jks", "-trustcacerts", "-noprompt")
-	return withPasswordEnv(cmd, password)
-}
-
-// keytoolImportKeystoreCmd builds the keytool invocation that converts a
-// PKCS12 bundle into a JKS keystore. Source and destination store passwords
-// are fed through the environment (passwordEnvVar), never as command-line
-// arguments. The command is bound to ctx (B5).
-func keytoolImportKeystoreCmd(ctx context.Context, destKeystorePath, srcKeystorePath, password string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "keytool", "-importkeystore", "-deststorepass:env", passwordEnvVar, "-destkeystore", destKeystorePath,
-		"-deststoretype", "jks", "-srckeystore", srcKeystorePath, "-srcstoretype", "PKCS12", "-srcstorepass:env", passwordEnvVar, "-noprompt")
-	return withPasswordEnv(cmd, password)
-}
-
-// keytoolListCmd builds the keytool invocation that lists keystore entries in
-// RFC 1421 (PEM) form. The store password is fed through the environment
-// (passwordEnvVar), never as a command-line argument. The command is bound
-// to ctx (B5).
-func keytoolListCmd(ctx context.Context, keystorePath, password string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "keytool", "-list", "-rfc", "-keystore", keystorePath, "-storepass:env", passwordEnvVar, "-noprompt")
-	return withPasswordEnv(cmd, password)
-}
-
-// opensslExportPKCS12Cmd builds the openssl invocation that bundles a
-// certificate and private key into a PKCS12 file. When caCertPath is
-// non-empty the certificate chain is included (-chain -CAfile). The export
-// password is fed through the environment (passwordEnvVar), never as a
-// command-line argument. The command is bound to ctx (B5).
-func opensslExportPKCS12Cmd(ctx context.Context, certPath, keyPath, caCertPath, name, outPath, password string) *exec.Cmd {
-	args := []string{"pkcs12", "-export", "-in", certPath, "-inkey", keyPath}
-	if caCertPath != "" {
-		args = append(args, "-chain", "-CAfile", caCertPath)
-	}
-	args = append(args, "-name", name, "-passout", "env:"+passwordEnvVar, "-out", outPath)
-	cmd := exec.CommandContext(ctx, "openssl", args...)
-	return withPasswordEnv(cmd, password)
-}
-
 // truststoreAlias returns the alias under which the CA certificate at index
 // (of a bundle of total certificates) is imported into the truststore. A
 // single-cert bundle keeps the historical "CARoot" alias so existing
@@ -204,6 +86,48 @@ func truststoreAlias(index, total int) string {
 		return "CARoot"
 	}
 	return fmt.Sprintf("CARoot-%d", index)
+}
+
+// jksCertificate converts an x509.Certificate into the keystore-go
+// Certificate representation stored in JKS entries: the X.509 type tag and
+// the DER content.
+func jksCertificate(cert *x509.Certificate) keystore.Certificate {
+	return keystore.Certificate{Type: "X509", Content: cert.Raw}
+}
+
+// encodeJKS serializes store into the JKS binary format, integrity-protected
+// with password — the same password a consumer later opens the store with.
+func encodeJKS(store keystore.KeyStore, password string) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := store.Store(&buf, []byte(password)); err != nil {
+		return nil, fmt.Errorf("failed to encode the JKS store: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// jksChain converts a certificate chain into the keystore-go representation
+// stored in JKS private key entries.
+func jksChain(certs []*x509.Certificate) []keystore.Certificate {
+	chain := make([]keystore.Certificate, 0, len(certs))
+	for _, cert := range certs {
+		chain = append(chain, jksCertificate(cert))
+	}
+	return chain
+}
+
+// encodeJKSKeystore encodes a JKS keystore holding a single private key
+// entry under alias: the PKCS#8 DER private key (encrypted with password, as
+// the JKS format requires) and its certificate chain.
+func encodeJKSKeystore(alias string, keyDER []byte, chain []keystore.Certificate, password string) ([]byte, error) {
+	store := keystore.New()
+	if err := store.SetPrivateKeyEntry(alias, keystore.PrivateKeyEntry{
+		CreationTime:     time.Now(),
+		PrivateKey:       keyDER,
+		CertificateChain: chain,
+	}, []byte(password)); err != nil {
+		return nil, fmt.Errorf("failed to add the private key entry to the keystore: %w", err)
+	}
+	return encodeJKS(store, password)
 }
 
 // Create a JKS-formatted truststore using the cluster's CA certificate.
@@ -224,30 +148,22 @@ func truststoreAlias(index, total int) string {
 //
 // Notes
 // -----
-// Internally this function calls out to the “keytool“ command-line tool.
+// The truststore is encoded entirely in Go with the keystore-go library — no
+// keytool/openssl subprocesses and no temporary files are involved, and the
+// aliases are stored lowercased exactly as keytool itself writes them.
 //
 // The cluster CA secret may hold a multi-PEM bundle (Strimzi appends the new
 // CA to the old one during a zero-downtime CA rotation). Every CERTIFICATE
-// block is imported under its own alias — "CARoot" for a single-cert bundle,
+// block becomes its own trusted entry — "CARoot" for a single-cert bundle,
 // "CARoot-0", "CARoot-1", ... for a multi-cert bundle — because a single
-// keytool -importcert call silently keeps only the first certificate of a
+// keytool -importcert call silently kept only the first certificate of a
 // multi-PEM file. An empty or unparseable ca.crt is rejected with an
-// actionable error before any subprocess runs.
+// actionable error before anything is encoded.
 //
-// Security: all intermediate files are written into a per-call temporary
-// directory with 0700 permissions that is removed when the function returns.
-// Per-call directories also guarantee that concurrent reconciles (e.g. two
-// StrimziSchemaRegistry CRs in the same operator pod) never share or overwrite
-// each other's files. The keystore password is passed to keytool through the
-// process environment (see passwordEnvVar), never as a command-line argument.
-//
-// ctx bounds the keytool child process: it is killed when ctx is cancelled or
-// when it exceeds ctx's deadline, or the package default execCommandTimeout
-// when ctx carries none (B5).
+// ctx is honoured with an explicit cancellation check before the store is
+// encoded: a cancelled or expired context aborts the call with the wrapped
+// context error (B5).
 func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, password string) ([]byte, string, error) {
-	ctx, cancel := withExecDeadline(ctx)
-	defer cancel()
-
 	if password == "" {
 		var err error
 		password, err = GeneratePassword(24, true, false)
@@ -257,7 +173,7 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 		}
 	}
 
-	// An empty ca.crt would otherwise surface as a cryptic keytool failure;
+	// An empty ca.crt would otherwise surface as a cryptic tool failure;
 	// reject it up front with an actionable error naming the offending input.
 	if strings.TrimSpace(cert) == "" {
 		err := errors.New("cluster CA certificate (ca.crt) is empty; the <cluster>-cluster-ca-cert secret must contain a CA certificate to build the truststore")
@@ -265,13 +181,10 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 		return nil, "", err
 	}
 
-	// keytool -importcert reads only the FIRST certificate of a multi-PEM
-	// file, so during a Strimzi zero-downtime CA rotation — when ca.crt holds
-	// the old and the new cluster CA — a single import would drop every CA
-	// after the first and clients would stop trusting servers signed by the
-	// other CA. Parse every CERTIFICATE block (this also rejects unparseable
-	// input before any subprocess runs) and import each one under its own
-	// alias (see truststoreAlias).
+	// During a Strimzi zero-downtime CA rotation ca.crt holds the old and the
+	// new cluster CA. Parse every CERTIFICATE block (this also rejects
+	// unparseable input before anything is encoded) and store each one under
+	// its own alias (see truststoreAlias).
 	certs, err := StringToCertificates(cert)
 	if err != nil {
 		err = fmt.Errorf("invalid cluster CA certificate (ca.crt): %w", err)
@@ -279,48 +192,167 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 		return nil, "", err
 	}
 
-	tempDir, err := os.MkdirTemp("", "ssr-truststore-*")
-	if err != nil {
-		cp.log.Error(err, "Failed to create temp dir")
+	// Honour caller cancellation before the JKS encoding runs (B5).
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while building the truststore")
 		return nil, "", err
 	}
-	defer cp.removeTempDir(tempDir)
 
-	outputPath := filepath.Join(tempDir, "client.truststore.jks")
-
-	// Import every CA certificate into the truststore. Each certificate is
-	// written to its own temp file because keytool -importcert accepts a
-	// single certificate per invocation; the store password still travels
-	// through the process environment (passwordEnvVar) for every call.
+	store := keystore.New()
+	now := time.Now()
 	for i, caCert := range certs {
-		caCertPath, err := writeTempFileIn(tempDir, fmt.Sprintf("ca-%d.crt", i),
-			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})))
-		if err != nil {
-			cp.log.Error(err, "Failed to write temp file", "File", fmt.Sprintf("ca-%d.crt", i))
-			return nil, "", err
-		}
-
-		// Generate truststore
-		cmd := keytoolImportCertCmd(ctx, outputPath, truststoreAlias(i, len(certs)), caCertPath, password)
-		if _, err := runCertCommand(ctx, cp, cmd); err != nil {
+		if err := store.SetTrustedCertificateEntry(truststoreAlias(i, len(certs)), keystore.TrustedCertificateEntry{
+			CreationTime: now,
+			Certificate:  jksCertificate(caCert),
+		}); err != nil {
+			err = fmt.Errorf("failed to add CA certificate #%d to the truststore: %w", i, err)
+			cp.log.Error(err, "Failed to build the JKS truststore")
 			return nil, "", err
 		}
 	}
 
-	// Check if truststore exists
-	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", outputPath)
-		return nil, "", err
-	}
-
-	// Read truststore from file to save in kubernetes secret
-	b, err := os.ReadFile(outputPath)
+	// Encode the truststore to save in kubernetes secret
+	b, err := encodeJKS(store, password)
 	if err != nil {
-		cp.log.Error(err, "File read fail", "File", outputPath)
+		cp.log.Error(err, "Failed to encode the JKS truststore")
 		return nil, "", err
 	}
 
 	return b, password, nil
+}
+
+// isSelfSigned reports whether cert was issued by itself.
+func isSelfSigned(cert *x509.Certificate) bool {
+	return bytes.Equal(cert.RawIssuer, cert.RawSubject) && cert.CheckSignatureFrom(cert) == nil
+}
+
+// buildCertChain returns the certificate chain that starts at leaf and
+// follows the issuers found in pool — matched by subject and signature, so
+// two CAs sharing a subject are told apart — up to a self-signed
+// certificate. It replicates what openssl pkcs12 -export -chain used to do
+// for the keystore pipelines: an incomplete chain (no issuer of the current
+// certificate in the pool, or no self-signed root) is an error, so a broken
+// ca.crt fails loudly instead of producing a keystore whose chain clients
+// cannot validate.
+func buildCertChain(leaf *x509.Certificate, pool []*x509.Certificate) ([]*x509.Certificate, error) {
+	chain := []*x509.Certificate{leaf}
+	current := leaf
+	remaining := make([]*x509.Certificate, len(pool))
+	copy(remaining, pool)
+	for !isSelfSigned(current) {
+		issuerIndex := -1
+		for i, candidate := range remaining {
+			if bytes.Equal(candidate.RawSubject, current.RawIssuer) && current.CheckSignatureFrom(candidate) == nil {
+				issuerIndex = i
+				break
+			}
+		}
+		if issuerIndex < 0 {
+			return nil, fmt.Errorf("unable to build the certificate chain: no issuer certificate for %q found in the provided CA certificate (ca.crt); ensure ca.crt contains the complete issuing chain up to a self-signed root", current.Subject.String())
+		}
+		current = remaining[issuerIndex]
+		remaining = append(remaining[:issuerIndex], remaining[issuerIndex+1:]...)
+		chain = append(chain, current)
+	}
+	return chain, nil
+}
+
+// selectLeafForKey returns the certificate of certs whose public key matches
+// key — the end-entity certificate openssl pkcs12 -export used to pair with
+// the private key — together with the remaining certificates of the bundle.
+// When no certificate matches the key it returns the same error the openssl
+// pipeline produced, so a mismatched key and certificate still fails the
+// call instead of producing a broken keystore.
+func selectLeafForKey(certs []*x509.Certificate, key crypto.Signer) (*x509.Certificate, []*x509.Certificate, error) {
+	for i, cert := range certs {
+		if publicKeyMatches(cert.PublicKey, key.Public()) {
+			extras := make([]*x509.Certificate, 0, len(certs)-1)
+			extras = append(extras, certs[:i]...)
+			extras = append(extras, certs[i+1:]...)
+			return cert, extras, nil
+		}
+	}
+	return nil, nil, errors.New("no certificate in the provided certificate bundle matches the provided private key")
+}
+
+// keystoreFromPEM builds the JKS bytes for a single private key entry from a
+// PEM-encoded certificate bundle and private key, optionally chaining the
+// entry with the issuers found in caCerts (nil keeps the entry leaf-only).
+// It mirrors the openssl pkcs12 -export pipeline it replaces: the private
+// key must match one of the provided certificates, and the issuers must
+// form a complete chain up to a self-signed root, so a broken input fails
+// instead of producing a keystore whose chain clients cannot validate.
+func (cp *CertProcessor) keystoreFromPEM(ctx context.Context, certPEM string, keyPEM string, caCerts []*x509.Certificate, alias string, password string) ([]byte, error) {
+	certs, err := StringToCertificates(certPEM)
+	if err != nil {
+		err = fmt.Errorf("invalid certificate PEM data: %w", err)
+		cp.log.Error(err, "Failed to parse the certificate bundle")
+		return nil, err
+	}
+	key, err := StringToPrivateKey(keyPEM)
+	if err != nil {
+		err = fmt.Errorf("invalid private key PEM data: %w", err)
+		cp.log.Error(err, "Failed to parse the private key")
+		return nil, err
+	}
+	leaf, extras, err := selectLeafForKey(certs, key)
+	if err != nil {
+		cp.log.Error(err, "The private key does not match any provided certificate")
+		return nil, err
+	}
+
+	chain := append([]*x509.Certificate{leaf}, extras...)
+	if len(caCerts) > 0 {
+		issuers, err := buildCertChain(leaf, caCerts)
+		if err != nil {
+			cp.log.Error(err, "Failed to build the certificate chain from the issuing CA certificate")
+			return nil, err
+		}
+		chain = append(chain, issuers[1:]...)
+	}
+
+	// Honour caller cancellation before the JKS encoding runs (B5).
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while building the keystore")
+		return nil, err
+	}
+
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		err = fmt.Errorf("failed to encode the private key: %w", err)
+		cp.log.Error(err, "Failed to encode the private key")
+		return nil, err
+	}
+	return encodeJKSKeystore(alias, keyDER, jksChain(chain), password)
+}
+
+// keystoreFromPKCS12 decodes a PKCS12 bundle — the Strimzi KafkaUser
+// user.p12, encrypted with password — and re-encodes it as a JKS keystore
+// holding the same private key and certificate chain, mirroring the
+// keytool -importkeystore pipeline it replaces.
+func (cp *CertProcessor) keystoreFromPKCS12(ctx context.Context, p12 []byte, password string, alias string) ([]byte, error) {
+	// Honour caller cancellation before the PKCS12 decoding runs (B5).
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while building the keystore")
+		return nil, err
+	}
+
+	key, cert, caCerts, err := pkcs12.DecodeChain(p12, password)
+	if err != nil {
+		err = fmt.Errorf("failed to decode the PKCS12 keystore (user.p12): %w", err)
+		cp.log.Error(err, "Failed to decode the PKCS12 keystore")
+		return nil, err
+	}
+
+	chain := append([]*x509.Certificate{cert}, caCerts...)
+
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		err = fmt.Errorf("failed to encode the private key: %w", err)
+		cp.log.Error(err, "Failed to encode the private key")
+		return nil, err
+	}
+	return encodeJKSKeystore(alias, keyDER, jksChain(chain), password)
 }
 
 // Create a JKS-formatted keystore using the client's CA certificate,
@@ -350,24 +382,21 @@ func (cp *CertProcessor) CreateTruststore(ctx context.Context, cert string, pass
 
 // Notes
 // -----
-// Internally this function calls out to the “openssl“ and “keytool“
-// command-line tool.
+// The keystore is encoded entirely in Go: a provided user.p12 is decoded
+// with go-pkcs12 and re-encoded as JKS, otherwise the PEM components are
+// parsed and encoded directly — no openssl/keytool subprocesses and no
+// temporary files are involved.
 //
-// Security: all intermediate files (PEM material, the p12 bundle and the
-// keystore) are written into a per-call temporary directory with 0700
-// permissions that is removed when the function returns. Per-call directories
-// also guarantee that concurrent reconciles never share or overwrite each
-// other's files. The keystore password is passed to openssl and keytool
-// through the process environment (see passwordEnvVar), never as a
-// command-line argument.
+// The PEM path keeps the validations the openssl pipeline used to enforce:
+// the private key must match one of the provided certificates, and the user
+// CA certificate must contain the complete issuing chain up to a self-signed
+// root, so a broken input still fails the reconcile instead of producing a
+// keystore whose chain clients cannot validate.
 //
-// ctx bounds the openssl and keytool child processes (see CreateTruststore
-// for the deadline semantics, B5).
+// ctx is honoured with explicit cancellation checks before the PKCS12
+// decoding and the JKS encoding run (B5).
 func (cp *CertProcessor) CreateKeystore(ctx context.Context, userCACert string, userCert string, userKey string, userp12 string, password string) ([]byte, string, error) {
 	var err error
-	ctx, cancel := withExecDeadline(ctx)
-	defer cancel()
-
 	if password == "" {
 		password, err = GeneratePassword(24, true, false)
 		if err != nil {
@@ -376,74 +405,25 @@ func (cp *CertProcessor) CreateKeystore(ctx context.Context, userCACert string, 
 		}
 	}
 
-	tempDir, err := os.MkdirTemp("", "ssr-keystore-*")
-	if err != nil {
-		cp.log.Error(err, "Failed to create temp dir")
-		return nil, "", err
-	}
-	defer cp.removeTempDir(tempDir)
-
-	p12Path := filepath.Join(tempDir, "user.p12")
-
-	// User data in P12 format not presented — generate from PEM components.
+	var b []byte
 	if userp12 == "" {
-		// Write user CA cert, user cert, and user key into the private temp dir.
-		userCAPath, err := writeTempFileIn(tempDir, "user_ca.crt", userCACert)
-		if err != nil {
-			cp.log.Error(err, "Failed to write temp file", "File", "user_ca.crt")
-			return nil, "", err
+		// User data in P12 format not presented — build the keystore from the
+		// PEM components. The user CA certificate is mandatory on this path:
+		// the openssl pipeline always exported with -chain -CAfile, so an
+		// empty or unparseable ca.crt failed the call.
+		caCerts, parseErr := StringToCertificates(userCACert)
+		if parseErr != nil {
+			parseErr = fmt.Errorf("invalid user CA certificate (ca.crt): %w", parseErr)
+			cp.log.Error(parseErr, "Failed to parse the user CA certificate")
+			return nil, "", parseErr
 		}
-		userCertPath, err := writeTempFileIn(tempDir, "user.crt", userCert)
-		if err != nil {
-			cp.log.Error(err, "Failed to write temp file", "File", "user.crt")
-			return nil, "", err
-		}
-		userKeyPath, err := writeTempFileIn(tempDir, "user.key", userKey)
-		if err != nil {
-			cp.log.Error(err, "Failed to write temp file", "File", "user.key")
-			return nil, "", err
-		}
-
-		// Generate p12 format bundle
-		cmd := opensslExportPKCS12Cmd(ctx, userCertPath, userKeyPath, userCAPath, "confluent-schema-registry", p12Path, password)
-		if _, err := runCertCommand(ctx, cp, cmd); err != nil {
-			return nil, "", err
-		}
+		b, err = cp.keystoreFromPEM(ctx, userCert, userKey, caCerts, "confluent-schema-registry", password)
 	} else {
-		// Cert in P12 format is presented — write directly into the temp dir.
+		// Cert in P12 format is presented — decode it and re-encode as JKS.
 		cp.log.V(1).Info("Using p12 cert store")
-		if _, err := writeTempFileIn(tempDir, "user.p12", userp12); err != nil {
-			cp.log.Error(err, "Failed to write temp file", "File", "user.p12")
-			return nil, "", err
-		}
+		b, err = cp.keystoreFromPKCS12(ctx, []byte(userp12), password, "confluent-schema-registry")
 	}
-
-	// Check if p12 format bundle exists
-	if _, err := os.Stat(p12Path); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", p12Path)
-		return nil, "", err
-	}
-
-	// Create path to client keystore
-	keystorePath := filepath.Join(tempDir, "client.keystore.jks")
-
-	// Generate client keystore
-	cp.log.V(1).Info("Generate keystore")
-	cmd := keytoolImportKeystoreCmd(ctx, keystorePath, p12Path, password)
-	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
-		return nil, "", err
-	}
-
-	// Check if keystore exists
-	if _, err := os.Stat(keystorePath); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", keystorePath)
-		return nil, "", err
-	}
-
-	// Read keystore from file to save in kubernetes secret
-	b, err := os.ReadFile(keystorePath)
 	if err != nil {
-		cp.log.Error(err, "File read fail", "File", keystorePath)
 		return nil, "", err
 	}
 
@@ -461,12 +441,9 @@ func (cp *CertProcessor) CreateKeystore(ctx context.Context, userCACert string, 
 // trust. An empty or unparseable ca.crt/ca.key, or a bundle in which no
 // certificate matches the key, is rejected with an actionable error.
 //
-// ctx bounds the openssl and keytool child processes (see CreateTruststore
-// for the deadline semantics, B5).
+// ctx is honoured with explicit cancellation checks around the RSA key
+// generation and the JKS encoding (B5).
 func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, caKey string, password string, name string, namespace string) ([]byte, string, error) {
-	ctx, cancel := withExecDeadline(ctx)
-	defer cancel()
-
 	// Validate the DNS identity inputs. name is the CR name — which may
 	// itself contain dots (e.g. my.registry) — and namespace the CR
 	// namespace; the certificate SANs are built from <name>.<namespace>, so
@@ -477,9 +454,9 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 	if namespace == "" {
 		return nil, "", fmt.Errorf("namespace cannot be empty; the REST API certificate DNS SANs are built from <name>.<namespace>")
 	}
-	// Empty CA material would otherwise surface as a cryptic openssl/keytool
-	// failure or an invalid signed certificate; reject it up front with an
-	// actionable error naming the offending input.
+	// Empty CA material would otherwise surface as a cryptic tool failure or
+	// an invalid signed certificate; reject it up front with an actionable
+	// error naming the offending input.
 	if strings.TrimSpace(caCert) == "" {
 		err := errors.New("cluster CA certificate (ca.crt) is empty; the <cluster>-cluster-ca-cert secret must contain a CA certificate to sign the REST API certificate")
 		cp.log.Error(err, "Empty cluster CA certificate")
@@ -490,7 +467,7 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 		cp.log.Error(err, "Empty cluster CA private key")
 		return nil, "", err
 	}
-	// Create key, create clr. Sign clr with CACert. Create keystore.
+	// Create key, create csr. Sign csr with CACert. Create keystore.
 	if password == "" {
 		var err error
 		password, err = GeneratePassword(24, true, false)
@@ -500,17 +477,9 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 		}
 	}
 
-	tempDir, err := os.MkdirTemp("", "ssr-tls-*")
-	if err != nil {
-		cp.log.Error(err, "Failed to create temp dir")
-		return nil, "", err
-	}
-	defer cp.removeTempDir(tempDir)
-
-	// Write cluster CA cert into the private temp dir.
-	caCertPath, err := writeTempFileIn(tempDir, "tls-ca-cert.crt", caCert)
-	if err != nil {
-		cp.log.Error(err, "Failed to write temp file", "File", "tls-ca-cert.crt")
+	// Honour caller cancellation around the expensive RSA key generation (B5).
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while generating the REST API certificate")
 		return nil, "", err
 	}
 
@@ -518,6 +487,10 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 	serverKey, csr, err := cp.generateCSR(name, namespace)
 	if err != nil {
 		cp.log.Error(err, "Failed to generate CSR")
+		return nil, "", err
+	}
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while generating the REST API certificate")
 		return nil, "", err
 	}
 	caCerts, err := StringToCertificates(caCert)
@@ -547,45 +520,28 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 		cp.log.Error(err, "Failed to sign CSR")
 		return nil, "", err
 	}
-	// Save TLS cert and key into the private temp dir.
-	keyPath, certPath, err := cp.saveFiles(tempDir, serverKey, serverCert)
+
+	// The JKS chain mirrors what openssl pkcs12 -export -chain used to
+	// produce: the server certificate followed by its issuers from the CA
+	// bundle, up to a self-signed root.
+	chain, err := buildCertChain(serverCert, caCerts)
 	if err != nil {
-		cp.log.Error(err, "Failed to save files")
+		cp.log.Error(err, "Failed to build the server certificate chain")
 		return nil, "", err
 	}
 
-	p12Path := filepath.Join(tempDir, "tls.p12")
-	// Generate p12 format bundle
-	cmd := opensslExportPKCS12Cmd(ctx, certPath, keyPath, caCertPath, "confluent-schema-registry-tls", p12Path, password)
-	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
+	keyDER, err := x509.MarshalPKCS8PrivateKey(serverKey)
+	if err != nil {
+		err = fmt.Errorf("failed to encode the server private key: %w", err)
+		cp.log.Error(err, "Failed to encode the server private key")
 		return nil, "", err
 	}
 
-	// Check if p12 format bundle exists
-	if _, err := os.Stat(p12Path); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", p12Path)
-		return nil, "", err
-	}
-
-	keystorePath := filepath.Join(tempDir, "tls.keystore.jks")
-
-	// Generate keystore
+	// Encode the keystore to save in kubernetes secret
 	cp.log.V(1).Info("Generate tls keystore")
-	cmd = keytoolImportKeystoreCmd(ctx, keystorePath, p12Path, password)
-	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
-		return nil, "", err
-	}
-
-	// Check if keystore exists
-	if _, err := os.Stat(keystorePath); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", keystorePath)
-		return nil, "", err
-	}
-
-	// Read keystore from file to save in kubernetes secret
-	b, err := os.ReadFile(keystorePath)
+	b, err := encodeJKSKeystore("confluent-schema-registry-tls", keyDER, jksChain(chain), password)
 	if err != nil {
-		cp.log.Error(err, "File read fail", "File", keystorePath)
+		cp.log.Error(err, "Failed to encode the JKS keystore")
 		return nil, "", err
 	}
 
@@ -596,10 +552,9 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 // private key — the shape of a standard kubernetes.io/tls secret (tls.crt /
 // tls.key, as issued by cert-manager). The issuing CA certificate (the
 // secret's optional ca.crt key) is optional: when provided it must parse and
-// is embedded into the exported PKCS12 as the chain (-chain -CAfile), so TLS
-// clients validating against that CA succeed even when tls.crt holds only the
-// leaf certificate; when absent the bundle is created without -chain exactly
-// as before, so a leaf certificate alone converts fine.
+// its chain is embedded into the keystore, so TLS clients validating against
+// that CA succeed even when tls.crt holds only the leaf certificate; when
+// absent the keystore holds the leaf certificate alone, exactly as before.
 //
 // Returns
 // -------
@@ -613,21 +568,16 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 //
 // Notes
 // -----
-// Internally this function calls out to the "openssl" and "keytool"
-// command-line tools (PEM → PKCS12 via openssl, then keytool -importkeystore
-// to JKS), mirroring the CreateKeystore pipeline.
+// The keystore is encoded entirely in Go (PEM parsing plus JKS encoding via
+// the keystore-go library), mirroring the CreateKeystore pipeline without
+// the openssl/keytool subprocesses and temporary files. The validations the
+// openssl pipeline used to enforce are kept: the private key must match the
+// certificate, and a provided ca.crt must contain the complete issuing
+// chain up to a self-signed root.
 //
-// Security: all intermediate files are written into a per-call temporary
-// directory with 0700 permissions that is removed when the function returns.
-// The keystore password is passed to openssl and keytool through the process
-// environment (see passwordEnvVar), never as a command-line argument.
-//
-// ctx bounds the openssl and keytool child processes (see CreateTruststore
-// for the deadline semantics, B5).
+// ctx is honoured with an explicit cancellation check before the JKS
+// encoding runs (B5).
 func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, keyPEM string, caPEM string, password string) ([]byte, string, error) {
-	ctx, cancel := withExecDeadline(ctx)
-	defer cancel()
-
 	if password == "" {
 		var err error
 		password, err = GeneratePassword(24, true, false)
@@ -638,81 +588,22 @@ func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, ke
 	}
 
 	// The issuing CA is optional: an empty (or whitespace-only) ca.crt keeps
-	// the chain-free export of a leaf-only secret. A provided ca.crt must
-	// parse before any subprocess runs, so a broken bundle fails with an
-	// actionable error instead of a cryptic openssl failure.
-	hasCA := strings.TrimSpace(caPEM) != ""
-	if hasCA {
-		if _, err := StringToCertificates(caPEM); err != nil {
+	// the leaf-only keystore of a leaf-only secret. A provided ca.crt must
+	// parse before anything is encoded, so a broken bundle fails with an
+	// actionable error instead of a cryptic tool failure.
+	var caCerts []*x509.Certificate
+	if strings.TrimSpace(caPEM) != "" {
+		var err error
+		caCerts, err = StringToCertificates(caPEM)
+		if err != nil {
 			err = fmt.Errorf("invalid issuing CA certificate (ca.crt): %w", err)
 			cp.log.Error(err, "Failed to parse the issuing CA certificate of the user TLS secret")
 			return nil, "", err
 		}
 	}
 
-	tempDir, err := os.MkdirTemp("", "ssr-pem2jks-*")
+	b, err := cp.keystoreFromPEM(ctx, certPEM, keyPEM, caCerts, "confluent-schema-registry", password)
 	if err != nil {
-		cp.log.Error(err, "Failed to create temp dir")
-		return nil, "", err
-	}
-	defer cp.removeTempDir(tempDir)
-
-	certPath, err := writeTempFileIn(tempDir, "tls.crt", certPEM)
-	if err != nil {
-		cp.log.Error(err, "Failed to write temp file", "File", "tls.crt")
-		return nil, "", err
-	}
-	keyPath, err := writeTempFileIn(tempDir, "tls.key", keyPEM)
-	if err != nil {
-		cp.log.Error(err, "Failed to write temp file", "File", "tls.key")
-		return nil, "", err
-	}
-
-	// When the user secret carries the issuing CA, write it into the private
-	// temp dir so the PKCS12 export can embed the chain (-chain -CAfile).
-	caCertPath := ""
-	if hasCA {
-		caCertPath, err = writeTempFileIn(tempDir, "ca.crt", caPEM)
-		if err != nil {
-			cp.log.Error(err, "Failed to write temp file", "File", "ca.crt")
-			return nil, "", err
-		}
-	}
-
-	p12Path := filepath.Join(tempDir, "tls.p12")
-	// Generate p12 format bundle. With a provided issuing CA the chain is
-	// embedded (-chain -CAfile); without one the export stays chain-free,
-	// exactly as before.
-	cmd := opensslExportPKCS12Cmd(ctx, certPath, keyPath, caCertPath, "confluent-schema-registry", p12Path, password)
-	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
-		return nil, "", err
-	}
-
-	// Check if p12 format bundle exists
-	if _, err := os.Stat(p12Path); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", p12Path)
-		return nil, "", err
-	}
-
-	keystorePath := filepath.Join(tempDir, "tls-keystore.jks")
-
-	// Generate keystore
-	cp.log.V(1).Info("Generate JKS keystore from PEM certificate")
-	cmd = keytoolImportKeystoreCmd(ctx, keystorePath, p12Path, password)
-	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
-		return nil, "", err
-	}
-
-	// Check if keystore exists
-	if _, err := os.Stat(keystorePath); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", keystorePath)
-		return nil, "", err
-	}
-
-	// Read keystore from file to save in kubernetes secret
-	b, err := os.ReadFile(keystorePath)
-	if err != nil {
-		cp.log.Error(err, "File read fail", "File", keystorePath)
 		return nil, "", err
 	}
 
@@ -720,47 +611,72 @@ func (cp *CertProcessor) ConvertPEMToJKS(ctx context.Context, certPEM string, ke
 }
 
 // KeystoreCertExpiry returns the NotAfter timestamp of the first certificate
-// entry in the given JKS keystore. It shells out to keytool to export the
-// certificate chain in PEM form and parses it. This works for keystore
-// secrets produced by any operator version, so no extra data key is needed
-// in the secret.
+// in the given JKS keystore. The keystore is decoded in Go with the same
+// keystore-go library that encodes it — no keytool subprocess and no
+// temporary file is involved. This works for keystore secrets produced by any
+// operator version, so no extra data key is needed in the secret.
 //
-// ctx bounds the keytool child process (see CreateTruststore for the
-// deadline semantics, B5).
-func (cp *CertProcessor) KeystoreCertExpiry(ctx context.Context, keystore []byte, password string) (time.Time, error) {
-	ctx, cancel := withExecDeadline(ctx)
-	defer cancel()
+// The certificates are collected entry by entry in alphabetical alias order:
+// a private key entry contributes its certificate chain in chain order (the
+// end-entity certificate first), a trusted certificate entry its single
+// certificate. The keystores the operator produces hold a single private key
+// entry whose chain starts with the REST API server certificate, so the
+// returned NotAfter is the server certificate's expiry — the same first PEM
+// block the keytool -list -rfc pipeline used to parse.
+//
+// ctx is honoured with an explicit cancellation check before the keystore is
+// decoded (B5).
+func (cp *CertProcessor) KeystoreCertExpiry(ctx context.Context, keystoreBytes []byte, password string) (time.Time, error) {
+	// Honour caller cancellation before the JKS decoding runs (B5).
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while reading the keystore certificate expiry")
+		return time.Time{}, err
+	}
 
-	if len(keystore) == 0 {
+	if len(keystoreBytes) == 0 {
 		return time.Time{}, fmt.Errorf("keystore is empty")
 	}
-	tempDir, err := os.MkdirTemp("", "ssr-expiry-*")
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to create temp dir: %w", err)
-	}
-	defer cp.removeTempDir(tempDir)
 
-	ksPath := filepath.Join(tempDir, "keystore.jks")
-	if err := os.WriteFile(ksPath, keystore, 0o600); err != nil {
-		return time.Time{}, fmt.Errorf("failed to write keystore temp file: %w", err)
+	store := keystore.New(keystore.WithOrderedAliases())
+	if err := store.Load(bytes.NewReader(keystoreBytes), []byte(password)); err != nil {
+		err = fmt.Errorf("failed to decode the JKS keystore: %w", err)
+		cp.log.Error(err, "Failed to decode the JKS keystore")
+		return time.Time{}, err
 	}
 
-	cmd := keytoolListCmd(ctx, ksPath, password)
-	out, err := runCertCommand(ctx, cp, cmd)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("keytool failed to list keystore entries: %w", err)
+	for _, alias := range store.Aliases() {
+		var certs []keystore.Certificate
+		if store.IsPrivateKeyEntry(alias) {
+			chain, err := store.GetPrivateKeyEntryCertificateChain(alias)
+			if err != nil {
+				err = fmt.Errorf("failed to read the certificate chain of the keystore entry %q: %w", alias, err)
+				cp.log.Error(err, "Failed to read the keystore certificate chain")
+				return time.Time{}, err
+			}
+			certs = chain
+		} else if store.IsTrustedCertificateEntry(alias) {
+			entry, err := store.GetTrustedCertificateEntry(alias)
+			if err != nil {
+				err = fmt.Errorf("failed to read the keystore entry %q: %w", alias, err)
+				cp.log.Error(err, "Failed to read the keystore entry")
+				return time.Time{}, err
+			}
+			certs = []keystore.Certificate{entry.Certificate}
+		} else {
+			continue
+		}
+		// The first collected certificate decides: the chain order keeps the
+		// end-entity certificate first, so this is the certificate whose
+		// expiry drives the controller's renewal window.
+		for _, c := range certs {
+			cert, err := x509.ParseCertificate(c.Content)
+			if err != nil {
+				return time.Time{}, fmt.Errorf("failed to parse certificate from keystore: %w", err)
+			}
+			return cert.NotAfter, nil
+		}
 	}
-
-	// pem.Decode skips any leading keytool output before the first PEM block.
-	block, _ := pem.Decode(out)
-	if block == nil {
-		return time.Time{}, fmt.Errorf("no PEM certificate found in keytool output")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse certificate from keystore: %w", err)
-	}
-	return cert.NotAfter, nil
+	return time.Time{}, fmt.Errorf("no certificate found in the keystore")
 }
 
 // maxCommonNameLen is the PKI length limit for the certificate Subject
@@ -956,20 +872,4 @@ func selectCACertForKey(caCerts []*x509.Certificate, caKey crypto.Signer) (*x509
 		}
 	}
 	return nil, fmt.Errorf("no certificate in the CA bundle (ca.crt) matches the provided CA private key (ca.key); ensure ca.crt and ca.key come from the same CA generation so the REST API certificate is signed by a CA clients trust")
-}
-
-// saveFiles writes the server private key and certificate into dir using
-// restrictive permissions. The caller is responsible for removing dir.
-func (cp *CertProcessor) saveFiles(dir string, serverKey *rsa.PrivateKey, serverCert *x509.Certificate) (string, string, error) {
-	keyPath := filepath.Join(dir, "tls-server.key")
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}), 0o600); err != nil {
-		return "", "", fmt.Errorf("failed to write key file %q: %w", keyPath, err)
-	}
-
-	certPath := filepath.Join(dir, "tls-server.crt")
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCert.Raw}), 0o600); err != nil {
-		return "", "", fmt.Errorf("failed to write cert file %q: %w", certPath, err)
-	}
-
-	return keyPath, certPath, nil
 }
