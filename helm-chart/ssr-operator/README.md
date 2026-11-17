@@ -41,6 +41,27 @@ supported versions).
 - A leader-election `Role`/`RoleBinding` in the release namespace.
 - Optionally a metrics `Service` (`metrics.enabled`, default `true`).
 
+## Resource naming
+
+Namespaced resources (`Deployment`, `Service`, `ServiceAccount`, namespaced
+`Role`/`RoleBinding`) are named from the chart's `fullname` template, which
+derives from the Helm release name (e.g. release `ssr-operator` →
+`ssr-operator`, release `registry-two` → `registry-two-ssr-operator`). Keep
+`nameOverride` empty so the names vary per release.
+
+`ClusterRole`/`ClusterRoleBinding` objects live outside any namespace, so
+their names embed the release namespace (e.g.
+`<namespace>-ssr-operator-manager-role`): two installs of the chart in
+different namespaces — the primary use case of `rbac.namespaceScoped=true` —
+never collide on cluster-scoped names. Each binding always references the
+role rendered by the same release.
+
+> Upgrading an existing release renames these resources (the old
+> `strimzi-schema-registry-operator-*` names are replaced by the fullname- and
+> namespace-derived ones). Helm creates the renamed resources and orphans the
+> old ones; delete leftover `strimzi-schema-registry-operator-*` objects
+> manually after such an upgrade.
+
 ## CRD lifecycle
 
 The CRD lives in the chart's [`crds/`](crds/) directory, not under
@@ -114,5 +135,6 @@ cluster they reference) must live in the release namespace.
 | `metrics.secure` | `false` | Serve metrics over HTTPS with authn/authz. |
 | `metrics.port` | `8080` | Port the metrics endpoint binds to. |
 | `rbac.namespaceScoped` | `false` | `false`: cluster-wide `ClusterRole`/`ClusterRoleBinding`, watch all namespaces. `true`: namespaced `Role`/`RoleBinding` in the release namespace, watch only that namespace. |
-| `serviceAccount.create` / `name` | `true` / `strimzi-schema-registry-operator` | Service account for the operator. |
+| `nameOverride` / `fullnameOverride` | `""` / `""` | Keep empty so resource names derive from the release name (see [Resource naming](#resource-naming)); overrides pin a shared name across releases. |
+| `serviceAccount.create` / `name` | `true` / `""` | Service account for the operator; an empty `name` falls back to the fullname template. |
 | `cluster_roles` / `roles` | see `values.yaml` | Data-driven RBAC rule sets rendered by the chart. |

@@ -32,7 +32,11 @@ image:
     # runAsUser: 1000
 
 imagePullSecrets: []
-nameOverride: "strimzi-schema-registry-operator"
+# Keep nameOverride empty: resource names must derive from the fullname
+# template (release-name based) so two installs of the chart in different
+# namespaces never produce identically named resources. Set it only to pin a
+# shared app name across releases.
+nameOverride: ""
 fullnameOverride: ""
 
 serviceAccount:
@@ -42,7 +46,7 @@ serviceAccount:
   annotations: {}
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template
-  name: "strimzi-schema-registry-operator"
+  name: ""
 
 podAnnotations:
   kubectl.kubernetes.io/default-container: ssr-operator

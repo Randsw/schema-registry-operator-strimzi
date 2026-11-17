@@ -11,14 +11,17 @@ kind: {{ if $namespaced }}RoleBinding{{ else }}ClusterRoleBinding{{ end }}
 metadata:
   labels:
     {{- include "ssr-operator.labels" $ | nindent 4 }}
-  name: {{ include "ssr-operator.name" $ }}-{{ .name }}-binding
+  {{- /* Same name computation as clusterrole.yaml: cluster-scoped
+         renderings embed the release namespace so two installs of the chart
+         in different namespaces never collide. */}}
+  name: {{ include "ssr-operator.rbacName" (dict "ctx" $ "name" .name "clusterScoped" (not $namespaced)) }}-binding
   {{- if $namespaced }}
   namespace: {{ $.Release.Namespace }}
   {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: {{ if $namespaced }}Role{{ else }}ClusterRole{{ end }}
-  name: {{ include "ssr-operator.name" $ }}-{{ .name }}
+  name: {{ include "ssr-operator.rbacName" (dict "ctx" $ "name" .name "clusterScoped" (not $namespaced)) }}
 subjects:
 - kind: {{ .kind }}
   name: {{ include "ssr-operator.serviceAccountName" $ }}

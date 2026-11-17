@@ -1,7 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ssr-operator.name" . }}
+  # Named from fullname (release-name based) so two installs of the chart in
+  # different namespaces never produce identically named Deployments.
+  name: {{ include "ssr-operator.fullname" . }}
   labels:
     {{- include "ssr-operator.labels" . | nindent 4 }}
 spec:

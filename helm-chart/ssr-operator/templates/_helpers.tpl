@@ -61,3 +61,30 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Name of an RBAC object rendered from a cluster_roles/roles entry.
+
+Expects a dict with:
+  ctx           the root context ($)
+  name          the entry's .name (e.g. "manager-role")
+  clusterScoped true when the object renders cluster-wide
+                (ClusterRole/ClusterRoleBinding)
+
+Cluster-scoped names embed the release namespace: ClusterRole and
+ClusterRoleBinding objects live outside any namespace, so two installs of
+the chart in different namespaces (the primary use case of
+rbac.namespaceScoped=true) would otherwise collide on identical names and
+fail with Helm ownership/already-exists errors. Namespaced Role/RoleBinding
+names need no qualification: their namespace already isolates them. Role
+templates and their binding templates must call this helper with the same
+arguments so roleRef always points at the role rendered by the same release.
+*/}}
+{{- define "ssr-operator.rbacName" -}}
+{{- $base := printf "%s-%s" (include "ssr-operator.fullname" .ctx) .name -}}
+{{- if .clusterScoped -}}
+{{- printf "%s-%s" .ctx.Release.Namespace $base -}}
+{{- else -}}
+{{- $base -}}
+{{- end -}}
+{{- end }}

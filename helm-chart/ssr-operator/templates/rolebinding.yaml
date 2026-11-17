@@ -6,11 +6,13 @@ kind: RoleBinding
 metadata:
   labels:
     {{- include "ssr-operator.labels" $ | nindent 4 }}
-  name: {{ include "ssr-operator.name" $ }}-{{ .name }}-binding
+  {{- /* Same name computation as role.yaml so roleRef always points at the
+         role rendered by the same release. */}}
+  name: {{ include "ssr-operator.rbacName" (dict "ctx" $ "name" .name "clusterScoped" false) }}-binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "ssr-operator.name" $ }}-{{ .name }}
+  name: {{ include "ssr-operator.rbacName" (dict "ctx" $ "name" .name "clusterScoped" false) }}
 subjects:
 - kind: {{ .kind }}
   name: {{ include "ssr-operator.serviceAccountName" $ }}

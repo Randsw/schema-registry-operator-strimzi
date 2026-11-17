@@ -6,8 +6,10 @@ kind: Role
 metadata:
   labels:
     {{- include "ssr-operator.labels" $ | nindent 4 }}
-  name: {{ include "ssr-operator.name" $ }}-{{ .name }}
-rules: 
+  {{- /* Namespaced Role: no namespace qualification needed. rolebinding.yaml
+         must compute the same name for roleRef. */}}
+  name: {{ include "ssr-operator.rbacName" (dict "ctx" $ "name" .name "clusterScoped" false) }}
+rules:
 {{ toYaml .rules }}
 {{- end }}
 {{- end }}
