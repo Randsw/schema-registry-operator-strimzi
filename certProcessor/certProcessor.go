@@ -15,9 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -76,89 +73,6 @@ func GeneratePassword(length int, includeNumber bool, includeSpecial bool) (stri
 		password[i] = charSource[b.Int64()]
 	}
 	return string(password), nil
-}
-
-// writeTempFileIn writes content to a file with the given name inside dir.
-// The file is created with 0600 permissions so certificate/key material is
-// not readable by other users. The caller is responsible for removing dir
-// when it is no longer needed.
-//
-//lint:ignore U1000 temporarily unused — removed together with the remaining exec/temp infrastructure in the next Phase 5 subtask
-func writeTempFileIn(dir, name, content string) (string, error) {
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return "", fmt.Errorf("failed to write temp file %q: %w", path, err)
-	}
-	return path, nil
-}
-
-// passwordEnvVar is the name of the environment variable through which
-// keystore passwords are fed to the keytool and openssl child processes.
-// Passing passwords via the process environment (instead of command-line
-// arguments) keeps them out of /proc/<pid>/cmdline, which is readable by any
-// process on the node while the tool runs.
-const passwordEnvVar = "SSR_KEYSTORE_PASSWORD"
-
-// withPasswordEnv returns cmd with passwordEnvVar=password appended to its
-// environment (inheriting the operator process environment). Any occurrence
-// of the variable already present in the parent environment is dropped first
-// so the value set here always wins. The operator process environment itself
-// is never modified (no os.Setenv).
-func withPasswordEnv(cmd *exec.Cmd, password string) *exec.Cmd {
-	prefix := passwordEnvVar + "="
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, prefix) {
-			env = append(env, entry)
-		}
-	}
-	cmd.Env = append(env, prefix+password)
-	return cmd
-}
-
-// keytoolImportCertCmd builds the keytool invocation that imports a CA
-// certificate into a JKS truststore. The store password is fed through the
-// environment (passwordEnvVar), never as a command-line argument. The
-// command is bound to ctx so a hung keytool is killed instead of blocking
-// the caller forever (B5).
-func keytoolImportCertCmd(ctx context.Context, keystorePath, alias, certPath, password string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "keytool", "-importcert", "-keystore", keystorePath, "-alias", alias, "-file",
-		certPath, "-storepass:env", passwordEnvVar, "-storetype", "jks", "-trustcacerts", "-noprompt")
-	return withPasswordEnv(cmd, password)
-}
-
-// keytoolImportKeystoreCmd builds the keytool invocation that converts a
-// PKCS12 bundle into a JKS keystore. Source and destination store passwords
-// are fed through the environment (passwordEnvVar), never as command-line
-// arguments. The command is bound to ctx (B5).
-func keytoolImportKeystoreCmd(ctx context.Context, destKeystorePath, srcKeystorePath, password string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "keytool", "-importkeystore", "-deststorepass:env", passwordEnvVar, "-destkeystore", destKeystorePath,
-		"-deststoretype", "jks", "-srckeystore", srcKeystorePath, "-srcstoretype", "PKCS12", "-srcstorepass:env", passwordEnvVar, "-noprompt")
-	return withPasswordEnv(cmd, password)
-}
-
-// keytoolListCmd builds the keytool invocation that lists keystore entries in
-// RFC 1421 (PEM) form. The store password is fed through the environment
-// (passwordEnvVar), never as a command-line argument. The command is bound
-// to ctx (B5).
-func keytoolListCmd(ctx context.Context, keystorePath, password string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "keytool", "-list", "-rfc", "-keystore", keystorePath, "-storepass:env", passwordEnvVar, "-noprompt")
-	return withPasswordEnv(cmd, password)
-}
-
-// opensslExportPKCS12Cmd builds the openssl invocation that bundles a
-// certificate and private key into a PKCS12 file. When caCertPath is
-// non-empty the certificate chain is included (-chain -CAfile). The export
-// password is fed through the environment (passwordEnvVar), never as a
-// command-line argument. The command is bound to ctx (B5).
-func opensslExportPKCS12Cmd(ctx context.Context, certPath, keyPath, caCertPath, name, outPath, password string) *exec.Cmd {
-	args := []string{"pkcs12", "-export", "-in", certPath, "-inkey", keyPath}
-	if caCertPath != "" {
-		args = append(args, "-chain", "-CAfile", caCertPath)
-	}
-	args = append(args, "-name", name, "-passout", "env:"+passwordEnvVar, "-out", outPath)
-	cmd := exec.CommandContext(ctx, "openssl", args...)
-	return withPasswordEnv(cmd, password)
 }
 
 // truststoreAlias returns the alias under which the CA certificate at index
@@ -958,22 +872,4 @@ func selectCACertForKey(caCerts []*x509.Certificate, caKey crypto.Signer) (*x509
 		}
 	}
 	return nil, fmt.Errorf("no certificate in the CA bundle (ca.crt) matches the provided CA private key (ca.key); ensure ca.crt and ca.key come from the same CA generation so the REST API certificate is signed by a CA clients trust")
-}
-
-// saveFiles writes the server private key and certificate into dir using
-// restrictive permissions. The caller is responsible for removing dir.
-//
-//lint:ignore U1000 temporarily unused — removed together with the remaining exec/temp infrastructure in the next Phase 5 subtask
-func (cp *CertProcessor) saveFiles(dir string, serverKey *rsa.PrivateKey, serverCert *x509.Certificate) (string, string, error) {
-	keyPath := filepath.Join(dir, "tls-server.key")
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}), 0o600); err != nil {
-		return "", "", fmt.Errorf("failed to write key file %q: %w", keyPath, err)
-	}
-
-	certPath := filepath.Join(dir, "tls-server.crt")
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCert.Raw}), 0o600); err != nil {
-		return "", "", fmt.Errorf("failed to write cert file %q: %w", certPath, err)
-	}
-
-	return keyPath, certPath, nil
 }

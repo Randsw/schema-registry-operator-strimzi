@@ -131,10 +131,10 @@ func validateUserTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSche
 // of a kubernetes.io/tls-shaped user TLS secret does not parse. Validating
 // the material here surfaces a broken secret as Ready=False/InvalidTLSSecret
 // (with a Warning event) before any resource is created, instead of a late
-// ReconcileError from the openssl/keytool conversion deep in the certificate
-// pipeline. tls.crt must parse as a certificate chain (the same parser the
-// conversion pipeline applies to ca.crt); tls.key must decode as a PEM
-// private key in a format the pipeline's openssl accepts.
+// ReconcileError from the JKS conversion deep in the certificate pipeline.
+// tls.crt must parse as a certificate chain (the same parser the conversion
+// pipeline applies to ca.crt); tls.key must decode as a PEM private key in a
+// format the conversion accepts.
 func pemTLSSecretMaterialError(secretName string, secret *v1.Secret) string {
 	if _, err := certprocessor.StringToCertificates(string(secret.Data["tls.crt"])); err != nil {
 		return fmt.Sprintf("user-provided TLS secret %q has an unparseable tls.crt: %v", secretName, err)
@@ -146,12 +146,12 @@ func pemTLSSecretMaterialError(secretName string, secret *v1.Secret) string {
 }
 
 // pemPrivateKeyParses reports whether keyPEM holds a PEM block that parses as
-// a private key in any of the formats the conversion pipeline's openssl
-// accepts: PKCS#1 RSA, SEC1 EC and PKCS#8 (which also covers Ed25519). The
-// check is deliberately more permissive than the cluster CA key parser
+// a private key in any of the formats the conversion pipeline accepts:
+// PKCS#1 RSA, SEC1 EC and PKCS#8 (which also covers Ed25519). The check is
+// deliberately more permissive than the cluster CA key parser
 // (certprocessor.StringToPrivateKey, which only needs RSA and ECDSA): a user
-// TLS key in another openssl-supported format must not be rejected at
-// validation time when the pipeline could consume it.
+// TLS key in another supported format must not be rejected at validation
+// time when the pipeline could consume it.
 func pemPrivateKeyParses(keyPEM string) bool {
 	block, _ := pem.Decode([]byte(keyPEM))
 	if block == nil {
@@ -173,8 +173,8 @@ func pemPrivateKeyParses(keyPEM string) bool {
 // regenerated only when the user secret changes. The secret's optional
 // ca.crt is threaded through as the issuing chain of the exported PKCS12, so
 // the derived keystore validates for clients trusting that CA even when
-// tls.crt holds only the leaf certificate. ctx bounds the openssl and
-// keytool child processes in the conversion (B5).
+// tls.crt holds only the leaf certificate. ctx is honoured with an explicit
+// cancellation check in the conversion (B5).
 func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
 	ctx context.Context,
 	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,

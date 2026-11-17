@@ -1155,23 +1155,22 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 	userPassword := string(userPasswordData)
 
 	// A pre-built user.p12 is encrypted with the KafkaUser's user.password:
-	// keytool -importkeystore unlocks the source store with the same
-	// password it assigns to the destination, so an empty value cannot be
-	// replaced by a generated one (the generated password would not open the
-	// p12 and the import fails). Reject it up front with a clear validation
-	// error instead of a broken keystore generation downstream. On the PEM
-	// path (no user.p12) an empty password is fine: the p12 is created with
-	// the generated password itself.
+	// the PKCS12 decode unlocks the source store with that password, so an
+	// empty value cannot be replaced by a generated one (the generated
+	// password would not open the p12 and the decode fails). Reject it up
+	// front with a clear validation error instead of a broken keystore
+	// generation downstream. On the PEM path (no user.p12) an empty password
+	// is fine: the keystore is sealed with the generated password itself.
 	if clientp12 != "" && len(userPasswordData) == 0 {
 		return nil, false, go_err.New("user.password field is empty in the KafkaUser secret; it is required as the PKCS12 keystore password when user.p12 is present")
 	}
 
 	// Validate the certificate material the keystore pipeline dereferences.
 	// A pre-built user.p12 is used directly and makes the PEM fields
-	// unnecessary; otherwise the openssl pkcs12 export requires all three
-	// PEM fields (ca.crt for -CAfile/-chain, user.crt for -in, user.key for
-	// -inkey), and a missing key would only surface as a cryptic openssl
-	// failure.
+	// unnecessary; otherwise the PEM path needs all three fields (ca.crt for
+	// the issuing chain, user.crt for the end-entity certificate, user.key
+	// for the private key), and a missing key would only surface as a
+	// "no certificate matches the provided private key" failure.
 	if clientp12 == "" {
 		var missing []string
 		for _, key := range []string{"ca.crt", "user.crt", "user.key"} {
