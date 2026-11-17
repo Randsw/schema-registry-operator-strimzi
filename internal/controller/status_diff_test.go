@@ -25,7 +25,6 @@ import (
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	eventsfake "k8s.io/client-go/tools/events"
@@ -87,29 +86,10 @@ func newSteadyStateFixture(t *testing.T) statusCountFixture {
 		},
 	}
 
-	// A Deployment in its desired shape (stable selector, current spec hash,
-	// current bootstrap env) so reconciliation has no spec change to apply.
-	hash, err := computeSpecHash(inst)
-	if err != nil {
-		t.Fatalf("failed to compute spec hash: %v", err)
-	}
+	// A Deployment in its desired shape (operator-complete, built by
+	// buildDeploymentSpec) so reconciliation has no spec change to apply.
 	bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
-	dep := &apps.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        inst.Name + deploySuffix,
-			Namespace:   inst.Namespace,
-			Annotations: map[string]string{keyPrefix + "/specHash": hash},
-		},
-		Spec: apps.DeploymentSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{
-					{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1",
-						Env: []corev1.EnvVar{{Name: bootstrapServersEnv, Value: bootstrap}}},
-				}},
-			},
-		},
-	}
+	dep := newOperatorDeployment(t, scheme, inst, bootstrap, "")
 
 	// The desired Service, already owned by the CR (createService sets the
 	// controller reference), so reconciliation has no adoption or update to
@@ -250,8 +230,12 @@ func TestReconcileStatusUpdateCounting(t *testing.T) {
 		if err := f.r.Get(context.Background(), types.NamespacedName{Name: f.inst.Name + deploySuffix, Namespace: f.inst.Namespace}, dep); err != nil {
 			t.Fatalf("failed to get the Deployment: %v", err)
 		}
+		// The rollout has fully converged: every replica updated and ready,
+		// and the status reflects the current generation.
 		dep.Status.Replicas = 1
 		dep.Status.ReadyReplicas = 1
+		dep.Status.UpdatedReplicas = 1
+		dep.Status.ObservedGeneration = dep.Generation
 		if err := f.r.Status().Update(context.Background(), dep); err != nil {
 			t.Fatalf("failed to update the Deployment status: %v", err)
 		}

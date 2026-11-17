@@ -189,6 +189,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 
 	// Schema Registry REST API TLS secret
 	var TLSSecretName string
+	var tlsResourceVersion string
 	if instance.Spec.SecureHTTP {
 		if instance.Spec.TLSSecretName == "" {
 			TLSSecret, exists, err := r.createTLSSecret(instance, ctx, logger, kafkaClusterName)
@@ -207,6 +208,12 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 			}
 			logger.Info("Secret for Schema Registry TLS created/updated successfully", "Secret.Name", TLSSecret.Name)
 			TLSSecretName = TLSSecret.Name
+			// Record the operator-managed REST API TLS secret version so the
+			// tlsVersion rollout annotation is present from creation: the
+			// annotation-driven renewal check (handleTLSCertExpiry) then
+			// compares against a recorded value instead of rolling a freshly
+			// created deployment one extra time.
+			tlsResourceVersion = TLSSecret.ResourceVersion
 		} else {
 			TLSSecretName = instance.Spec.TLSSecretName
 		}
@@ -226,7 +233,6 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 	// Track the user-provided REST API TLS secret version so rotating the
 	// secret (e.g. a cert-manager reissue) triggers a rollout: the Schema
 	// Registry JVM reads the JKS keystore once at startup.
-	tlsResourceVersion := ""
 	if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName != "" {
 		userTLSSecret := &v1.Secret{}
 		if err := r.Get(ctx, types.NamespacedName{Name: TLSSecretName, Namespace: instance.Namespace}, userTLSSecret); err != nil {
@@ -287,7 +293,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	podVolume, containerVolumeMount := buildPodVolumes(instance, TLSSecretName, auth)
 
 	listenerPort, scheme := listenerPortAndScheme(instance)
-	readinessProbe, livenessProbe, startupProbe := buildProbes(listenerPort, scheme)
+	readinessProbe, livenessProbe, startupProbe := buildProbes(listenerPort, scheme, authenticationMethodConfigured(instance.Spec.Configuration))
 
 	podSpec.Spec.Containers[0].ReadinessProbe = readinessProbe
 	podSpec.Spec.Containers[0].LivenessProbe = livenessProbe
@@ -344,17 +350,21 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	podSpec.Labels = mergeStringMaps(podSpec.Labels, ls)
 	// Start from the user annotations so they are preserved, then set the
 	// operator-managed rollout markers (which override conflicting keys).
-	podSpec.Annotations = mergeStringMaps(podSpec.Annotations, map[string]string{keyPrefix + "/jksVersion": jksResourceVersion})
+	podSpec.Annotations = mergeStringMaps(podSpec.Annotations, map[string]string{jksVersionKey: jksResourceVersion})
 	// Track the KafkaUser secret version for SASL modes so credential changes
 	// trigger a rollout without rebuilding any JKS material.
 	if auth.NeedsSASL {
 		podSpec.Annotations[saslUserVersionKey] = saslUserResourceVersion
 	}
 
-	// Track the user-provided REST API TLS secret version so rotating the
-	// secret triggers a rollout. Only set for user-provided secrets; the
-	// operator-managed TLS secret records its version on renewal instead
-	// (handleTLSCertExpiry), preserving its existing semantics.
+	// Track the REST API TLS secret version so rotating the secret triggers
+	// a rollout: user-provided secrets record the user secret's version,
+	// operator-managed secrets the <name>-tls secret's version. Recording
+	// the operator-managed version at build time keeps the annotation
+	// present from creation, so the annotation-driven renewal check
+	// (handleTLSCertExpiry) compares against a recorded value instead of
+	// rolling a freshly created deployment one extra time, and a spec
+	// update never drops the marker the rotation handlers maintain.
 	if tlsResourceVersion != "" {
 		podSpec.Annotations[tlsVersionKey] = tlsResourceVersion
 	}
@@ -452,17 +462,22 @@ func restAPIKeystoreLocation(keystoreType string) string {
 // reservedConfigurationKeys are Confluent Schema Registry properties managed by
 // the operator and therefore not settable through spec.configuration.
 //
-// The deprecated spellings (schema.registry.inter.instance.protocol) stay
-// reserved until a release note announces their removal; the modern
-// equivalents (ssl.client.authentication, inter.instance.protocol) are
-// operator-managed from the start. ssl.keystore.type is operator-managed
-// because it follows spec.keystoretype.
+// The deprecated spellings (schema.registry.inter.instance.protocol,
+// ssl.client.auth) stay reserved until a release note announces their removal;
+// the modern equivalents (ssl.client.authentication, inter.instance.protocol)
+// are operator-managed from the start. ssl.keystore.type is operator-managed
+// because it follows spec.keystoretype, and
+// kafkastore.topic.replication.factor follows
+// spec.kafkastoretopicreplicationfactor — the operator omits that env var
+// entirely when the spec field is unset, so a user-supplied value must not
+// leak through and override Confluent's built-in default.
 var reservedConfigurationKeys = map[string]struct{}{
 	"kafkastore.bootstrap.servers":            {},
 	"kafkastore.security.protocol":            {},
 	"listeners":                               {},
 	"host.name":                               {},
 	"kafkastore.topic":                        {},
+	"kafkastore.topic.replication.factor":     {},
 	"schema.registry.group.id":                {},
 	"master.eligibility":                      {},
 	"schema.compatibility.level":              {},
@@ -470,25 +485,38 @@ var reservedConfigurationKeys = map[string]struct{}{
 	"schema.registry.inter.instance.protocol": {},
 	"inter.instance.protocol":                 {},
 	"ssl.client.authentication":               {},
+	"ssl.client.auth":                         {},
 	"ssl.keystore.type":                       {},
 	"ssl.key.password":                        {},
 }
 
-// reservedConfigurationPrefixes are property key prefixes managed by the operator.
+// reservedConfigurationPrefixes are property key prefixes managed by the
+// operator. ssl.truststore.* is reserved because the REST API TLS setup is
+// rendered by the operator (and ssl.truststore.type must follow the keystore
+// type when REST API mutual TLS is enabled), so user-supplied truststore
+// properties must not bypass the operator-managed env vars.
 var reservedConfigurationPrefixes = []string{
 	"kafkastore.ssl.",
 	"kafkastore.sasl.",
 	"ssl.keystore.",
+	"ssl.truststore.",
 }
 
 // isReservedConfigurationKey reports whether the given Confluent property key is
 // operator-managed and must be ignored when supplied through spec.configuration.
+//
+// The key is normalized before matching: Confluent property names are
+// case-insensitive and tolerate dashes in place of dots (both spellings
+// convert to the same SCHEMA_REGISTRY_* env var), so inputs like
+// SSL-CLIENT-AUTH or Ssl.ClientAuth must be caught exactly like the canonical
+// lowercase dot-separated form.
 func isReservedConfigurationKey(key string) bool {
-	if _, ok := reservedConfigurationKeys[key]; ok {
+	normalized := strings.ToLower(strings.ReplaceAll(key, "-", "."))
+	if _, ok := reservedConfigurationKeys[normalized]; ok {
 		return true
 	}
 	for _, prefix := range reservedConfigurationPrefixes {
-		if strings.HasPrefix(key, prefix) {
+		if strings.HasPrefix(normalized, prefix) {
 			return true
 		}
 	}
@@ -746,16 +774,26 @@ func buildPodVolumes(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 
 // buildProbes constructs readiness, liveness, and startup probes for the Schema Registry container.
 //
-// When SecureHTTP is enabled (scheme == HTTPS), readiness and startup probes use TCPSocket
-// instead of HTTPGet. This avoids TLS certificate verification failures: Kubernetes kubelet
-// does not support insecure-skip-verify for HTTPGet probes, so HTTPS probes against self-signed
-// certificates (generated from the Strimzi cluster CA) would fail perpetually.
-// The liveness probe already uses TCPSocket unconditionally for the same reason.
-func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe, *v1.Probe) {
+// Readiness and startup probes use TCPSocket instead of HTTPGet in two cases:
+//
+//   - When SecureHTTP is enabled (scheme == HTTPS). This avoids TLS
+//     certificate verification failures: the Kubernetes kubelet does not
+//     support insecure-skip-verify for HTTPGet probes, so HTTPS probes against
+//     self-signed certificates (generated from the Strimzi cluster CA) would
+//     fail perpetually.
+//   - When authentication.method is configured in spec.configuration. An
+//     authenticated listener rejects unauthenticated HTTP GET requests with
+//     401 Unauthorized, so the probes would fail perpetually; a TCP connect
+//     probe works regardless of authentication.
+//
+// Without authentication the HTTP probe behavior is kept. The liveness probe
+// uses TCPSocket unconditionally for the same reasons.
+func buildProbes(listenerPort int32, scheme v1.URIScheme, authConfigured bool) (*v1.Probe, *v1.Probe, *v1.Probe) {
 	var readinessHandler, startupHandler v1.ProbeHandler
 
-	if scheme == v1.URISchemeHTTPS {
-		// Self-signed cert: TCPSocket avoids TLS verification failures.
+	if scheme == v1.URISchemeHTTPS || authConfigured {
+		// Self-signed cert or authenticated listener: TCPSocket avoids TLS
+		// verification failures and 401 responses.
 		readinessHandler = v1.ProbeHandler{
 			TCPSocket: &v1.TCPSocketAction{
 				Port: intstr.IntOrString{IntVal: listenerPort},
@@ -801,15 +839,33 @@ func buildProbes(listenerPort int32, scheme v1.URIScheme) (*v1.Probe, *v1.Probe,
 		FailureThreshold: 3,
 	}
 
+	// The startup budget (10s delay + 12 x 10s = 130s) leaves room for JVM
+	// startup plus the first Kafka topic initialization, which the former
+	// 30s + 3 x 10s = 60s budget could exhaust.
 	startupProbe := &v1.Probe{
 		ProbeHandler:        startupHandler,
-		InitialDelaySeconds: 30,
+		InitialDelaySeconds: 10,
 		PeriodSeconds:       10,
 		TimeoutSeconds:      5,
-		FailureThreshold:    3,
+		FailureThreshold:    12,
 	}
 
 	return readinessProbe, livenessProbe, startupProbe
+}
+
+// authenticationMethodConfigured reports whether the user configured a
+// non-empty authentication.method property in spec.configuration. The lookup
+// normalizes dash and case variants (authentication-method,
+// AUTHENTICATION.METHOD) the same way Confluent property spellings convert to
+// the same SCHEMA_REGISTRY_* env var.
+func authenticationMethodConfigured(configuration map[string]string) bool {
+	for key, value := range configuration {
+		normalized := strings.ToLower(strings.ReplaceAll(key, "-", "."))
+		if normalized == "authentication.method" && value != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // clientAuthNeedsTruststoreSecret reports whether REST API mutual TLS requires
@@ -953,8 +1009,8 @@ func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimzireg
 	if err == nil {
 		if isUpToDate(jks_secret.Annotations) {
 			logger.V(1).Info("JKS secret is up-to-date")
-			// Return the existing secret (not nil) so the caller has it for
-			// updateDeployment without needing to re-fetch.
+			// Return the existing secret (not nil) so the caller has its current
+			// ResourceVersion for the rollout annotation without re-fetching.
 			return jks_secret, true, nil
 		}
 		logger.V(1).Info("JKS secret is stale; caller will update it in place")
@@ -1339,6 +1395,34 @@ func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistr
 		return nil, err
 	}
 	return svc, nil
+}
+
+// mergeServiceAnnotations merges the desired operator-managed Service
+// annotations over the existing ones without deleting keys the operator does
+// not currently manage. Foreign annotations (set by users or other
+// controllers, e.g. cloud LoadBalancer or ExternalDNS) are preserved;
+// operator-managed keys (the "type" marker and the spec.service.annotations
+// passthrough) are added or updated in place.
+//
+// Known limitation: a passthrough annotation that the user later removes from
+// spec.service.annotations lingers on the Service — without tracking state
+// the operator cannot distinguish it from a foreign key, and it must never
+// delete keys it does not currently manage.
+func mergeServiceAnnotations(existing, desired map[string]string) map[string]string {
+	return mergeStringMaps(existing, desired)
+}
+
+// serviceAnnotationsDrifted reports whether any operator-managed annotation —
+// every key present in the desired set — differs on the existing Service.
+// Foreign annotations are deliberately ignored: they are not operator-managed,
+// must be preserved on update, and must never trigger an update loop.
+func serviceAnnotationsDrifted(existing, desired map[string]string) bool {
+	for key, want := range desired {
+		if existing[key] != want {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeServicePorts returns the desired service ports with API-server-allocated
@@ -1766,60 +1850,16 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 	return jksTLSSecret, exists, nil
 }
 
-func (r *StrimziSchemaRegistryReconciler) updateDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
-	ctx context.Context, logger logr.Logger, jksSecret *v1.Secret) (*apps.Deployment, error) {
-	// Update deployment
-	dep := &apps.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, dep)
-	if err != nil {
-		logger.Error(err, "Failed to get deployment after user or cluster CA secret changed")
-		return nil, err
-	}
-	if jksSecret == nil {
-		jksSecret = &v1.Secret{}
-		err = r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, jksSecret)
-		if err != nil {
-			// A missing -jks secret is not an error: PLAINTEXT and
-			// SASL_PLAINTEXT without clientauth never have one. The only
-			// caller passing nil (handleTLSCertExpiry) only needs the
-			// tlsVersion annotation, so skip the jksVersion annotation
-			// instead of failing every renewal reconcile in those modes.
-			if errors.IsNotFound(err) {
-				logger.Info("No jks secret found; skipping the jksVersion annotation", "Secret.Name", instance.Name+jksSecretSuffix)
-				return dep, nil
-			}
-			logger.Error(err, "Failed to get jks secret after user or cluster CA secret changed")
-			return nil, err
-		}
-	}
-	if dep.Spec.Template.Annotations == nil {
-		dep.Spec.Template.Annotations = make(map[string]string)
-	}
-	dep.Spec.Template.Annotations[keyPrefix+"/jksVersion"] = jksSecret.ResourceVersion
-	return dep, nil
-}
-
-// writeStringMapToHash writes a string map to the hash in sorted key order so
-// hashing is deterministic regardless of map iteration order.
-func writeStringMapToHash(h io.Writer, m map[string]string) error {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		if _, err := fmt.Fprintf(h, "%s=%s", key, m[key]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // computeSpecHash computes a hash of the relevant spec fields to detect changes.
 // The hash covers CompatibilityLevel, SecureHTTP, ClientAuth, HeapOpts, Listener,
 // SecurityProtocol, TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor,
 // SchemaRegistryGroupID, MasterEligibility, Configuration, and the full PodTemplateSpec —
 // all fields that affect the deployment spec or service ports.
+//
+// Service passthrough annotations/labels and NetworkPolicy enablement are
+// deliberately excluded: they change the Service or NetworkPolicy objects but
+// never the Schema Registry pods, and both are reconciled independently, so
+// including them would cause full pod restarts on unrelated metadata edits.
 //
 // FNV-64a is used instead of the former FNV-32 to reduce the collision
 // probability across spec versions (64-bit vs 32-bit digest). Changing the
@@ -1910,22 +1950,6 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 		if _, err := fmt.Fprintf(h, "%s=%s", key, instance.Spec.Configuration[key]); err != nil {
 			return "", fmt.Errorf("failed to write configuration entry to hash: %w", err)
 		}
-	}
-
-	// Service passthrough annotations/labels affect the rendered Service, so
-	// they participate in the hash (in sorted key order for determinism).
-	if instance.Spec.Service != nil {
-		if err := writeStringMapToHash(h, instance.Spec.Service.Annotations); err != nil {
-			return "", fmt.Errorf("failed to write service annotations to hash: %w", err)
-		}
-		if err := writeStringMapToHash(h, instance.Spec.Service.Labels); err != nil {
-			return "", fmt.Errorf("failed to write service labels to hash: %w", err)
-		}
-	}
-
-	// NetworkPolicy enablement affects whether the NetworkPolicy is created.
-	if _, err := fmt.Fprintf(h, "%t", networkPolicyEnabled(instance)); err != nil {
-		return "", fmt.Errorf("failed to write NetworkPolicy enabled to hash: %w", err)
 	}
 
 	// Include the full PodTemplateSpec so that container image, resources,
@@ -2027,6 +2051,18 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 			}
 		} else {
 			TLSSecretName = instance.Name + tlsSecretSuffix
+			// Record the operator-managed REST API TLS secret version so the
+			// tlsVersion rollout annotation survives spec updates (instead of
+			// being dropped, which would make the next renewal check see a
+			// missing marker and roll the pods again) and the annotation-
+			// driven renewal check compares against a recorded value. A
+			// missing secret (recreation pending) records nothing.
+			tlsSecret := &v1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{Name: TLSSecretName, Namespace: instance.Namespace}, tlsSecret); err != nil && !errors.IsNotFound(err) {
+				return nil, false, fmt.Errorf("failed to get operator-managed TLS secret: %w", err)
+			} else if err == nil {
+				tlsResourceVersion = tlsSecret.ResourceVersion
+			}
 		}
 	}
 
@@ -2034,6 +2070,22 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	desired, configOverridden, err := r.buildDeploymentSpec(instance, kafkaBootstrapServer, kafkaClusterName, jksResourceVersion, saslUserResourceVersion, tlsResourceVersion, TLSSecretName, auth, logger)
 	if err != nil {
 		return nil, false, err
+	}
+
+	// Preserve the operator-managed rollout markers the desired build cannot
+	// determine because their secret is currently missing (recreation
+	// pending in the rotation handlers). buildDeploymentSpec records the
+	// secret's ResourceVersion whenever the secret exists, so a spec patch
+	// would otherwise drop the marker — and the next rotation check would
+	// see it missing and roll the pods a second time. When the secret
+	// exists, the desired value (the current ResourceVersion) is fresher and
+	// wins, so a pending rollout is never suppressed.
+	if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName == "" && tlsResourceVersion == "" {
+		preservePodTemplateAnnotation(found, desired, tlsVersionKey)
+	}
+	if jksResourceVersion == "" &&
+		(auth.NeedsTruststore || auth.NeedsKeystore || clientAuthNeedsTruststoreSecret(instance, auth)) {
+		preservePodTemplateAnnotation(found, desired, jksVersionKey)
 	}
 
 	// Compute desired spec hash
@@ -2057,43 +2109,75 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	// var changes; without the comparison below the pods would keep the
 	// stale bootstrap address forever, because the Kafka watch re-enqueues
 	// reconciliation but every pass short-circuits on the unchanged hash.
-	if existingHash == desiredHash {
+	// The Deployment labels are compared too: they carry the image-derived
+	// version and the strimzi.io/cluster label, neither of which
+	// participates in the spec hash, so a CR label change must still
+	// propagate to the Deployment metadata.
+	bootstrapDrift := false
+	if current := deploymentBootstrapServers(found); current != "" && current != kafkaBootstrapServer {
 		// The comparison only applies when the deployment actually carries
 		// the operator-managed env var: an absent variable (a deployment
 		// predating the check, or stripped by hand) must not be treated as
 		// drift, which would roll pods on the very first reconcile after an
 		// operator upgrade.
-		if current := deploymentBootstrapServers(found); current != "" && current != kafkaBootstrapServer {
-			logger.Info(deploymentUpdateReason(existingHash, desiredHash),
-				"oldBootstrapServers", current, "newBootstrapServers", kafkaBootstrapServer)
-		} else {
-			// Steady state: do NOT emit ConfigKeyOverridden events here. The
-			// desired spec is rebuilt on every reconcile, so emitting on each
-			// pass would spam a Warning event per reserved configuration key
-			// per reconcile. The user was warned when the key was first
-			// applied (createDeployment and spec-change paths below).
-			return found, false, nil
-		}
-	} else {
+		bootstrapDrift = true
+	}
+	labelsDrifted := !equality.Semantic.DeepEqual(found.Labels, desired.Labels)
+	// The live spec is compared against the desired spec on every reconcile —
+	// even when the hash matches — so manual edits to operator-managed fields
+	// (image, env, resources, probes, volumes, labels, annotations) are
+	// reverted instead of being ignored until the next CR change.
+	pinReplicas := instance.Spec.Replicas != nil
+	specDrift := deploymentSpecDrifted(found, desired, pinReplicas)
+
+	if existingHash == desiredHash && !bootstrapDrift && !labelsDrifted && !specDrift {
+		// Steady state: do NOT emit ConfigKeyOverridden events here. The
+		// desired spec is rebuilt on every reconcile, so emitting on each
+		// pass would spam a Warning event per reserved configuration key
+		// per reconcile. The user was warned when the key was first
+		// applied (createDeployment and spec-change paths below).
+		return found, false, nil
+	}
+	if existingHash != desiredHash {
 		logger.Info(deploymentUpdateReason(existingHash, desiredHash),
 			"oldHash", existingHash, "newHash", desiredHash)
+	} else if bootstrapDrift {
+		logger.Info(deploymentUpdateReason(existingHash, desiredHash),
+			"oldBootstrapServers", deploymentBootstrapServers(found), "newBootstrapServers", kafkaBootstrapServer)
+	} else if specDrift {
+		logger.Info("Deployment spec drifted from the desired spec; updating")
+	} else {
+		logger.Info("Deployment labels drifted from the desired labels; updating")
 	}
 
-	// The spec actually changed: warn about operator-managed keys that were
-	// ignored while building the desired spec (B2).
-	r.emitConfigOverriddenEvents(instance, configOverridden)
-
-	// Update the deployment spec to match desired state. When the CR sets
-	// spec.replicas (B20), the desired replica count wins and a manual
-	// `kubectl scale` is reverted on the next spec change. When the CR leaves
-	// replicas unset, the operator still never desires a specific replica
-	// count: the live Spec.Replicas — set by manual `kubectl scale` edits —
-	// must survive the update instead of being reset (B6).
-	replicas := found.Spec.Replicas
-	found.Spec = desired.Spec
-	if instance.Spec.Replicas == nil {
-		found.Spec.Replicas = replicas
+	// The CR spec actually changed: warn about operator-managed keys that
+	// were ignored while building the desired spec (B2). A labels-only,
+	// bootstrap-only or manual-edit drift does not touch the CR
+	// configuration, so the events are not repeated for it.
+	if existingHash != desiredHash || bootstrapDrift {
+		r.emitConfigOverriddenEvents(instance, configOverridden)
 	}
+
+	// Patch only the drifted fields instead of replacing the whole spec.
+	// When the CR sets spec.replicas (B20), the desired replica count wins
+	// and a manual `kubectl scale` is reverted on the next spec change. When
+	// the CR leaves replicas unset, the operator still never desires a
+	// specific replica count: the live Spec.Replicas — set by manual
+	// `kubectl scale` edits — must survive the update instead of being reset
+	// (B6). The pod template is replaced only when it drifted; the rollout
+	// markers the desired build could not determine were preserved into it
+	// above, so the patch never clobbers or spuriously resets them.
+	if pinReplicas && !equality.Semantic.DeepEqual(found.Spec.Replicas, desired.Spec.Replicas) {
+		found.Spec.Replicas = desired.Spec.Replicas
+	}
+	if !podTemplateEqual(&found.Spec.Template, &desired.Spec.Template) {
+		found.Spec.Template = *desired.Spec.Template.DeepCopy()
+	}
+
+	// Sync the Deployment labels so CR label changes (the strimzi.io/cluster
+	// label and the image-derived version label) propagate to the
+	// Deployment metadata instead of lingering stale forever.
+	found.Labels = desired.Labels
 
 	// Update annotations to trigger rollout
 	if found.Spec.Template.Annotations == nil {
@@ -2108,6 +2192,174 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	found.Annotations[keyPrefix+"/specHash"] = desiredHash
 
 	return found, true, nil
+}
+
+// preservePodTemplateAnnotation carries an existing pod-template annotation
+// value from the live Deployment into the desired spec, so a spec patch does
+// not drop a rollout marker the desired build could not determine.
+func preservePodTemplateAnnotation(found, desired *apps.Deployment, key string) {
+	if found.Spec.Template.Annotations == nil {
+		return
+	}
+	value, ok := found.Spec.Template.Annotations[key]
+	if !ok || value == "" {
+		return
+	}
+	if desired.Spec.Template.Annotations == nil {
+		desired.Spec.Template.Annotations = make(map[string]string)
+	}
+	desired.Spec.Template.Annotations[key] = value
+}
+
+// deploymentSpecDrifted reports whether the live Deployment spec differs from
+// the desired spec in fields the operator manages: the replica count (only
+// when the CR pins it — an unpinned CR never desires a specific count, so a
+// manual `kubectl scale` survives, B6) and the pod template. API-server
+// defaults for fields the desired build leaves unset are ignored, so a
+// freshly defaulted Deployment never reads as drifted (which would update it
+// on every reconcile).
+func deploymentSpecDrifted(found, desired *apps.Deployment, pinReplicas bool) bool {
+	if pinReplicas && !equality.Semantic.DeepEqual(found.Spec.Replicas, desired.Spec.Replicas) {
+		return true
+	}
+	return !podTemplateEqual(&found.Spec.Template, &desired.Spec.Template)
+}
+
+// podTemplateEqual compares the live pod template against the desired one,
+// clearing API-server defaults on a copy of the live template wherever the
+// desired template leaves the field unset, so the comparison only reports
+// drift in fields the operator actually manages.
+func podTemplateEqual(found, desired *v1.PodTemplateSpec) bool {
+	live := found.DeepCopy()
+	normalizePodSpecForCompare(&live.Spec, &desired.Spec)
+	return equality.Semantic.DeepEqual(*live, *desired)
+}
+
+// normalizePodSpecForCompare clears API-server defaults on the live pod spec
+// (modified in place; callers pass a deep copy) wherever the desired spec
+// leaves the field unset.
+func normalizePodSpecForCompare(live, desired *v1.PodSpec) {
+	if desired.RestartPolicy == "" {
+		live.RestartPolicy = ""
+	}
+	if desired.TerminationGracePeriodSeconds == nil {
+		live.TerminationGracePeriodSeconds = nil
+	}
+	if desired.DNSPolicy == "" {
+		live.DNSPolicy = ""
+	}
+	if desired.SchedulerName == "" {
+		live.SchedulerName = ""
+	}
+	if desired.EnableServiceLinks == nil {
+		live.EnableServiceLinks = nil
+	}
+	if desired.PreemptionPolicy == nil {
+		live.PreemptionPolicy = nil
+	}
+	if desired.ServiceAccountName == "" {
+		live.ServiceAccountName = ""
+	}
+	// The API server materializes an empty (non-nil) pod security context on
+	// stored pod templates; the desired build leaves it nil unless the user
+	// template sets one.
+	if desired.SecurityContext == nil {
+		live.SecurityContext = nil
+	}
+	normalizeContainersForCompare(live.Containers, desired.Containers)
+	normalizeContainersForCompare(live.InitContainers, desired.InitContainers)
+	normalizeVolumesForCompare(live.Volumes, desired.Volumes)
+}
+
+// normalizeContainersForCompare clears the API-server container defaults
+// (termination message path/policy, image pull policy, probe thresholds,
+// port protocols) wherever the desired container leaves them unset. A
+// container count difference is genuine drift and needs no normalization.
+func normalizeContainersForCompare(live, desired []v1.Container) {
+	if len(live) != len(desired) {
+		return
+	}
+	for i := range desired {
+		d := &desired[i]
+		l := &live[i]
+		if d.TerminationMessagePath == "" {
+			l.TerminationMessagePath = ""
+		}
+		if d.TerminationMessagePolicy == "" {
+			l.TerminationMessagePolicy = ""
+		}
+		if d.ImagePullPolicy == "" {
+			l.ImagePullPolicy = ""
+		}
+		normalizeProbeForCompare(l.ReadinessProbe, d.ReadinessProbe)
+		normalizeProbeForCompare(l.LivenessProbe, d.LivenessProbe)
+		normalizeProbeForCompare(l.StartupProbe, d.StartupProbe)
+		for j := range d.Ports {
+			if j < len(l.Ports) && d.Ports[j].Protocol == "" && l.Ports[j].Protocol == v1.ProtocolTCP {
+				l.Ports[j].Protocol = ""
+			}
+		}
+		// The API server defaults a fieldRef env source's apiVersion to "v1"
+		// (the operator's SCHEMA_REGISTRY_HOST_NAME uses one).
+		for j := range d.Env {
+			if j >= len(l.Env) || d.Env[j].ValueFrom == nil || l.Env[j].ValueFrom == nil {
+				continue
+			}
+			if d.Env[j].ValueFrom.FieldRef != nil && l.Env[j].ValueFrom.FieldRef != nil &&
+				d.Env[j].ValueFrom.FieldRef.APIVersion == "" {
+				l.Env[j].ValueFrom.FieldRef.APIVersion = ""
+			}
+		}
+	}
+}
+
+// normalizeProbeForCompare clears the API-server probe defaults (success
+// threshold 1, timeout 1s, period 10s, failure threshold 3) wherever the
+// desired probe leaves them unset.
+func normalizeProbeForCompare(live, desired *v1.Probe) {
+	if live == nil || desired == nil {
+		return
+	}
+	if desired.SuccessThreshold == 0 {
+		live.SuccessThreshold = 0
+	}
+	if desired.TimeoutSeconds == 0 {
+		live.TimeoutSeconds = 0
+	}
+	if desired.PeriodSeconds == 0 {
+		live.PeriodSeconds = 0
+	}
+	if desired.FailureThreshold == 0 {
+		live.FailureThreshold = 0
+	}
+	if desired.InitialDelaySeconds == 0 {
+		live.InitialDelaySeconds = 0
+	}
+}
+
+// normalizeVolumesForCompare clears the API-server secret volume defaultMode
+// (420) wherever the desired volume leaves it unset, for the volume source
+// types the API server defaults.
+func normalizeVolumesForCompare(live, desired []v1.Volume) {
+	if len(live) != len(desired) {
+		return
+	}
+	for i := range desired {
+		lv := &live[i].VolumeSource
+		dv := &desired[i].VolumeSource
+		if lv.Secret != nil && dv.Secret != nil && dv.Secret.DefaultMode == nil {
+			lv.Secret.DefaultMode = nil
+		}
+		if lv.ConfigMap != nil && dv.ConfigMap != nil && dv.ConfigMap.DefaultMode == nil {
+			lv.ConfigMap.DefaultMode = nil
+		}
+		if lv.Projected != nil && dv.Projected != nil && dv.Projected.DefaultMode == nil {
+			lv.Projected.DefaultMode = nil
+		}
+		if lv.DownwardAPI != nil && dv.DownwardAPI != nil && dv.DownwardAPI.DefaultMode == nil {
+			lv.DownwardAPI.DefaultMode = nil
+		}
+	}
 }
 
 // deploymentSelectorMatches reports whether the existing Deployment's

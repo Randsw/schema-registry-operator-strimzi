@@ -131,6 +131,11 @@ spec:
                     - LoadBalancer
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - fieldPath: .nodeport
+                  message: 'spec.service.nodeport requires spec.service.type to be
+                    NodePort or LoadBalancer: a ClusterIP Service has no node port'
+                  rule: '!has(self.nodeport) || self.type != ''ClusterIP'''
               template:
                 properties:
                   metadata:
@@ -4050,6 +4055,17 @@ spec:
             - securehttp
             - template
             type: object
+            x-kubernetes-validations:
+            - fieldPath: .clientauth
+              message: 'spec.clientauth requires spec.securehttp: client authentication
+                (mTLS) is only supported over HTTPS'
+              rule: '!has(self.clientauth) || !self.clientauth || self.securehttp'
+            - fieldPath: .replicas
+              message: 'spec.replicas > 1 with spec.securehttp requires spec.tlssecretname:
+                inter-instance HTTPS forwarding needs a user-provided TLS secret covering
+                the replica addresses'
+              rule: '!(has(self.replicas) && self.replicas > 1 && self.securehttp)
+                || (has(self.tlssecretname) && size(self.tlssecretname) > 0)'
           status:
             properties:
               conditions:

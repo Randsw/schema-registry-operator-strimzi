@@ -138,29 +138,25 @@ func TestUpdateExistingDeploymentBootstrapDrift(t *testing.T) {
 	kafkaCR := newTestKafkaCR("kafka-cluster", inst.Namespace)
 	currentBootstrap := kafkaCR.Status.Listeners[0].BootstrapServers
 
+	// The fixture is operator-complete (built by buildDeploymentSpec) so a
+	// steady-state reconcile reports no drift; the bootstrap env value and
+	// the spec hash are then adjusted per scenario.
 	newDeployment := func(hash, bootstrapEnv string) *apps.Deployment {
-		env := []corev1.EnvVar{}
-		if bootstrapEnv != "" {
-			env = append(env, corev1.EnvVar{Name: bootstrapServersEnv, Value: bootstrapEnv})
+		dep := newOperatorDeployment(t, scheme, inst, currentBootstrap, "")
+		if bootstrapEnv != "" && bootstrapEnv != currentBootstrap {
+			// Simulate a stale bootstrap address rendered into the env.
+			env := dep.Spec.Template.Spec.Containers[0].Env
+			for i := range env {
+				if env[i].Name == bootstrapServersEnv {
+					env[i].Value = bootstrapEnv
+				}
+			}
 		}
-		return &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				// Operator-created deployments carry the stable identity
-				// selector (F1); without it updateExistingDeployment would
-				// treat this fixture as a legacy selector and migrate it.
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{
-						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1", Env: env},
-					}},
-				},
-			},
+		if hash != "" {
+			dep.Annotations[keyPrefix+"/specHash"] = hash
+			dep.Spec.Template.Annotations[keyPrefix+"/specHash"] = hash
 		}
+		return dep
 	}
 
 	newReconciler := func(dep *apps.Deployment) *StrimziSchemaRegistryReconciler {
@@ -261,23 +257,12 @@ func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
 		t.Fatalf("failed to compute spec hash: %v", err)
 	}
 
+	// The fixture is operator-complete (built by buildDeploymentSpec) so a
+	// steady-state reconcile reports no drift; the spec hash is adjusted per
+	// scenario.
 	newDeployment := func(hash string) *apps.Deployment {
-		return &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				// Operator-created deployments carry the stable identity
-				// selector (F1); without it updateExistingDeployment would
-				// treat this fixture as a legacy selector and migrate it.
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
-				},
-			},
-		}
+		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
+		return newOperatorDeployment(t, scheme, inst, bootstrap, hash)
 	}
 
 	newReconciler := func(dep *apps.Deployment) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
@@ -384,24 +369,14 @@ func TestUpdateExistingDeploymentPreservesManualReplicas(t *testing.T) {
 		t.Fatalf("failed to compute spec hash: %v", err)
 	}
 
+	// The fixture is operator-complete (built by buildDeploymentSpec) so a
+	// steady-state reconcile reports no drift; the spec hash and the replica
+	// count are adjusted per scenario.
 	newDeployment := func(hash string, replicas *int32) *apps.Deployment {
-		return &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				// Operator-created deployments carry the stable identity
-				// selector (F1); without it updateExistingDeployment would
-				// treat this fixture as a legacy selector and migrate it.
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Replicas: replicas,
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
-				},
-			},
-		}
+		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
+		dep := newOperatorDeployment(t, scheme, inst, bootstrap, hash)
+		dep.Spec.Replicas = replicas
+		return dep
 	}
 
 	newReconciler := func(dep *apps.Deployment) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
@@ -825,11 +800,9 @@ func TestUpdateExistingDeploymentRecreatesLegacySelector(t *testing.T) {
 
 	t.Run("steady state with a stable selector does nothing", func(t *testing.T) {
 		deletes := 0
-		desiredHash, err := computeSpecHash(inst)
-		if err != nil {
-			t.Fatalf("failed to compute spec hash: %v", err)
-		}
-		dep := newDeployment(selectorLabelsForStrimziSchemaRegistryOperator(inst.Name), desiredHash)
+		// An operator-complete fixture (built by buildDeploymentSpec) so the
+		// steady-state reconcile reports no drift.
+		dep := newOperatorDeployment(t, scheme, inst, kafkaCR.Status.Listeners[0].BootstrapServers, "")
 		client := fake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(inst, kafkaCR, dep).
 			WithInterceptorFuncs(countDeploymentDeletes(&deletes)).
@@ -1452,11 +1425,16 @@ func TestHandleTLSCertExpiryRenewsOnCAChange(t *testing.T) {
 		},
 		Data: map[string][]byte{"ca.key": []byte(ca.CAKeyPEM)},
 	}
+	// The deployment records the -tls secret's resourceVersion ("2000") in
+	// the tlsVersion pod-template annotation, mirroring an operator-created
+	// deployment: the annotation-driven rollout check is then a no-op until
+	// the secret is renewed (a new ResourceVersion).
 	deployment := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + deploySuffix, Namespace: inst.Namespace},
 		Spec: apps.DeploymentSpec{
 			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{tlsVersionKey: "2000"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
 			},
 		},
 	}
@@ -1533,6 +1511,20 @@ func TestHandleTLSCertExpiryRenewsOnCAChange(t *testing.T) {
 			t.Fatalf("failed to create the seeded -tls secret: %v", err)
 		}
 
+		// Record the seeded secret's version on the deployment pod template
+		// so the annotation-driven rollout check (no renewal due) is a no-op.
+		deployed := &apps.Deployment{}
+		if err := client.Get(ctx, types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, deployed); err != nil {
+			t.Fatalf("failed to get deployment: %v", err)
+		}
+		if deployed.Spec.Template.Annotations == nil {
+			deployed.Spec.Template.Annotations = map[string]string{}
+		}
+		deployed.Spec.Template.Annotations[tlsVersionKey] = seeded.ResourceVersion
+		if err := client.Update(ctx, deployed); err != nil {
+			t.Fatalf("failed to record the seeded secret version on the deployment: %v", err)
+		}
+
 		result, recheck, err := r.handleTLSCertExpiry(ctx, inst, logr.Logger{}, cluster)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -1554,35 +1546,108 @@ func TestHandleTLSCertExpiryRenewsOnCAChange(t *testing.T) {
 	})
 }
 
-// TestBuildProbesInitialDelay verifies that readiness and liveness probes no
-// longer carry an InitialDelaySeconds value (the startup probe already gates
-// them), while the startup probe keeps its 30s initial delay.
-func TestBuildProbesInitialDelay(t *testing.T) {
-	t.Run("HTTP probes have no initial delay and startup keeps 30s", func(t *testing.T) {
-		readiness, liveness, startup := buildProbes(8081, corev1.URISchemeHTTP)
+// TestBuildProbes verifies probe construction: readiness and liveness probes
+// carry no InitialDelaySeconds (the startup probe gates them), the startup
+// budget is 10s delay + 12 x 10s periods, and the readiness/startup handlers
+// switch to TCPSocket for HTTPS or when authentication.method is configured
+// (an authenticated listener rejects unauthenticated HTTP GET probes with
+// 401).
+func TestBuildProbes(t *testing.T) {
+	assertStartupBudget := func(t *testing.T, startup *corev1.Probe) {
+		t.Helper()
+		if startup.InitialDelaySeconds != 10 {
+			t.Errorf("expected startup InitialDelaySeconds=10, got %d", startup.InitialDelaySeconds)
+		}
+		if startup.PeriodSeconds != 10 {
+			t.Errorf("expected startup PeriodSeconds=10, got %d", startup.PeriodSeconds)
+		}
+		if startup.FailureThreshold != 12 {
+			t.Errorf("expected startup FailureThreshold=12, got %d", startup.FailureThreshold)
+		}
+	}
+
+	assertNoInitialDelay := func(t *testing.T, readiness, liveness *corev1.Probe) {
+		t.Helper()
 		if readiness.InitialDelaySeconds != 0 {
 			t.Errorf("expected readiness InitialDelaySeconds=0, got %d", readiness.InitialDelaySeconds)
 		}
 		if liveness.InitialDelaySeconds != 0 {
 			t.Errorf("expected liveness InitialDelaySeconds=0, got %d", liveness.InitialDelaySeconds)
 		}
-		if startup.InitialDelaySeconds != 30 {
-			t.Errorf("expected startup InitialDelaySeconds=30, got %d", startup.InitialDelaySeconds)
+	}
+
+	t.Run("no auth over HTTP keeps HTTPGet probes", func(t *testing.T) {
+		readiness, liveness, startup := buildProbes(8081, corev1.URISchemeHTTP, false)
+		assertNoInitialDelay(t, readiness, liveness)
+		assertStartupBudget(t, startup)
+
+		if readiness.HTTPGet == nil || readiness.TCPSocket != nil {
+			t.Fatalf("expected an HTTPGet readiness probe, got %+v", readiness.ProbeHandler)
+		}
+		if readiness.HTTPGet.Path != "/" || readiness.HTTPGet.Port.IntVal != 8081 || readiness.HTTPGet.Scheme != corev1.URISchemeHTTP {
+			t.Errorf("unexpected readiness HTTPGet: %+v", readiness.HTTPGet)
+		}
+		if startup.HTTPGet == nil || startup.TCPSocket != nil {
+			t.Fatalf("expected an HTTPGet startup probe, got %+v", startup.ProbeHandler)
+		}
+		if startup.HTTPGet.Path != "/" || startup.HTTPGet.Port.IntVal != 8081 {
+			t.Errorf("unexpected startup HTTPGet: %+v", startup.HTTPGet)
+		}
+		if liveness.TCPSocket == nil || liveness.TCPSocket.Port.IntVal != 8081 {
+			t.Errorf("expected a TCPSocket liveness probe on 8081, got %+v", liveness.ProbeHandler)
 		}
 	})
 
-	t.Run("HTTPS probes have no initial delay and startup keeps 30s", func(t *testing.T) {
-		readiness, liveness, startup := buildProbes(8085, corev1.URISchemeHTTPS)
-		if readiness.InitialDelaySeconds != 0 {
-			t.Errorf("expected readiness InitialDelaySeconds=0, got %d", readiness.InitialDelaySeconds)
+	t.Run("HTTPS keeps TCPSocket probes", func(t *testing.T) {
+		readiness, liveness, startup := buildProbes(8085, corev1.URISchemeHTTPS, false)
+		assertNoInitialDelay(t, readiness, liveness)
+		assertStartupBudget(t, startup)
+
+		if readiness.TCPSocket == nil || readiness.TCPSocket.Port.IntVal != 8085 {
+			t.Errorf("expected a TCPSocket readiness probe on 8085, got %+v", readiness.ProbeHandler)
 		}
-		if liveness.InitialDelaySeconds != 0 {
-			t.Errorf("expected liveness InitialDelaySeconds=0, got %d", liveness.InitialDelaySeconds)
-		}
-		if startup.InitialDelaySeconds != 30 {
-			t.Errorf("expected startup InitialDelaySeconds=30, got %d", startup.InitialDelaySeconds)
+		if startup.TCPSocket == nil || startup.TCPSocket.Port.IntVal != 8085 {
+			t.Errorf("expected a TCPSocket startup probe on 8085, got %+v", startup.ProbeHandler)
 		}
 	})
+
+	t.Run("configured authentication switches HTTP probes to TCPSocket", func(t *testing.T) {
+		readiness, liveness, startup := buildProbes(8081, corev1.URISchemeHTTP, true)
+		assertNoInitialDelay(t, readiness, liveness)
+		assertStartupBudget(t, startup)
+
+		if readiness.TCPSocket == nil || readiness.HTTPGet != nil || readiness.TCPSocket.Port.IntVal != 8081 {
+			t.Errorf("expected a TCPSocket readiness probe on 8081, got %+v", readiness.ProbeHandler)
+		}
+		if startup.TCPSocket == nil || startup.HTTPGet != nil || startup.TCPSocket.Port.IntVal != 8081 {
+			t.Errorf("expected a TCPSocket startup probe on 8081, got %+v", startup.ProbeHandler)
+		}
+	})
+}
+
+// TestAuthenticationMethodConfigured covers the authentication.method lookup
+// in spec.configuration, including dash/case variants and empty values.
+func TestAuthenticationMethodConfigured(t *testing.T) {
+	tests := []struct {
+		name          string
+		configuration map[string]string
+		want          bool
+	}{
+		{name: "nil configuration", configuration: nil, want: false},
+		{name: "empty value means not configured", configuration: map[string]string{"authentication.method": ""}, want: false},
+		{name: "BASIC is configured", configuration: map[string]string{"authentication.method": "BASIC"}, want: true},
+		{name: "dash variant is configured", configuration: map[string]string{"authentication-method": "BASIC"}, want: true},
+		{name: "case variant is configured", configuration: map[string]string{"AUTHENTICATION.METHOD": "BASIC"}, want: true},
+		{name: "unrelated keys are ignored", configuration: map[string]string{"debug": "true"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := authenticationMethodConfigured(tt.configuration); got != tt.want {
+				t.Errorf("authenticationMethodConfigured(%v) = %v, want %v", tt.configuration, got, tt.want)
+			}
+		})
+	}
 }
 
 // TestBuildPodEnvStorageIdentity verifies the storage and identity env vars,
@@ -1699,6 +1764,70 @@ func TestConfluentPropertyToEnvName(t *testing.T) {
 	}
 }
 
+// TestIsReservedConfigurationKey covers the reserved-key lookup that filters
+// spec.configuration: exact reserved keys, case-insensitive and dash-vs-dot
+// variants (every spelling converts to the same SCHEMA_REGISTRY_* env var, so
+// all of them must be caught), prefix matches including the reserved
+// ssl.truststore. prefix, and non-reserved keys that must stay settable.
+func TestIsReservedConfigurationKey(t *testing.T) {
+	tests := []struct {
+		key      string
+		reserved bool
+	}{
+		// Exact reserved keys.
+		{"kafkastore.bootstrap.servers", true},
+		{"kafkastore.security.protocol", true},
+		{"listeners", true},
+		{"host.name", true},
+		{"kafkastore.topic", true},
+		{"schema.registry.group.id", true},
+		{"master.eligibility", true},
+		{"schema.compatibility.level", true},
+		{"heap.opts", true},
+		{"schema.registry.inter.instance.protocol", true},
+		{"inter.instance.protocol", true},
+		{"ssl.client.authentication", true},
+		{"ssl.keystore.type", true},
+		{"ssl.key.password", true},
+		// Newly reserved keys.
+		{"ssl.client.auth", true},
+		{"kafkastore.topic.replication.factor", true},
+		// Case-insensitive matches.
+		{"SSL.KEYSTORE.TYPE", true},
+		{"SSL.CLIENT.AUTH", true},
+		{"KAFKASTORE.TOPIC.REPLICATION.FACTOR", true},
+		{"Listeners", true},
+		// Dash-vs-dot variants.
+		{"ssl-keystore-location", true},
+		{"SSL-CLIENT-AUTH", true},
+		{"kafkastore-topic-replication-factor", true},
+		{"schema-registry-inter-instance-protocol", true},
+		// Prefix matches, including the reserved ssl.truststore. prefix.
+		{"kafkastore.ssl.keystore.location", true},
+		{"kafkastore.sasl.jaas.config", true},
+		{"ssl.keystore.password", true},
+		{"ssl.truststore.location", true},
+		{"ssl.truststore.type", true},
+		{"SSL-TRUSTSTORE-PASSWORD", true},
+		// Non-reserved keys must stay settable.
+		{"access.control.allow.origin", false},
+		{"debug", false},
+		{"authentication.realm", false},
+		{"avro.compression.level", false},
+		// Boundary: the ssl.truststore. prefix requires the trailing dot, so
+		// the bare key (not a real Confluent property) is not reserved.
+		{"ssl.truststore", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			if got := isReservedConfigurationKey(tt.key); got != tt.reserved {
+				t.Errorf("isReservedConfigurationKey(%q) = %v, want %v", tt.key, got, tt.reserved)
+			}
+		})
+	}
+}
+
 func TestBuildPodEnvConfigurationReserved(t *testing.T) {
 	auth := kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}
 
@@ -1775,19 +1904,75 @@ func TestBuildPodEnvConfigurationReserved(t *testing.T) {
 		}
 	})
 
-	t.Run("non-reserved key colliding with managed env is skipped", func(t *testing.T) {
+	t.Run("reserved replication-factor key is ignored even when the managed env var is absent", func(t *testing.T) {
+		// The operator omits SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR
+		// when spec.kafkastoretopicreplicationfactor is unset, so before the
+		// key was reserved a user-supplied value leaked straight into the pod
+		// env and overrode Confluent's built-in default.
 		inst := newTestInstance()
-		rf := int32(1)
-		inst.Spec.KafkastoreTopicReplicationFactor = &rf
+		inst.Spec.KafkastoreTopicReplicationFactor = nil
 		inst.Spec.Configuration = map[string]string{
 			"kafkastore.topic.replication.factor": "3",
 		}
 
 		env, overridden := buildPodEnv(inst, "kafka:9092", "", auth)
 
-		requireEnvValue(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR", "1")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR")
 		if len(overridden) != 1 || overridden[0] != "kafkastore.topic.replication.factor" {
-			t.Errorf("expected overridden to contain the replication-factor collision, got %v", overridden)
+			t.Errorf("expected overridden to contain the reserved replication-factor key, got %v", overridden)
+		}
+	})
+
+	t.Run("newly reserved keys and dash/case variants are ignored", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecureHTTP = false
+		inst.Spec.Configuration = map[string]string{
+			"ssl.client.auth":                     "REQUIRED",
+			"SSL-CLIENT-AUTH":                     "NONE",
+			"ssl.truststore.location":             "/tmp/evil.jks",
+			"ssl.truststore.type":                 "JKS",
+			"ssl-keystore-type":                   "PKCS12",
+			"kafkastore.topic.replication.factor": "5",
+		}
+
+		env, overridden := buildPodEnv(inst, "kafka:9092", "", auth)
+
+		// No spelling of the reserved keys may reach the pod env; the
+		// operator-managed configuration wins.
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_CLIENT_AUTH")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_TYPE")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE")
+		requireEnvAbsent(t, env, "SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR")
+
+		wantOverridden := []string{
+			"SSL-CLIENT-AUTH",
+			"kafkastore.topic.replication.factor",
+			"ssl-keystore-type",
+			"ssl.client.auth",
+			"ssl.truststore.location",
+			"ssl.truststore.type",
+		}
+		if len(overridden) != len(wantOverridden) {
+			t.Fatalf("expected %d overridden keys, got %d: %v", len(wantOverridden), len(overridden), overridden)
+		}
+		for i := range wantOverridden {
+			if overridden[i] != wantOverridden[i] {
+				t.Errorf("overridden[%d] = %q, want %q", i, overridden[i], wantOverridden[i])
+			}
+		}
+	})
+
+	t.Run("non-reserved key colliding with a managed env var is skipped", func(t *testing.T) {
+		// Defense-in-depth beyond the reserved list: a key that is not
+		// reserved but whose converted env name matches an operator-managed
+		// env var must not override the managed value.
+		podEnv := []corev1.EnvVar{{Name: "SCHEMA_REGISTRY_DEBUG", Value: "true"}}
+		env, overridden := appendConfigurationEnv(podEnv, map[string]string{"debug": "false"})
+
+		requireEnvValue(t, env, "SCHEMA_REGISTRY_DEBUG", "true")
+		if len(overridden) != 1 || overridden[0] != "debug" {
+			t.Errorf("expected overridden to contain the colliding key, got %v", overridden)
 		}
 	})
 }
@@ -2392,43 +2577,58 @@ func TestBuildDeploymentSpecMergesUserTemplateFields(t *testing.T) {
 
 // TestReadyCondition is a table-driven test for the Ready condition helper: a
 // Deployment with zero replicas (as observed immediately after creation) must
-// not be reported as Ready, partial readiness must report NotReady, and a
+// not be reported as Ready, partial readiness must report NotReady, a
 // scale-down in progress (surplus replicas still running) must not report
-// Ready prematurely (B14).
+// Ready prematurely (B14), a rollout still replacing pods (UpdatedReplicas
+// below the desired count) must not report Ready, and a generation the
+// Deployment controller has not observed yet must not report Ready.
 func TestReadyCondition(t *testing.T) {
 	tests := []struct {
 		name            string
 		desiredReplicas int32
 		replicas        int32
 		readyReplicas   int32
+		updatedReplicas int32
+		depGeneration   int64
+		observedGen     int64
 		wantStatus      metav1.ConditionStatus
 		wantReason      string
+		wantObservedGen int64
 	}{
-		{name: "0/0 replicas (fresh Deployment) is NotReady", desiredReplicas: 1, replicas: 0, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
-		{name: "1/2 replicas is NotReady", desiredReplicas: 2, replicas: 2, readyReplicas: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
-		{name: "2/2 replicas is Ready", desiredReplicas: 2, replicas: 2, readyReplicas: 2, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
-		{name: "1/1 replica is Ready", desiredReplicas: 1, replicas: 1, readyReplicas: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready"},
-		{name: "0 ready of 1 replica is NotReady", desiredReplicas: 1, replicas: 1, readyReplicas: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "0/0 replicas (fresh Deployment) is NotReady", desiredReplicas: 1, replicas: 0, readyReplicas: 0, updatedReplicas: 0, depGeneration: 1, observedGen: 0, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		{name: "1/2 replicas is NotReady", desiredReplicas: 2, replicas: 2, readyReplicas: 1, updatedReplicas: 2, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		{name: "2/2 replicas is Ready", desiredReplicas: 2, replicas: 2, readyReplicas: 2, updatedReplicas: 2, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready", wantObservedGen: 7},
+		{name: "1/1 replica is Ready", desiredReplicas: 1, replicas: 1, readyReplicas: 1, updatedReplicas: 1, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionTrue, wantReason: "Ready", wantObservedGen: 7},
+		{name: "0 ready of 1 replica is NotReady", desiredReplicas: 1, replicas: 1, readyReplicas: 0, updatedReplicas: 1, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
 		// B14: during a scale-down from 3 to 1 the old replicas are still
 		// running and ready; the deployment has not converged on the desired
 		// count and must not be reported as Ready.
-		{name: "scale-down in progress (3 running/ready, 1 desired) is NotReady", desiredReplicas: 1, replicas: 3, readyReplicas: 3, wantStatus: metav1.ConditionFalse, wantReason: "NotReady"},
+		{name: "scale-down in progress (3 running/ready, 1 desired) is NotReady", desiredReplicas: 1, replicas: 3, readyReplicas: 3, updatedReplicas: 1, depGeneration: 1, observedGen: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		// A rollout still replacing pods: the updated count is below the
+		// desired count even though every current replica is ready.
+		{name: "rollout in progress (2 updated of 3 desired) is NotReady", desiredReplicas: 3, replicas: 3, readyReplicas: 3, updatedReplicas: 2, depGeneration: 2, observedGen: 2, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		// A spec change the Deployment controller has not observed yet: the
+		// status may still describe the previous generation.
+		{name: "generation not observed is NotReady", desiredReplicas: 1, replicas: 1, readyReplicas: 1, updatedReplicas: 1, depGeneration: 2, observedGen: 1, wantStatus: metav1.ConditionFalse, wantReason: "NotReady", wantObservedGen: 7},
+		// The observed generation catching up (>=) makes the converged state
+		// Ready again.
+		{name: "observed generation caught up is Ready", desiredReplicas: 1, replicas: 1, readyReplicas: 1, updatedReplicas: 1, depGeneration: 2, observedGen: 2, wantStatus: metav1.ConditionTrue, wantReason: "Ready", wantObservedGen: 7},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cond := readyCondition(tt.desiredReplicas, tt.replicas, tt.readyReplicas, 7)
+			cond := readyCondition(tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.updatedReplicas, 7, tt.depGeneration, tt.observedGen)
 			if cond.Type != "Ready" {
 				t.Errorf("expected condition type Ready, got %q", cond.Type)
 			}
 			if cond.Status != tt.wantStatus {
-				t.Errorf("desired=%d replicas=%d readyReplicas=%d: expected status %v, got %v", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.wantStatus, cond.Status)
+				t.Errorf("desired=%d replicas=%d readyReplicas=%d updated=%d: expected status %v, got %v", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.updatedReplicas, tt.wantStatus, cond.Status)
 			}
 			if cond.Reason != tt.wantReason {
-				t.Errorf("desired=%d replicas=%d readyReplicas=%d: expected reason %q, got %q", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.wantReason, cond.Reason)
+				t.Errorf("desired=%d replicas=%d readyReplicas=%d updated=%d: expected reason %q, got %q", tt.desiredReplicas, tt.replicas, tt.readyReplicas, tt.updatedReplicas, tt.wantReason, cond.Reason)
 			}
-			if cond.ObservedGeneration != 7 {
-				t.Errorf("expected ObservedGeneration 7, got %d", cond.ObservedGeneration)
+			if cond.ObservedGeneration != tt.wantObservedGen {
+				t.Errorf("expected ObservedGeneration %d, got %d", tt.wantObservedGen, cond.ObservedGeneration)
 			}
 		})
 	}
@@ -2572,6 +2772,356 @@ func TestCreateServiceTypePortPassthrough(t *testing.T) {
 	})
 }
 
+// TestServiceValidationError covers the controller-side defense for the
+// nodeport+ClusterIP combination the API server rejects with
+// "nodePort: Forbidden", deadlocking reconciliation.
+func TestServiceValidationError(t *testing.T) {
+	nodePort := int32(30123)
+	tests := []struct {
+		name    string
+		service *strimziregistryoperatorv1alpha1.Service
+		want    string
+	}{
+		{name: "no service block is valid", service: nil, want: ""},
+		{name: "nodeport unset is valid", service: &strimziregistryoperatorv1alpha1.Service{Type: "ClusterIP"}, want: ""},
+		{name: "nodeport with default (ClusterIP) type is invalid",
+			service: &strimziregistryoperatorv1alpha1.Service{NodePort: &nodePort},
+			want:    "spec.service.nodeport is only valid when spec.service.type is NodePort or LoadBalancer, not ClusterIP"},
+		{name: "nodeport with explicit ClusterIP is invalid",
+			service: &strimziregistryoperatorv1alpha1.Service{Type: "ClusterIP", NodePort: &nodePort},
+			want:    "spec.service.nodeport is only valid when spec.service.type is NodePort or LoadBalancer, not ClusterIP"},
+		{name: "nodeport with NodePort is valid", service: &strimziregistryoperatorv1alpha1.Service{Type: "NodePort", NodePort: &nodePort}, want: ""},
+		{name: "nodeport with LoadBalancer is valid", service: &strimziregistryoperatorv1alpha1.Service{Type: "LoadBalancer", NodePort: &nodePort}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inst := newTestInstance()
+			inst.Spec.Service = tt.service
+			if got := serviceValidationError(inst); got != tt.want {
+				t.Errorf("serviceValidationError() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMergeServiceAnnotations verifies the update-path merge: operator-managed
+// keys are added or updated in place and foreign keys are never deleted.
+func TestMergeServiceAnnotations(t *testing.T) {
+	t.Run("foreign annotation survives and operator keys are updated", func(t *testing.T) {
+		existing := map[string]string{
+			"type":              "http",
+			"example.com/owner": "platform-team",
+		}
+		desired := map[string]string{
+			"type":                 "https",
+			"prometheus.io/scrape": "false",
+		}
+
+		merged := mergeServiceAnnotations(existing, desired)
+
+		if merged["type"] != "https" {
+			t.Errorf("expected the operator type annotation updated to https, got %q", merged["type"])
+		}
+		if merged["prometheus.io/scrape"] != "false" {
+			t.Errorf("expected the passthrough annotation added, got %q", merged["prometheus.io/scrape"])
+		}
+		if merged["example.com/owner"] != "platform-team" {
+			t.Errorf("expected the foreign annotation preserved, got %v", merged)
+		}
+	})
+
+	t.Run("nil existing annotations are handled", func(t *testing.T) {
+		merged := mergeServiceAnnotations(nil, map[string]string{"type": "http"})
+		if len(merged) != 1 || merged["type"] != "http" {
+			t.Errorf("expected only the operator annotation, got %v", merged)
+		}
+	})
+}
+
+// TestServiceAnnotationsDrifted verifies the diff only considers
+// operator-managed (desired) keys: foreign annotations neither trigger an
+// update nor mask operator drift.
+func TestServiceAnnotationsDrifted(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing map[string]string
+		desired  map[string]string
+		want     bool
+	}{
+		{name: "identical maps are not drifted", existing: map[string]string{"type": "http"}, desired: map[string]string{"type": "http"}, want: false},
+		{name: "operator key changed is drifted", existing: map[string]string{"type": "http"}, desired: map[string]string{"type": "https"}, want: true},
+		{name: "operator key missing is drifted", existing: map[string]string{}, desired: map[string]string{"type": "http"}, want: true},
+		{name: "foreign-only difference is not drifted", existing: map[string]string{"type": "http", "example.com/owner": "platform-team"}, desired: map[string]string{"type": "http"}, want: false},
+		{name: "nil maps are not drifted", existing: nil, desired: nil, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serviceAnnotationsDrifted(tt.existing, tt.desired); got != tt.want {
+				t.Errorf("serviceAnnotationsDrifted(%v, %v) = %v, want %v", tt.existing, tt.desired, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReconcileServiceDriftAndAnnotationPreservation covers the Service
+// reconciliation hardening: Protocol and named-TargetPort drift are corrected,
+// foreign annotations survive the update, and operator-managed annotations are
+// corrected in place.
+func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	ctx := context.Background()
+
+	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.UID = "cr-uid"
+		inst.Spec.SecurityProtocol = "PLAINTEXT"
+		inst.Spec.Listener = "tls"
+		inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+			},
+		}
+		return inst
+	}
+
+	// A Deployment in its desired shape (operator-complete, built by
+	// buildDeploymentSpec) so reconciliation reaches the Service block.
+	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+		t.Helper()
+		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
+		return newOperatorDeployment(t, scheme, inst, bootstrap, "")
+	}
+
+	// driftedService builds the desired Service (without the controller
+	// reference) and applies the given drift to it.
+	driftedService := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, drift func(*corev1.Service)) *corev1.Service {
+		t.Helper()
+		emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		r0 := &StrimziSchemaRegistryReconciler{Client: emptyClient, Scheme: scheme}
+		svc, err := r0.createService(inst, logr.Logger{})
+		if err != nil {
+			t.Fatalf("failed to build the desired service: %v", err)
+		}
+		svc.OwnerReferences = nil
+		drift(svc)
+		return svc
+	}
+
+	reconcileOnce := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, svc *corev1.Service) client.Client {
+		t.Helper()
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), newDeployment(t, inst), svc).
+			WithStatusSubresource(inst).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+		}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return c
+	}
+
+	fetchService := func(t *testing.T, c client.Client, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *corev1.Service {
+		t.Helper()
+		svc := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, svc); err != nil {
+			t.Fatalf("failed to get the Service: %v", err)
+		}
+		return svc
+	}
+
+	t.Run("protocol drift is corrected", func(t *testing.T) {
+		inst := newInst()
+		svc := driftedService(t, inst, func(s *corev1.Service) { s.Spec.Ports[0].Protocol = "UDP" })
+
+		c := reconcileOnce(t, inst, svc)
+		got := fetchService(t, c, inst)
+		if got.Spec.Ports[0].Protocol != corev1.ProtocolTCP {
+			t.Errorf("expected the protocol corrected to TCP, got %q", got.Spec.Ports[0].Protocol)
+		}
+	})
+
+	t.Run("named targetPort drift is corrected", func(t *testing.T) {
+		inst := newInst()
+		svc := driftedService(t, inst, func(s *corev1.Service) { s.Spec.Ports[0].TargetPort = intstr.FromString("schema-registry") })
+
+		c := reconcileOnce(t, inst, svc)
+		got := fetchService(t, c, inst)
+		if got.Spec.Ports[0].TargetPort.IntVal != 8081 || got.Spec.Ports[0].TargetPort.StrVal != "" {
+			t.Errorf("expected the targetPort corrected to 8081, got %+v", got.Spec.Ports[0].TargetPort)
+		}
+	})
+
+	t.Run("foreign annotation survives and operator annotations are corrected", func(t *testing.T) {
+		inst := newInst()
+		inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+			Annotations: map[string]string{"prometheus.io/scrape": "false"},
+		}
+		svc := driftedService(t, inst, func(s *corev1.Service) {
+			s.Annotations["type"] = "https"                      // stale operator annotation
+			s.Annotations["prometheus.io/scrape"] = "true"       // stale passthrough value
+			s.Annotations["example.com/owner"] = "platform-team" // foreign
+			s.Spec.Ports[0].Port = 8080                          // port drift so an update is required
+		})
+
+		c := reconcileOnce(t, inst, svc)
+		got := fetchService(t, c, inst)
+		if got.Annotations["type"] != "http" {
+			t.Errorf("expected the operator type annotation corrected to http, got %q", got.Annotations["type"])
+		}
+		if got.Annotations["prometheus.io/scrape"] != "false" {
+			t.Errorf("expected the passthrough annotation corrected, got %q", got.Annotations["prometheus.io/scrape"])
+		}
+		if got.Annotations["example.com/owner"] != "platform-team" {
+			t.Errorf("expected the foreign annotation preserved, got %v", got.Annotations)
+		}
+		if got.Spec.Ports[0].Port != 80 {
+			t.Errorf("expected the port corrected to 80, got %d", got.Spec.Ports[0].Port)
+		}
+	})
+}
+
+// TestReconcileSkipsNodePortWithClusterIP covers the controller-side
+// validation: spec.service.nodeport combined with the default ClusterIP type
+// is reported as InvalidSpec and reconciliation is skipped before any
+// Deployment or Service is created or updated.
+func TestReconcileSkipsNodePortWithClusterIP(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	nodePort := int32(30123)
+	inst := newTestInstance()
+	inst.UID = "cr-uid"
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Type: "ClusterIP", NodePort: &nodePort}
+
+	recorder := eventsfake.NewFakeRecorder(16)
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace)).
+		WithStatusSubresource(inst).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme, Recorder: recorder}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for an invalid spec, got %v", result.RequeueAfter)
+	}
+
+	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
+		t.Fatalf("failed to get the CR: %v", err)
+	}
+	if updated.Status.Status != "InvalidSpec" {
+		t.Errorf("expected status.status InvalidSpec, got %q", updated.Status.Status)
+	}
+	var ready *metav1.Condition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == "Ready" {
+			ready = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	if ready == nil || ready.Reason != "NodePortRequiresNonClusterIP" {
+		t.Errorf("expected a Ready condition with reason NodePortRequiresNonClusterIP, got %+v", ready)
+	}
+
+	// Reconciliation is skipped: no Deployment and no Service may exist.
+	dep := &apps.Deployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err == nil {
+		t.Error("expected no Deployment to be created for an invalid spec")
+	}
+	svc := &corev1.Service{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, svc); err == nil {
+		t.Error("expected no Service to be created for an invalid spec")
+	}
+}
+
+// TestReconcileSkipsMultiReplicaHTTPSWithoutUserTLSSecret covers the
+// controller-side validation: multiple replicas with securehttp and no
+// user-provided TLS secret cannot work (the operator-generated certificate
+// covers DNS names only, so inter-instance HTTPS forwarding fails TLS
+// verification). Reconciliation is skipped with InvalidSpec before any
+// Deployment is created. The CRD CEL validation rules reject the combination
+// at admission time (see crdvalidation_test.go); this fake-client test keeps
+// the controller-side defense-in-depth covered, mirroring
+// TestReconcileSkipsNodePortWithClusterIP.
+func TestReconcileSkipsMultiReplicaHTTPSWithoutUserTLSSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.UID = "cr-uid"
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	inst.Spec.Replicas = ptr.To(int32(2))
+
+	recorder := eventsfake.NewFakeRecorder(16)
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace)).
+		WithStatusSubresource(inst).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme, Recorder: recorder}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for an invalid spec, got %v", result.RequeueAfter)
+	}
+
+	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
+		t.Fatalf("failed to get the CR: %v", err)
+	}
+	if updated.Status.Status != "InvalidSpec" {
+		t.Errorf("expected status.status InvalidSpec, got %q", updated.Status.Status)
+	}
+	var ready *metav1.Condition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == "Ready" {
+			ready = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	if ready == nil || ready.Reason != "ReplicasRequireUserTLSSecret" {
+		t.Errorf("expected a Ready condition with reason ReplicasRequireUserTLSSecret, got %+v", ready)
+	}
+
+	// Reconciliation is skipped: no Deployment may exist.
+	dep := &apps.Deployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, dep); err == nil {
+		t.Error("expected no Deployment to be created for an invalid spec")
+	}
+}
+
 func TestBuildNetworkPolicyCrossNamespaceIngress(t *testing.T) {
 	inst := newTestInstance()
 	inst.Spec.SecureHTTP = false
@@ -2591,8 +3141,14 @@ func TestBuildNetworkPolicyCrossNamespaceIngress(t *testing.T) {
 	}
 }
 
-func TestComputeSpecHashServiceNetworkPolicy(t *testing.T) {
-	t.Run("different service annotations produce different hash", func(t *testing.T) {
+// TestComputeSpecHashIgnoresServiceMetadataAndNetworkPolicy verifies that
+// Service passthrough annotations/labels and NetworkPolicy enablement do NOT
+// participate in the spec hash: they change the Service or NetworkPolicy
+// objects but never the Schema Registry pods, and both are reconciled
+// independently, so hashing them would cause full pod restarts on unrelated
+// metadata edits.
+func TestComputeSpecHashIgnoresServiceMetadataAndNetworkPolicy(t *testing.T) {
+	t.Run("different service annotations produce the same hash", func(t *testing.T) {
 		inst1 := newTestInstance()
 		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
 			Annotations: map[string]string{"prometheus.io/scrape": "true"},
@@ -2604,12 +3160,12 @@ func TestComputeSpecHashServiceNetworkPolicy(t *testing.T) {
 
 		hash1, _ := computeSpecHash(inst1)
 		hash2, _ := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for different service annotations: both %q", hash1)
+		if hash1 != hash2 {
+			t.Errorf("expected the same hash for different service annotations: got %q and %q", hash1, hash2)
 		}
 	})
 
-	t.Run("different service labels produce different hash", func(t *testing.T) {
+	t.Run("different service labels produce the same hash", func(t *testing.T) {
 		inst1 := newTestInstance()
 		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "a"}}
 		inst2 := newTestInstance()
@@ -2617,20 +3173,32 @@ func TestComputeSpecHashServiceNetworkPolicy(t *testing.T) {
 
 		hash1, _ := computeSpecHash(inst1)
 		hash2, _ := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for different service labels: both %q", hash1)
+		if hash1 != hash2 {
+			t.Errorf("expected the same hash for different service labels: got %q and %q", hash1, hash2)
 		}
 	})
 
-	t.Run("networkpolicy enabled produces different hash", func(t *testing.T) {
+	t.Run("networkpolicy toggle produces the same hash", func(t *testing.T) {
 		inst1 := newTestInstance()
 		inst2 := newTestInstance()
 		inst2.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
 
 		hash1, _ := computeSpecHash(inst1)
 		hash2, _ := computeSpecHash(inst2)
+		if hash1 != hash2 {
+			t.Errorf("expected the same hash when networkpolicy is toggled: got %q and %q", hash1, hash2)
+		}
+	})
+
+	t.Run("pod-affecting fields still change the hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.Template.Spec.Containers = []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}
+
+		hash1, _ := computeSpecHash(inst1)
+		hash2, _ := computeSpecHash(inst2)
 		if hash1 == hash2 {
-			t.Errorf("expected different hashes when networkpolicy is enabled: both %q", hash1)
+			t.Errorf("expected different hashes for a changed pod template: both %q", hash1)
 		}
 	})
 
@@ -2638,15 +3206,17 @@ func TestComputeSpecHashServiceNetworkPolicy(t *testing.T) {
 	// default test instance must not change unless the hashing scheme is
 	// deliberately changed. The value exceeds math.MaxUint32, which also
 	// proves the former FNV-32 digest is gone. The digest changed when
-	// spec.replicas joined the hashed inputs (B20) — a one-time rewrite of
-	// every stored hash that triggers a single rollout on operator upgrade.
+	// spec.replicas joined the hashed inputs (B20) and again when Service
+	// metadata and NetworkPolicy enablement left the hashed inputs — a
+	// one-time rewrite of every stored hash that triggers a single rollout on
+	// operator upgrade.
 	t.Run("known FNV-64a digest for the default test instance", func(t *testing.T) {
 		hash, err := computeSpecHash(newTestInstance())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if hash != "6521916336062871651" {
-			t.Errorf("expected the FNV-64a digest 6521916336062871651, got %q", hash)
+		if hash != "10680275065260784506" {
+			t.Errorf("expected the FNV-64a digest 10680275065260784506, got %q", hash)
 		}
 	})
 }
@@ -3432,9 +4002,10 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 	}
 	tlsSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        inst.Name + tlsSecretSuffix,
-			Namespace:   inst.Namespace,
-			Annotations: map[string]string{CAVersionKey: "1000"},
+			Name:            inst.Name + tlsSecretSuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "2000",
+			Annotations:     map[string]string{CAVersionKey: "1000"},
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -3448,11 +4019,16 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		Type:       corev1.SecretTypeOpaque,
 		Data:       map[string][]byte{"truststore.jks": []byte("stub")},
 	}
+	// The deployment records the -tls secret's resourceVersion in the
+	// tlsVersion pod-template annotation, mirroring an operator-created
+	// deployment: the annotation-driven rollout check is then a no-op until
+	// the secret is renewed (a new ResourceVersion).
 	deployment := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: inst.Name + deploySuffix, Namespace: inst.Namespace},
 		Spec: apps.DeploymentSpec{
 			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{tlsVersionKey: "2000"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "confluent-sr"}}},
 			},
 		},
 	}
@@ -3500,9 +4076,10 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		}
 		freshTLSSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + tlsSecretSuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{CAVersionKey: "1000"},
+				Name:            inst.Name + tlsSecretSuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "2000",
+				Annotations:     map[string]string{CAVersionKey: "1000"},
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
@@ -4139,31 +4716,12 @@ func TestReconcileServiceOwnership(t *testing.T) {
 		return svc
 	}
 
-	// A Deployment in its desired shape (stable selector, current spec hash,
-	// current bootstrap env) so reconciliation reaches the Service block.
+	// A Deployment in its desired shape (operator-complete, built by
+	// buildDeploymentSpec) so reconciliation reaches the Service block.
 	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
 		t.Helper()
-		hash, err := computeSpecHash(inst)
-		if err != nil {
-			t.Fatalf("failed to compute spec hash: %v", err)
-		}
 		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
-		return &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{
-						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1",
-							Env: []corev1.EnvVar{{Name: bootstrapServersEnv, Value: bootstrap}}},
-					}},
-				},
-			},
-		}
+		return newOperatorDeployment(t, scheme, inst, bootstrap, "")
 	}
 
 	reconcile := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, svc *corev1.Service) (client.Client, *eventsfake.FakeRecorder, reconcile.Result, error) {

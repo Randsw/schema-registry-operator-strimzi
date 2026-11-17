@@ -63,6 +63,7 @@ const CAVersionKey = keyPrefix + "/caSecretVersion"
 const userVersionKey = keyPrefix + "/clientSecretVersion"
 const saslUserVersionKey = keyPrefix + "/saslUserSecretVersion"
 const tlsVersionKey = keyPrefix + "/tlsVersion"
+const jksVersionKey = keyPrefix + "/jksVersion"
 
 // tlsCertRenewalThreshold is how close to expiry the operator-managed REST
 // API TLS certificate must be before it is renewed. It is a variable so
@@ -116,6 +117,24 @@ func httpsMultiReplicaValidationError(instance *strimziregistryoperatorv1alpha1.
 	if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName == "" &&
 		instance.Spec.Replicas != nil && *instance.Spec.Replicas > 1 {
 		return "spec.replicas > 1 with securehttp and no spec.tlssecretname is unsupported: the operator-generated REST API certificate covers DNS names only, while each replica advertises its pod IP as host.name, so inter-instance HTTPS forwarding fails TLS verification; provide spec.tlssecretname with a certificate covering the replica addresses, or set replicas to 1 or securehttp to false"
+	}
+	return ""
+}
+
+// serviceValidationError returns a non-empty message describing why the
+// spec.service configuration is invalid, or an empty string when it is valid.
+// A node port can only be set on Service types that expose one (NodePort,
+// LoadBalancer); on the default ClusterIP the API server rejects the field
+// with "nodePort: Forbidden", which would deadlock reconciliation in a
+// ReconcileError loop. Controller-side defense-in-depth — the CRD CEL rule
+// rejects the combination at admission time.
+func serviceValidationError(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+	if instance.Spec.Service == nil || instance.Spec.Service.NodePort == nil {
+		return ""
+	}
+	switch instance.Spec.Service.Type {
+	case "", "ClusterIP":
+		return "spec.service.nodeport is only valid when spec.service.type is NodePort or LoadBalancer, not ClusterIP"
 	}
 	return ""
 }
@@ -284,6 +303,36 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
+	// Validate that spec.service.nodeport is not combined with a ClusterIP
+	// service: the API server rejects nodePort on a ClusterIP Service
+	// ("nodePort: Forbidden"), which would deadlock reconciliation in a
+	// ReconcileError loop. Skip reconciliation entirely, mirroring the other
+	// invalid-spec handling, so an existing Deployment keeps serving.
+	if msg := serviceValidationError(instance); msg != "" {
+		logger.Info("Invalid Service nodePort configuration; skipping reconciliation")
+		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "NodePortRequiresNonClusterIP",
+			Message:            msg,
+			ObservedGeneration: instance.Generation,
+		})
+		instance.Status.Status = "InvalidSpec"
+		if !equality.Semantic.DeepEqual(origStatus, &instance.Status) {
+			if err := r.Status().Update(ctx, instance); err != nil {
+				logger.Error(err, "Failed to update CR status")
+				monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+				return ctrl.Result{}, err
+			}
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "NodePortRequiresNonClusterIP", "Validate", "%s", msg)
+			r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "ReconciliationSkipped", "Validate",
+				"reconciliation is skipped until the invalid spec.service.nodeport/spec.service.type combination is fixed; an existing Deployment (if any) keeps running with its current configuration and is no longer reconciled")
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Validate the user-provided REST API TLS secret before building or
 	// updating the Deployment. A missing secret or missing/empty required keys
 	// would render a Deployment whose pods can never start (stuck in
@@ -338,6 +387,68 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// Check if the Deployment already exists, if not create a new one
+	found := &apps.Deployment{}
+	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, found)
+	if err != nil && errors.IsNotFound(err) {
+		// Define a new Deployment
+		deployment, err := r.createDeployment(instance, ctx, logger)
+		if err != nil {
+			logger.Error(err, "Failed to create deployment")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+			return ctrl.Result{}, err
+		}
+		err = r.Create(ctx, deployment)
+		if err != nil {
+			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+			return ctrl.Result{}, err
+		}
+		// Deployment created successfully - return and requeue
+		logger.Info("Deployment created successfully", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
+		// F6: update the gauge before the early return so it is correct on
+		// the first reconcile instead of lagging one reconcile behind.
+		r.updateInstanceCountMetric(ctx)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	} else if err != nil {
+		logger.Error(err, "Failed to get Deployment")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+		return ctrl.Result{}, err
+	}
+
+	// Deployment exists — reconcile spec changes BEFORE the rotation
+	// handlers. The rotation handlers patch mounts and rollout annotations on
+	// the live Deployment; running them first would patch the STALE spec and
+	// roll pods with a broken intermediate state (e.g. a PKCS12 keystore
+	// mounted while SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION still points at the
+	// JKS file) followed by a second rollout once the spec change landed. With
+	// the spec reconciled first, a rotation rollout is applied on the next
+	// pass against the current spec — never before it.
+	updatedDep, specChanged, err := r.updateExistingDeployment(instance, ctx, logger, found)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile deployment spec changes")
+		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+		return ctrl.Result{}, err
+	}
+	if specChanged {
+		err = r.Update(ctx, updatedDep)
+		if err != nil {
+			logger.Error(err, "Failed to update deployment after spec change")
+			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
+			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
+			return ctrl.Result{}, err
+		}
+		monitoring.StrimziSchemaRegistryDeploymentUpdateTotal.Inc()
+		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		// F6: keep the gauge correct on the early-return path too.
+		r.updateInstanceCountMetric(ctx)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
 	// Handle secret rotation if user or cluster CA secrets have changed.
 	result, err := r.handleSecretRotation(ctx, instance, logger, strimziClusterName)
 	if err != nil {
@@ -374,61 +485,6 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if result.RequeueAfter > 0 {
 		return result, nil
 	}
-
-	// Check if the Deployment already exists, if not create a new one
-	found := &apps.Deployment{}
-	err = r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, found)
-	if err != nil && errors.IsNotFound(err) {
-		// Define a new Deployment
-		deployment, err := r.createDeployment(instance, ctx, logger)
-		if err != nil {
-			logger.Error(err, "Failed to create deployment")
-			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-			return ctrl.Result{}, err
-		}
-		err = r.Create(ctx, deployment)
-		if err != nil {
-			logger.Error(err, "Failed to create new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
-			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-			return ctrl.Result{}, err
-		}
-		// Deployment created successfully - return and requeue
-		logger.Info("Deployment created successfully", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
-		// F6: update the gauge before the early return so it is correct on
-		// the first reconcile instead of lagging one reconcile behind.
-		r.updateInstanceCountMetric(ctx)
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	} else if err != nil {
-		logger.Error(err, "Failed to get Deployment")
-		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-		return ctrl.Result{}, err
-	}
-
-	// Deployment exists — reconcile spec changes
-	updatedDep, specChanged, err := r.updateExistingDeployment(instance, ctx, logger, found)
-	if err != nil {
-		logger.Error(err, "Failed to reconcile deployment spec changes")
-		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-		return ctrl.Result{}, err
-	}
-	if specChanged {
-		err = r.Update(ctx, updatedDep)
-		if err != nil {
-			logger.Error(err, "Failed to update deployment after spec change")
-			monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
-			r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
-			return ctrl.Result{}, err
-		}
-		monitoring.StrimziSchemaRegistryDeploymentUpdateTotal.Inc()
-		logger.Info("Deployment updated after spec change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
-		// F6: keep the gauge correct on the early-return path too.
-		r.updateInstanceCountMetric(ctx)
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
 	// The Deployment's effective desired replica count: Spec.Replicas when
 	// set (e.g. by a manual kubectl scale, which B6 preserves), else the
 	// operator default of 1. updatedDep equals found in the steady state and
@@ -438,7 +494,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if updatedDep.Spec.Replicas != nil {
 		desiredReplicas = *updatedDep.Spec.Replicas
 	}
-	condition := readyCondition(desiredReplicas, updatedDep.Status.Replicas, updatedDep.Status.ReadyReplicas, instance.Generation)
+	condition := readyCondition(desiredReplicas, updatedDep.Status.Replicas, updatedDep.Status.ReadyReplicas,
+		updatedDep.Status.UpdatedReplicas, instance.Generation, updatedDep.Generation, updatedDep.Status.ObservedGeneration)
 	meta.SetStatusCondition(&instance.Status.Conditions, condition)
 	if condition.Status == metav1.ConditionTrue {
 		instance.Status.Status = "Ok"
@@ -535,9 +592,13 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			// unset, the API server allocates a node port into the existing
 			// spec and that allocation must not be treated as drift.
 			nodePortChanged := desiredPort.NodePort != 0 && existingPort.NodePort != desiredPort.NodePort
+			// TargetPort is compared as a whole so a named target port
+			// (StrVal) drifts just like a numeric one (IntVal), and Protocol
+			// is compared so a manual protocol edit is corrected too.
 			if existingPort.Port != desiredPort.Port ||
-				existingPort.TargetPort.IntVal != desiredPort.TargetPort.IntVal ||
+				existingPort.TargetPort != desiredPort.TargetPort ||
 				existingPort.Name != desiredPort.Name ||
+				existingPort.Protocol != desiredPort.Protocol ||
 				nodePortChanged {
 				serviceChanged = true
 				break
@@ -547,7 +608,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	if !equality.Semantic.DeepEqual(foundSvc.Labels, desiredSvc.Labels) {
 		serviceChanged = true
 	}
-	if !equality.Semantic.DeepEqual(foundSvc.Annotations, desiredSvc.Annotations) {
+	// Only operator-managed annotations are compared: foreign annotations are
+	// preserved on update and must not mark the Service as drifted (which
+	// would cause an endless update loop, since the update never removes
+	// them).
+	if serviceAnnotationsDrifted(foundSvc.Annotations, desiredSvc.Annotations) {
 		serviceChanged = true
 	}
 
@@ -562,7 +627,10 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		foundSvc.Spec.Ports = mergeServicePorts(desiredSvc.Spec.Type, desiredSvc.Spec.Ports, foundSvc.Spec.Ports)
 		foundSvc.Spec.Type = desiredSvc.Spec.Type
 		foundSvc.Labels = desiredSvc.Labels
-		foundSvc.Annotations = desiredSvc.Annotations
+		// Merge instead of overwrite so annotations set by users or other
+		// controllers (cloud LoadBalancer, ExternalDNS) survive the update;
+		// operator-managed keys are added or updated in place.
+		foundSvc.Annotations = mergeServiceAnnotations(foundSvc.Annotations, desiredSvc.Annotations)
 		err = r.Update(ctx, foundSvc)
 		if err != nil {
 			logger.Error(err, "Failed to update service after spec change")
@@ -634,15 +702,26 @@ func (r *StrimziSchemaRegistryReconciler) setReconcileErrorStatus(
 
 // readyCondition builds the Ready status condition for the Schema Registry
 // Deployment. The Deployment is only Ready when it has converged on the
-// desired replica count: exactly the desired number of replicas exist and
-// all of them are ready. Immediately after creation Replicas and
-// ReadyReplicas are both 0, which must not be reported as Ready; and
-// comparing Status.Replicas with ReadyReplicas alone reported Ready
-// prematurely during scale-down windows, while surplus replicas from a
-// previous scale were still terminating (B14). desiredReplicas is the
-// Deployment's Spec.Replicas (1 when unset, the operator default).
-func readyCondition(desiredReplicas, replicas, readyReplicas int32, generation int64) metav1.Condition {
-	if desiredReplicas > 0 && replicas == desiredReplicas && readyReplicas == desiredReplicas {
+// desired replica count AND the API server has observed the current
+// generation: exactly the desired number of replicas exist, all of them are
+// ready, the updated count matches the desired count (a rollout still in
+// progress — new pods replacing old ones — reports NotReady), and
+// Status.ObservedGeneration has caught up with metadata.Generation (a spec
+// change the Deployment controller has not processed yet must never read as
+// Ready). Immediately after creation Replicas and ReadyReplicas are both 0,
+// which must not be reported as Ready; and comparing Status.Replicas with
+// ReadyReplicas alone reported Ready prematurely during scale-down windows,
+// while surplus replicas from a previous scale were still terminating (B14).
+// desiredReplicas is the Deployment's Spec.Replicas (1 when unset, the
+// operator default); generation is the CR generation recorded on the
+// condition.
+func readyCondition(desiredReplicas, replicas, readyReplicas, updatedReplicas int32,
+	generation, depGeneration, depObservedGeneration int64) metav1.Condition {
+	if desiredReplicas > 0 &&
+		replicas == desiredReplicas &&
+		readyReplicas == desiredReplicas &&
+		updatedReplicas == desiredReplicas &&
+		depObservedGeneration >= depGeneration {
 		return metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionTrue,
@@ -655,8 +734,8 @@ func readyCondition(desiredReplicas, replicas, readyReplicas int32, generation i
 		Type:   "Ready",
 		Status: metav1.ConditionFalse,
 		Reason: "NotReady",
-		Message: fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready (%d running, %d desired)",
-			readyReplicas, desiredReplicas, replicas, desiredReplicas),
+		Message: fmt.Sprintf("Schema Registry deployment is not ready: %d/%d replicas ready (%d updated, %d running, %d desired; observed generation %d of %d)",
+			readyReplicas, desiredReplicas, updatedReplicas, replicas, desiredReplicas, depObservedGeneration, depGeneration),
 		ObservedGeneration: generation,
 	}
 }
@@ -764,16 +843,22 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 			}
 		}
 		monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
-		dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
+		// The recreated secret's ResourceVersion drives the rollout
+		// annotation; fetch it fresh so the version reflects the persisted
+		// object.
+		recreated := &v1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, recreated); err != nil {
+			logger.Error(err, "Failed to get recreated jks secret for the rollout annotation")
+			return ctrl.Result{}, err
+		}
+		patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, recreated.ResourceVersion, "jks secret recreation")
 		if err != nil {
-			logger.Error(err, "Failed to get deployment for missing jks secret recreation")
+			logger.Error(err, "Failed to roll deployment after jks secret recreation")
 			return ctrl.Result{}, err
 		}
-		if err := r.Update(ctx, dep); err != nil {
-			logger.Error(err, "Failed to update deployment after jks secret recreation")
-			return ctrl.Result{}, err
+		if !patched {
+			return ctrl.Result{}, nil
 		}
-		logger.Info("Deployment updated after jks secret recreation", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
@@ -800,6 +885,17 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 	}
 
 	if !userSecretChanged && !clusterCASecretChanged {
+		// No secret churn — but the Deployment rollout may still be pending
+		// after a failed Deployment update (e.g. a 409 Conflict): drive the
+		// check from the pod-template annotation instead of the secret's
+		// change markers, which already match here.
+		patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, curr_secret.ResourceVersion, "jks secret")
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if patched {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -845,17 +941,14 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 	}
 	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
 	logger.Info("Creating new jks secret after user or cluster CA secret changed was successful")
-	dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
+	patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, newSecret.ResourceVersion, "user or cluster CA secret change")
 	if err != nil {
-		logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		logger.Error(err, "Failed to roll deployment after user or cluster CA secret changed")
 		return ctrl.Result{}, err
 	}
-	err = r.Update(ctx, dep)
-	if err != nil {
-		logger.Error(err, "Failed to update deployment after user or cluster CA secret changed")
-		return ctrl.Result{}, err
+	if !patched {
+		return ctrl.Result{}, nil
 	}
-	logger.Info("Deployment updated after secret change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
@@ -881,6 +974,7 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 
 	// Detect a cluster CA change for SASL_SSL (truststore-only rebuild).
 	var CAsecret *v1.Secret
+	var currJKSSecret *v1.Secret
 	clusterCASecretChanged := false
 	if auth.NeedsTruststore {
 		CAsecret = &v1.Secret{}
@@ -896,6 +990,10 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 		}
 		if errors.IsNotFound(err) || curr_secret.Annotations[CAVersionKey] != CAsecret.ResourceVersion {
 			clusterCASecretChanged = true
+		} else {
+			// Up-to-date truststore secret: kept for the annotation-driven
+			// rollout check below.
+			currJKSSecret = curr_secret
 		}
 	}
 
@@ -912,17 +1010,28 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 			}
 		}
 		monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
-		dep, err := r.updateDeployment(instance, ctx, logger, newSecret)
+		patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, newSecret.ResourceVersion, "cluster CA secret change")
 		if err != nil {
-			logger.Error(err, "Failed to update deployment", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+			logger.Error(err, "Failed to roll deployment after cluster CA secret changed")
 			return ctrl.Result{}, err
 		}
-		if err := r.Update(ctx, dep); err != nil {
-			logger.Error(err, "Failed to update deployment after cluster CA secret changed")
-			return ctrl.Result{}, err
+		if !patched {
+			return ctrl.Result{}, nil
 		}
-		logger.Info("Deployment updated after cluster CA secret changed", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	// No cluster CA churn — but the truststore rollout may still be pending
+	// after a failed Deployment update: drive the check from the pod-template
+	// annotation instead of the secret's change markers, which already match.
+	if currJKSSecret != nil {
+		patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, currJKSSecret.ResourceVersion, "jks secret")
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if patched {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 	}
 
 	// Roll the deployment when the KafkaUser SCRAM credential secret changes.
@@ -964,20 +1073,22 @@ func (r *StrimziSchemaRegistryReconciler) handleClientAuthTruststoreRotation(
 		logger.Error(err, "Failed to ensure client-auth truststore secret")
 		return ctrl.Result{}, err
 	}
-	if !created {
+	if created {
+		monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
+	}
+	// Drive the rollout check from the Deployment's pod-template annotation:
+	// patch only when the recorded jksVersion differs from the truststore
+	// secret's current ResourceVersion. This also retries a rollout whose
+	// Deployment update previously failed with a conflict, and is a no-op
+	// (no spurious rollout) once the annotation matches.
+	patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, jksVersionKey, secret.ResourceVersion, "client-auth truststore change")
+	if err != nil {
+		logger.Error(err, "Failed to roll deployment after client-auth truststore change")
+		return ctrl.Result{}, err
+	}
+	if !patched {
 		return ctrl.Result{}, nil
 	}
-	monitoring.StrimziSchemaRegistrySecretRotationTotal.Inc()
-	dep, err := r.updateDeployment(instance, ctx, logger, secret)
-	if err != nil {
-		logger.Error(err, "Failed to update deployment after client-auth truststore change")
-		return ctrl.Result{}, err
-	}
-	if err := r.Update(ctx, dep); err != nil {
-		logger.Error(err, "Failed to update deployment after client-auth truststore change")
-		return ctrl.Result{}, err
-	}
-	logger.Info("Deployment updated after client-auth truststore change", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
@@ -1022,6 +1133,56 @@ func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSASLUserSecret(
 	}
 	dep.Spec.Template.Annotations[saslUserVersionKey] = userSecret.ResourceVersion
 	return dep, nil
+}
+
+// rollDeploymentForSecretVersion drives a rotation rollout from the
+// Deployment's own pod template annotations (mirroring
+// handleUserTLSSecretRotation): the desired annotation value is the current
+// ResourceVersion of the secret the pods consume, and the Deployment is
+// patched — which changes the pod template and triggers a rollout — only when
+// the recorded annotation differs. Comparing against the Deployment state
+// instead of the secret's own change markers keeps the rollout recoverable:
+// when a Deployment update fails (e.g. a 409 Conflict) the secret already
+// carries its new change-marker annotations, so a secret-churn comparison
+// would skip the rollout forever and the pods would keep the old in-memory
+// keystore/truststore until manually restarted. With the annotation check the
+// next reconcile observes the mismatch and retries the patch. It is a no-op
+// when the Deployment does not exist (nothing to roll) and when the
+// annotation already matches (no spurious rollout).
+func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSecretVersion(
+	ctx context.Context,
+	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	logger logr.Logger,
+	annotationKey string,
+	secretVersion string,
+	reason string,
+) (bool, error) {
+	dep := &apps.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name + deploySuffix, Namespace: instance.Namespace}, dep); err != nil {
+		if errors.IsNotFound(err) {
+			// Nothing to roll before the Deployment exists.
+			return false, nil
+		}
+		return false, err
+	}
+	current := ""
+	if dep.Spec.Template.Annotations != nil {
+		current = dep.Spec.Template.Annotations[annotationKey]
+	}
+	if current == secretVersion {
+		return false, nil
+	}
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations[annotationKey] = secretVersion
+	if err := r.Update(ctx, dep); err != nil {
+		return false, err
+	}
+	logger.Info("Deployment rolled after "+reason,
+		"Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace,
+		"Annotation", annotationKey, "Secret.Version", secretVersion)
+	return true, nil
 }
 
 // mapStrimziResourceToRequests enqueues reconcile requests for the
@@ -1369,6 +1530,17 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 			// renewal happens on time even if no watch event ever fires again.
 			// An already-expired or near-expiry certificate (time.Until <=
 			// threshold) falls through to the renewal below.
+			// No renewal is due, but the rollout for a previous renewal may
+			// still be pending after a failed Deployment update: drive the
+			// check from the tlsVersion pod-template annotation instead of
+			// the secret's change markers, which already match here.
+			patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, tlsVersionKey, tlsSecret.ResourceVersion, "REST API TLS secret")
+			if err != nil {
+				return ctrl.Result{}, 0, err
+			}
+			if patched {
+				return ctrl.Result{RequeueAfter: time.Second}, 0, nil
+			}
 			return ctrl.Result{}, certRecheckInterval(notAfter), nil
 		}
 
@@ -1399,21 +1571,17 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 
 	// Roll the deployment so the JVM reloads the renewed keystore. The
 	// tlsVersion pod-template annotation changes on every renewal, forcing
-	// a rollout even though the JKS secret itself did not change.
-	dep, err := r.updateDeployment(instance, ctx, logger, nil)
+	// a rollout even though the JKS secret itself did not change. The check
+	// is driven from the pod-template annotation, so a Deployment update
+	// that failed with a conflict is retried on the next reconcile.
+	patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, tlsVersionKey, newSecret.ResourceVersion, "REST API TLS certificate renewal")
 	if err != nil {
-		logger.Error(err, "Failed to get deployment for TLS certificate renewal rollout")
+		logger.Error(err, "Failed to roll deployment after TLS certificate renewal")
 		return ctrl.Result{}, 0, err
 	}
-	if dep.Spec.Template.Annotations == nil {
-		dep.Spec.Template.Annotations = make(map[string]string)
+	if !patched {
+		return ctrl.Result{}, 0, nil
 	}
-	dep.Spec.Template.Annotations[tlsVersionKey] = newSecret.ResourceVersion
-	if err := r.Update(ctx, dep); err != nil {
-		logger.Error(err, "Failed to update deployment after TLS certificate renewal")
-		return ctrl.Result{}, 0, err
-	}
-	logger.Info("Deployment updated after TLS certificate renewal", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 	// The 1s requeue re-runs the expiry check after the renewal, so no
 	// standing interval is needed here.
 	return ctrl.Result{RequeueAfter: time.Second}, 0, nil
@@ -1473,21 +1641,18 @@ func (r *StrimziSchemaRegistryReconciler) recreateMissingTLSSecret(
 		r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "TLSSecretRecreated", "RecreateSecret",
 			"REST API TLS secret %s was deleted; recreated it and rolling the deployment", instance.Name+tlsSecretSuffix)
 	}
-	// Roll the deployment so the JVM reloads the recreated keystore.
-	dep, err = r.updateDeployment(instance, ctx, logger, nil)
+	// Roll the deployment so the JVM reloads the recreated keystore. The
+	// check is driven from the tlsVersion pod-template annotation, so a
+	// Deployment update that failed with a conflict is retried on the next
+	// reconcile.
+	patched, err := r.rollDeploymentForSecretVersion(ctx, instance, logger, tlsVersionKey, newSecret.ResourceVersion, "TLS secret recreation")
 	if err != nil {
-		logger.Error(err, "Failed to get deployment for TLS secret recreation rollout")
+		logger.Error(err, "Failed to roll deployment after TLS secret recreation")
 		return ctrl.Result{}, err
 	}
-	if dep.Spec.Template.Annotations == nil {
-		dep.Spec.Template.Annotations = make(map[string]string)
+	if !patched {
+		return ctrl.Result{}, nil
 	}
-	dep.Spec.Template.Annotations[tlsVersionKey] = newSecret.ResourceVersion
-	if err := r.Update(ctx, dep); err != nil {
-		logger.Error(err, "Failed to update deployment after TLS secret recreation")
-		return ctrl.Result{}, err
-	}
-	logger.Info("Deployment updated after TLS secret recreation", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 

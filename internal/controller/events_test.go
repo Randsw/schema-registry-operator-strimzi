@@ -232,30 +232,11 @@ func TestRecordedEventsCarryNonEmptyAction(t *testing.T) {
 		svc.OwnerReferences = nil
 		svc.Spec.Ports[0].Port = 9999
 
-		// A Deployment in its desired shape (stable selector, current spec
-		// hash, current bootstrap env) so reconciliation reaches the Service
-		// block instead of returning after the Deployment update.
-		hash, err := computeSpecHash(inst)
-		if err != nil {
-			t.Fatalf("failed to compute spec hash: %v", err)
-		}
+		// A Deployment in its desired shape (operator-complete, built by
+		// buildDeploymentSpec) so reconciliation reaches the Service block
+		// instead of returning after the Deployment update.
 		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
-		dep := &apps.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        inst.Name + deploySuffix,
-				Namespace:   inst.Namespace,
-				Annotations: map[string]string{keyPrefix + "/specHash": hash},
-			},
-			Spec: apps.DeploymentSpec{
-				Selector: &metav1.LabelSelector{MatchLabels: selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)},
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{
-						{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1",
-							Env: []corev1.EnvVar{{Name: bootstrapServersEnv, Value: bootstrap}}},
-					}},
-				},
-			},
-		}
+		dep := newOperatorDeployment(t, scheme, inst, bootstrap, "")
 
 		client := fake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), dep, svc).

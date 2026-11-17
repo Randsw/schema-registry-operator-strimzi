@@ -340,8 +340,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment); err != nil {
 					return err
 				}
+				// A fully converged rollout: every replica updated and ready,
+				// and the status reflects the current generation — the Ready
+				// condition requires all three.
 				deployment.Status.Replicas = 1
 				deployment.Status.ReadyReplicas = 1
+				deployment.Status.UpdatedReplicas = 1
+				deployment.Status.ObservedGeneration = deployment.Generation
 				return k8sClient.Status().Update(ctx, deployment)
 			}, time.Minute, time.Second).Should(Succeed())
 
@@ -2871,78 +2876,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 	})
 
-	// Phase 1b: the unsupported multi-replica HTTPS combination. Multiple
-	// replicas with securehttp and no user-provided TLS secret cannot work
-	// (the operator-generated certificate covers DNS names only, so
-	// inter-instance HTTPS forwarding fails TLS verification); reconciliation
-	// must be skipped with an explicit condition and no Deployment created.
-	Context("When reconciling replicas with securehttp and no user TLS secret", func() {
-		const SchemaRegistryName = "test-https-replicas"
-
-		ctx := context.Background()
-
-		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
-		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
-
-		BeforeEach(func() {
-			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
-
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      SchemaRegistryName,
-					Namespace: SchemaRegistryName,
-					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
-				},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
-					SecureHTTP:       true,
-					Listener:         "plain",
-					SecurityProtocol: "PLAINTEXT",
-					Replicas:         ptr.To(int32(2)),
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"},
-							},
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-		})
-
-		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
-			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
-				if len(found.Finalizers) > 0 {
-					found.Finalizers = []string{}
-					_ = k8sClient.Update(ctx, found)
-				}
-				_ = k8sClient.Delete(ctx, found)
-			}
-			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}})
-		})
-
-		It("should reject the combination and create no deployment", func() {
-			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
-
-			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("ReplicasRequireUserTLSSecret"))
-			Expect(cond.Message).To(ContainSubstring("spec.replicas > 1 with securehttp"))
-			Expect(instance.Status.Status).To(Equal("InvalidSpec"))
-
-			deployment := &appsv1.Deployment{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-deploy", Namespace: SchemaRegistryName}, deployment)).
-				To(HaveOccurred(), "no Deployment must be created for the unsupported combination")
-		})
-	})
+	// Phase 1b: the unsupported multi-replica HTTPS combination (replicas > 1
+	// with securehttp and no user-provided TLS secret) is now rejected by the
+	// CRD CEL validation rules at admission time, so it can no longer be
+	// created through the API server. The controller-side defense-in-depth
+	// behavior (InvalidSpec, no Deployment) is covered by the fake-client test
+	// TestReconcileSkipsMultiReplicaHTTPSWithoutUserTLSSecret in k8s_test.go,
+	// and the admission-time rejection by crdvalidation_test.go.
 
 	// Phase 2: arbitrary configuration escape hatch.
 	Context("When reconciling with spec.configuration", func() {
@@ -3766,64 +3706,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 	})
 
-	// Phase 3: clientauth validation.
-	Context("When clientauth is enabled without securehttp", func() {
-		const SchemaRegistryName = "test-clientauth-invalid"
-
-		ctx := context.Background()
-
-		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName}}
-		typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
-
-		BeforeEach(func() {
-			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
-			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
-
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
-				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
-					SecureHTTP:         false,
-					ClientAuth:         true,
-					Listener:           "plain",
-					CompatibilityLevel: "forward",
-					SecurityProtocol:   "PLAINTEXT",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
-				},
-			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-		})
-
-		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
-			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
-				if len(found.Finalizers) > 0 {
-					found.Finalizers = []string{}
-					_ = k8sClient.Update(ctx, found)
-				}
-				_ = k8sClient.Delete(ctx, found)
-			}
-			_ = k8sClient.Delete(ctx, namespace)
-			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
-		})
-
-		It("should set Ready=False with the ClientAuthRequiresSecureHTTP reason", func() {
-			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
-
-			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("ClientAuthRequiresSecureHTTP"))
-
-			// The status.status field must be populated alongside the Ready
-			// condition so the CRD printcolumn is not permanently empty.
-			Expect(instance.Status.Status).To(Equal("InvalidSpec"))
-		})
-	})
+	// Phase 3: clientauth validation. The clientauth-without-securehttp
+	// combination is now rejected by the CRD CEL validation rules at admission
+	// time, so it can no longer be created through the API server. The
+	// controller-side defense-in-depth behavior (InvalidSpec,
+	// ClientAuthRequiresSecureHTTP) is covered by the fake-client test
+	// TestReconcileSkipsInvalidClientAuthCombination in k8s_test.go, and the
+	// admission-time rejection by crdvalidation_test.go.
 
 	// Phase 3 (events): the recorded validation events must be persisted by
 	// the API server with a non-empty action. The production recorder
@@ -3833,8 +3722,8 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 	// The spec is self-contained (own namespace, DeferCleanup) like the
 	// multi-spec contexts above, because the shared BeforeEach fixtures
 	// cannot re-create their namespace object for a second spec.
-	Context("When recording validation events for an invalid clientauth spec", func() {
-		const SchemaRegistryName = "test-clientauth-events"
+	Context("When recording validation events for an invalid user TLS secret", func() {
+		const SchemaRegistryName = "test-tlssecret-events"
 
 		ctx := context.Background()
 
@@ -3854,18 +3743,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				_ = k8sClient.Delete(ctx, namespace)
 			})
 
-			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
-			DeferCleanup(func() { _ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE") })
-
 			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
-					SecureHTTP:         false,
-					ClientAuth:         true,
-					Listener:           "plain",
-					CompatibilityLevel: "forward",
-					SecurityProtocol:   "PLAINTEXT",
-					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
+					SecureHTTP:    true,
+					TLSSecretName: "missing-user-tls-secret",
+					Listener:      "plain",
+					Template:      corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3895,7 +3779,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Both validation events must exist with the non-empty Validate
+			// The validation event must exist with the non-empty Validate
 			// action; Eventually absorbs the broadcaster's asynchronous
 			// write to the sink.
 			actionFor := func(reason string) func() string {
@@ -3912,8 +3796,10 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 					return ""
 				}
 			}
-			Eventually(actionFor("ClientAuthRequiresSecureHTTP"), time.Minute, time.Second).Should(Equal("Validate"))
-			Eventually(actionFor("ReconciliationSkipped"), time.Minute, time.Second).Should(Equal("Validate"))
+			// The InvalidTLSSecret path emits a single validation event (no
+			// ReconciliationSkipped event: the Secret watch re-enqueues
+			// reconciliation when the user fixes the secret).
+			Eventually(actionFor("InvalidTLSSecret"), time.Minute, time.Second).Should(Equal("Validate"))
 		})
 	})
 

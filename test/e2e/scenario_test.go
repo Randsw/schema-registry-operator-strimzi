@@ -53,8 +53,10 @@ const (
 //     REST round-trip (register/fetch/config) succeeds, proving the Kafka
 //     connection works with the scenario's securityprotocol (schemas are
 //     persisted to the registry-schemas Kafka topic).
-//  2. clientauth=true, securehttp=false — the operator must reject the
-//     invalid combination (ClientAuthRequiresSecureHTTP).
+//  2. clientauth=true, securehttp=false — the API server rejects the invalid
+//     combination at admission time (the CRD's CEL validation rule); the
+//     controller re-checks it as defense-in-depth
+//     (ClientAuthRequiresSecureHTTP).
 //  3. clientauth=true, securehttp=true — the deployment is updated, the REST
 //     round-trip succeeds with a cluster-CA-signed client certificate and
 //     requests without a client certificate are rejected.
@@ -85,7 +87,7 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 	It("phase 1: deploys with clientauth disabled and passes the REST round-trip", func() {
 		ctx := context.Background()
 
-		applyRegistryCR(ctx, false, true, nil)
+		Expect(applyRegistryCR(ctx, false, true, nil)).To(Succeed())
 		waitForReadyCondition(ctx, readyTimeout)
 		waitForDeploymentRollout(ctx, readyTimeout)
 
@@ -95,16 +97,19 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 	It("rejects clientauth without securehttp", func() {
 		ctx := context.Background()
 
-		applyRegistryCR(ctx, true, false, nil)
-		waitForCondition(ctx, readyTimeout, func(cond *metav1.Condition) bool {
-			return cond.Status == metav1.ConditionFalse && cond.Reason == "ClientAuthRequiresSecureHTTP"
-		})
+		// The CRD's CEL validation rule rejects the combination at admission
+		// time, so the apply itself must fail with an Invalid error carrying
+		// the rule message; no CR is created or updated.
+		err := applyRegistryCR(ctx, true, false, nil)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(),
+			"expected an Invalid admission error, got %v", err)
+		Expect(err.Error()).To(ContainSubstring("spec.clientauth requires spec.securehttp"))
 	})
 
 	It("phase 2: redeploys with clientauth enabled and enforces mutual TLS on the REST API", func() {
 		ctx := context.Background()
 
-		applyRegistryCR(ctx, true, true, nil)
+		Expect(applyRegistryCR(ctx, true, true, nil)).To(Succeed())
 
 		By("waiting for the deployment to pick up the clientauth configuration")
 		waitForDeploymentEnv(ctx, readyTimeout, "SCHEMA_REGISTRY_SSL_CLIENT_AUTHENTICATION", "REQUIRED")
@@ -124,8 +129,9 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 
 // applyRegistryCR creates or updates the StrimziSchemaRegistry CR for the
 // scenario with the given clientauth/securehttp values. A nil replicas leaves
-// spec.replicas unset (the operator default of 1 applies).
-func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas *int32) {
+// spec.replicas unset (the operator default of 1 applies). It returns the
+// apply error so callers can assert admission rejections.
+func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas *int32) error {
 	replicationFactor := int32(1)
 
 	cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
@@ -192,8 +198,7 @@ func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas 
 		existing.Spec = desiredSpec
 		return k8sClient.Update(ctx, existing)
 	})
-	Expect(err).NotTo(HaveOccurred(),
-		"failed to apply the StrimziSchemaRegistry CR %s/%s", scenario.Namespace, scenario.RegistryName)
+	return err
 }
 
 // waitForReadyCondition waits until the CR reports the Ready=True condition.
@@ -347,7 +352,7 @@ var _ = Describe("StrimziSchemaRegistry e2e multi-replica scenario", Ordered, fu
 		ctx := context.Background()
 
 		By("applying the CR with spec.replicas=2 and securehttp disabled")
-		applyRegistryCR(ctx, false, false, ptr.To(int32(2)))
+		Expect(applyRegistryCR(ctx, false, false, ptr.To(int32(2)))).To(Succeed())
 
 		By("waiting for the deployment to carry the per-pod host.name downward API env")
 		waitForDeploymentEnvFieldRef(ctx, readyTimeout, "SCHEMA_REGISTRY_HOST_NAME", "status.podIP")
