@@ -26,12 +26,6 @@ import (
 	"software.sslmate.com/src/go-pkcs12"
 )
 
-// execCommandTimeout is the defensive deadline applied to keytool/openssl
-// child processes when the caller's context carries none. A hung cert tool
-// must never block a reconcile worker indefinitely (B5). It is a variable so
-// tests can shorten it.
-var execCommandTimeout = 5 * time.Minute
-
 // rsaKeyBits is the RSA key size used for the REST API server certificate
 // key generated on every renewal (generateCSR). The default is 2048 bits:
 // fast enough to generate on every certificate renewal and sufficient for a
@@ -39,17 +33,6 @@ var execCommandTimeout = 5 * time.Minute
 // renewal noticeably slower). It is a variable so deployments that want a
 // larger key can raise it (e.g. 3072 or 4096) and so tests can pin it.
 var rsaKeyBits = 2048
-
-// withExecDeadline returns a context that enforces execCommandTimeout when
-// the incoming context has no deadline; a context that already carries one
-// (for example the reconcile context) is passed through unchanged. The caller
-// must invoke the returned cancel function.
-func withExecDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, execCommandTimeout)
-}
 
 // ensureContextAlive returns the caller's context error — wrapped so
 // errors.Is still matches context.Canceled / context.DeadlineExceeded — when
@@ -62,29 +45,6 @@ func ensureContextAlive(ctx context.Context) error {
 		return fmt.Errorf("%w: certificate processing aborted before it completed", err)
 	}
 	return nil
-}
-
-// runCertCommand executes an already-built command created with
-// exec.CommandContext and returns its stdout. It never returns silently on
-// failure: context cancellation or the default deadline is reported as the
-// wrapped context error, and keytool/openssl diagnostics — which go to
-// stderr, never stdout — are appended to the error message and the log
-// entry (B17), because cmd.Output() only surfaces stdout.
-func runCertCommand(ctx context.Context, cp *CertProcessor, cmd *exec.Cmd) ([]byte, error) {
-	out, err := cmd.Output()
-	if err == nil {
-		return out, nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		err = fmt.Errorf("%w: cert tool process aborted before it completed", ctxErr)
-	} else {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
-	}
-	cp.log.Error(err, "Error while exec command", "cmd", filepath.Base(cmd.Path), "stdout", string(out))
-	return out, err
 }
 
 type CertProcessor struct {
