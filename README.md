@@ -583,6 +583,37 @@ multiple replicas over HTTPS, provide `spec.tlssecretname` with a
 certificate whose SANs cover the replica addresses (for example the pod
 IPs or a per-replica DNS identity).
 
+**Inter-instance HTTPS truststore and endpoint identification.** With
+`replicas > 1` and `securehttp: true`, replicas forward requests to each other
+over HTTPS (`inter.instance.protocol: https`) using each pod's IP as
+`host.name`. The operator renders the REST API keystore but no REST API
+truststore: `SCHEMA_REGISTRY_SSL_TRUSTSTORE_*` is only rendered when
+`clientauth` is enabled (reusing the cluster-CA truststore). When the REST API
+certificate is signed by a private CA, a replica cannot verify another
+replica's certificate unless truststore material is configured:
+
+- `ssl.truststore.*` keys (`ssl.truststore.location`, `ssl.truststore.password`,
+  …) are operator-reserved and cannot be supplied through `spec.configuration`
+  (they are ignored, with a `ConfigKeyOverridden` event). To configure the REST
+  API truststore, inject the `SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION` and
+  `SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD` environment variables (and mount
+  the truststore file) through `spec.template`: user template env vars are
+  appended as long as the operator does not render the same name (it does when
+  `clientauth` is enabled).
+- `ssl.endpoint.identification.algorithm` (settable through
+  `spec.configuration`) defaults to `HTTPS`, which verifies the contacted
+  address against the certificate SANs. That works when clients reach the
+  service by a DNS name covered by the SANs (for example the managed Service
+  DNS name), but inter-instance forwarding always contacts pod IPs, which are
+  ephemeral and cannot be pre-provisioned into a static secret's SANs.
+  Depending on how clients reach the service it may therefore need to be set
+  to the empty string (`ssl.endpoint.identification.algorithm: ""`) to disable
+  endpoint identification, unless the certificate covers the addresses the
+  clients use.
+
+External REST clients connecting over HTTPS need the same truststore material
+on their side.
+
 ### Arbitrary Schema Registry configuration
 
 Use `spec.configuration` to pass arbitrary Confluent Schema Registry properties
@@ -638,6 +669,7 @@ reconciles do not repeat the events; reconciliation still succeeds.
 | `kafkastore.ssl.*`                         | KafkaStore TLS keystore/truststore                          |
 | `kafkastore.sasl.*`                        | KafkaStore SASL (SCRAM) credentials                         |
 | `ssl.keystore.*` (incl. `ssl.keystore.type`)| REST API TLS keystore (type follows `spec.keystoretype`)    |
+| `ssl.truststore.*`                         | REST API TLS truststore (when `clientauth` is enabled)       |
 | `ssl.key.password`                         | REST API TLS key password                                   |
 
 `spec.heapopts` accepts `-Xms<size>`, `-Xmx<size>`, or both in the common `-Xms<size> -Xmx<size>` order, where
