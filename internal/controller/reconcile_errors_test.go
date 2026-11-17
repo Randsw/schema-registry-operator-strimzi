@@ -349,8 +349,7 @@ func TestReconcileNetworkPolicyCreateError(t *testing.T) {
 	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme, Recorder: rec}
 
 	var reconcileErr error
-	var delta float64
-	delta = reconcileErrorsDelta(func() {
+	delta := reconcileErrorsDelta(func() {
 		_, reconcileErr = r.Reconcile(context.Background(), reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
 		})
