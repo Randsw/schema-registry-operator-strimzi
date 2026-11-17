@@ -243,9 +243,9 @@ func TestCreateTLSKeystore(t *testing.T) {
 }
 
 // TestConvertPEMToJKS verifies the PEM → JKS conversion used for standard
-// kubernetes.io/tls user secrets: the produced JKS is parseable with keytool
-// (via KeystoreCertExpiry, which shells out to keytool -list) and the
-// returned password unlocks it, while a wrong password does not.
+// kubernetes.io/tls user secrets: the produced JKS decodes in Go with the
+// keystore-go library, the returned password unlocks it while a wrong
+// password does not, and the entry holds the certificate and its key.
 func TestConvertPEMToJKS(t *testing.T) {
 	ca, err := testutil.GenerateTestCA()
 	if err != nil {
@@ -269,15 +269,21 @@ func TestConvertPEMToJKS(t *testing.T) {
 		if password != "test1234" {
 			t.Errorf("expected the provided password to be returned, got %q", password)
 		}
-		// keytool -list must parse the JKS with the password and expose the
-		// certificate; this proves both the format and the password.
-		notAfter, err := cp.KeystoreCertExpiry(context.Background(), keystore, password)
-		if err != nil {
-			t.Fatalf("keytool failed to parse the converted JKS with the password: %v", err)
+		entries := decodeJKS(t, keystore, password)
+		if len(entries) != 1 {
+			t.Fatalf("expected exactly 1 keystore entry, got %d (%s)", len(entries), jksAliases(entries))
 		}
-		if !notAfter.After(time.Now()) {
-			t.Errorf("expected a future certificate expiry, got %v", notAfter)
+		entry := findJKSEntry(entries, "confluent-schema-registry")
+		if entry == nil {
+			t.Fatalf("expected the confluent-schema-registry alias, got %s", jksAliases(entries))
 		}
+		if !entry.isKey {
+			t.Error("expected a private key entry")
+		}
+		if len(entry.chain) != 1 || !bytes.Equal(entry.chain[0].Raw, uc.UserCert.Raw) {
+			t.Errorf("expected the keystore to hold the leaf certificate, got %s", certSubjects(entry.chain))
+		}
+		assertJKSKeyMatches(t, entry, uc.UserKey.Public())
 	})
 
 	t.Run("wrong password cannot open the keystore", func(t *testing.T) {
@@ -285,8 +291,8 @@ func TestConvertPEMToJKS(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if _, err := cp.KeystoreCertExpiry(context.Background(), keystore, "wrong-password"); err == nil {
-			t.Error("expected keytool to fail with a wrong password, got nil")
+		if _, err := loadJKS(t, keystore, "wrong-password"); err == nil {
+			t.Error("expected the JKS integrity check to fail with a wrong password, got nil")
 		}
 	})
 
@@ -298,8 +304,10 @@ func TestConvertPEMToJKS(t *testing.T) {
 		if len(password) != 24 {
 			t.Errorf("expected a generated 24-character password, got %d characters", len(password))
 		}
-		if _, err := cp.KeystoreCertExpiry(context.Background(), keystore, password); err != nil {
-			t.Fatalf("keytool failed to parse the converted JKS with the generated password: %v", err)
+		// The generated password must unlock the produced keystore.
+		entries := decodeJKS(t, keystore, password)
+		if len(entries) != 1 {
+			t.Fatalf("expected exactly 1 keystore entry, got %d (%s)", len(entries), jksAliases(entries))
 		}
 	})
 
@@ -336,16 +344,19 @@ func TestConvertPEMToJKS_WithCACert(t *testing.T) {
 		if len(keystore) == 0 {
 			t.Fatal("empty keystore")
 		}
-		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
-		if len(certs) != 2 {
-			t.Fatalf("expected the keystore to hold the leaf and the CA chain, got %d certs: %s", len(certs), certSubjects(certs))
+		entries := decodeJKS(t, keystore, password)
+		if len(entries) != 1 {
+			t.Fatalf("expected exactly 1 keystore entry, got %d (%s)", len(entries), jksAliases(entries))
 		}
-		got := certRawSet(certs)
+		if len(entries[0].chain) != 2 {
+			t.Fatalf("expected the keystore to hold the leaf and the CA chain, got %d certs: %s", len(entries[0].chain), certSubjects(entries[0].chain))
+		}
+		got := certRawSet(entries[0].chain)
 		if _, ok := got[string(uc.UserCert.Raw)]; !ok {
-			t.Errorf("expected the leaf certificate in the keystore, got %s", certSubjects(certs))
+			t.Errorf("expected the leaf certificate in the keystore, got %s", certSubjects(entries[0].chain))
 		}
 		if _, ok := got[string(ca.CACert.Raw)]; !ok {
-			t.Errorf("expected the provided ca.crt certificate in the keystore chain, got %s", certSubjects(certs))
+			t.Errorf("expected the provided ca.crt certificate in the keystore chain, got %s", certSubjects(entries[0].chain))
 		}
 	})
 
@@ -354,9 +365,12 @@ func TestConvertPEMToJKS_WithCACert(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
-		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, uc.UserCert.Raw) {
-			t.Errorf("expected the keystore to hold only the leaf certificate, got %d certs: %s", len(certs), certSubjects(certs))
+		entries := decodeJKS(t, keystore, password)
+		if len(entries) != 1 {
+			t.Fatalf("expected exactly 1 keystore entry, got %d (%s)", len(entries), jksAliases(entries))
+		}
+		if len(entries[0].chain) != 1 || !bytes.Equal(entries[0].chain[0].Raw, uc.UserCert.Raw) {
+			t.Errorf("expected the keystore to hold only the leaf certificate, got %s", certSubjects(entries[0].chain))
 		}
 	})
 
@@ -365,9 +379,12 @@ func TestConvertPEMToJKS_WithCACert(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
-		if len(certs) != 1 || !bytes.Equal(certs[0].Raw, uc.UserCert.Raw) {
-			t.Errorf("expected the keystore to hold only the leaf certificate, got %d certs: %s", len(certs), certSubjects(certs))
+		entries := decodeJKS(t, keystore, password)
+		if len(entries) != 1 {
+			t.Fatalf("expected exactly 1 keystore entry, got %d (%s)", len(entries), jksAliases(entries))
+		}
+		if len(entries[0].chain) != 1 || !bytes.Equal(entries[0].chain[0].Raw, uc.UserCert.Raw) {
+			t.Errorf("expected the keystore to hold only the leaf certificate, got %s", certSubjects(entries[0].chain))
 		}
 	})
 
@@ -473,6 +490,28 @@ func TestCreateKeystore_UnrelatedCA(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ca.crt") {
 		t.Errorf("expected the error to name the offending input ca.crt, got: %v", err)
+	}
+}
+
+// TestConvertPEMToJKS_KeyCertMismatch pins the key/certificate match
+// validation for the user TLS secret path.
+func TestConvertPEMToJKS_KeyCertMismatch(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+	other, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate a second user cert: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	if _, _, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, other.UserKeyPEM, "", "test1234"); err == nil {
+		t.Fatal("expected an error when the private key matches no provided certificate, got nil")
 	}
 }
 
