@@ -18,7 +18,13 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/randsw/strimzi-schema-registry-operator
-          flavor: latest=true
+          # latest=auto publishes the mutable "latest" tag only for
+          # non-prerelease semver tags. The trigger above also matches
+          # prerelease tags cut from develop (e.g. 1.19.1-develop.1), and
+          # latest=true would let each of them overwrite
+          # ghcr.io/randsw/strimzi-schema-registry-operator:latest with
+          # unreleased code.
+          flavor: latest=auto
           tags: |
             type=ref,event=branch
             type=ref,event=pr

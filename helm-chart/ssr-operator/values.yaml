@@ -16,10 +16,20 @@ image:
   resources:
     limits:
       cpu: 500m
-      memory: 128Mi
+      # 512Mi (not 128Mi): during reconciliation the operator spawns keytool
+      # (a JVM from default-jre-headless) and openssl as child processes;
+      # JVM startup alone (heap + metaspace + code cache) needs far more
+      # headroom than a 128Mi limit leaves next to the Go runtime, and an
+      # OOMKilled operator pod (exit 137) aborts reconciliation mid-flight.
+      # Bounding the JVM itself is deferred until the keytool subprocesses
+      # are replaced with pure-Go keystore generation.
+      memory: 512Mi
     requests:
       cpu: 10m
-      memory: 64Mi
+      # 256Mi: steady-state Go runtime usage plus room for the bursty
+      # subprocess memory above without guaranteed-CPU-style throttling of
+      # the reconciliation loop.
+      memory: 256Mi
   securityContext:
     allowPrivilegeEscalation: false
     # The operator needs no Linux capabilities (it only execs keytool/openssl
@@ -32,7 +42,11 @@ image:
     # runAsUser: 1000
 
 imagePullSecrets: []
-nameOverride: "strimzi-schema-registry-operator"
+# Keep nameOverride empty: resource names must derive from the fullname
+# template (release-name based) so two installs of the chart in different
+# namespaces never produce identically named resources. Set it only to pin a
+# shared app name across releases.
+nameOverride: ""
 fullnameOverride: ""
 
 serviceAccount:
@@ -42,7 +56,7 @@ serviceAccount:
   annotations: {}
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template
-  name: "strimzi-schema-registry-operator"
+  name: ""
 
 podAnnotations:
   kubectl.kubernetes.io/default-container: ssr-operator

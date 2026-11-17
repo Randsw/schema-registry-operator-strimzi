@@ -112,27 +112,44 @@ prepare:
     # appVersion ships an operator binary mismatched with the chart and its
     # CRD. semantic-release substitutes the next release version into the
     # --set-version argument before the command runs.
-    # The chart version itself is bumped only when files under
-    # helm-chart/ssr-operator changed since the previous release tag. The
-    # helm-chart workflow publishes a new chart package only when Chart.yaml
-    # changes, so bumping it on every release created empty chart releases.
+    # The chart version moves with the appVersion on every stable (main)
+    # release: the helm-chart workflow publishes a new chart package only
+    # when Chart.yaml version changes, so an appVersion-only release would
+    # otherwise leave Helm users on the old chart and its old default
+    # operator image (chart-releaser skip_existing stays as idempotency
+    # protection for re-runs). Prerelease releases (develop, e.g.
+    # 1.19.1-develop.1) never publish a chart, so they are excluded from
+    # the bump logic — which also removes the former git describe --tags
+    # base-tag resolution whose result develop prerelease tags could
+    # pollute on main (a merged prerelease tag shadows the last stable tag
+    # and previously suppressed the bump on appVersion-only releases).
     cmd: |
       bash -c '
         set -e
         python3 -m pip install pybump
         # Always keep appVersion in sync with the released operator version.
         pybump set --file helm-chart/ssr-operator/Chart.yaml --app-version --set-version ${nextRelease.version}
-        last_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
-        if [ -z "$last_tag" ]; then
-          changed=1
-        else
-          changed=$(git diff --name-only "$last_tag"..HEAD -- helm-chart/ssr-operator | wc -l)
-        fi
-        if [ "$changed" -gt 0 ]; then
-          pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch
-        else
-          echo "No helm-chart changes since $last_tag; skipping Chart.yaml version bump"
-        fi
+        # Stable releases (main) always move appVersion, so they always bump
+        # the chart patch version: the helm-chart workflow publishes a new
+        # chart package only when Chart.yaml version changes, and an
+        # appVersion-only release would otherwise leave Helm users on the
+        # old chart and its old default operator image. chart-releaser
+        # skip_existing keeps re-runs idempotent.
+        # Prerelease releases (develop, e.g. 1.19.1-develop.1) never publish
+        # a chart (the helm-chart workflow releases from main only), so
+        # they are excluded here. This also removes the former git describe
+        # --tags base-tag resolution, which develop prerelease tags could
+        # pollute on main: a merged prerelease tag shadows the last stable
+        # tag and previously suppressed the bump on appVersion-only
+        # releases.
+        case "${nextRelease.version}" in
+          *-*)
+            echo "Prerelease ${nextRelease.version}: the chart is published from main only; skipping Chart.yaml version bump"
+            ;;
+          *)
+            pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch
+            ;;
+        esac
       '
   - path: '@semantic-release/git'
     message: "chore(release): ${nextRelease.version}"

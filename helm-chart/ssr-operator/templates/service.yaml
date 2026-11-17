@@ -2,7 +2,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "ssr-operator.name" . }}-metrics-service
+  # Named from fullname (release-name based) so two installs of the chart in
+  # different namespaces never produce identically named Services.
+  name: {{ include "ssr-operator.fullname" . }}-metrics-service
   labels:
     {{- include "ssr-operator.labels" . | nindent 4 }}
 spec:

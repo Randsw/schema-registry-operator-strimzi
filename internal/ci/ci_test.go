@@ -169,8 +169,8 @@ func loadReleaserc(t *testing.T) releaserc {
 // automation must set appVersion to the released operator version on every
 // release. Without it the chart ships an operator binary mismatched with the
 // chart and its CRD (appVersion drifted to 1.17.0 while 1.17.1+ were out).
-// The conditional chart version bump and the release commit assets must stay
-// in place so the appVersion change is actually published.
+// The chart version bump and the release commit assets must stay in place so
+// the appVersion change is actually published.
 func TestReleasercSyncsChartAppVersion(t *testing.T) {
 	rc := loadReleaserc(t)
 
@@ -203,10 +203,12 @@ func TestReleasercSyncsChartAppVersion(t *testing.T) {
 		t.Error(".releaserc.yaml exec prepare step must set appVersion to ${nextRelease.version} (semantic-release substitution), not a hardcoded version")
 	}
 
-	// The conditional chart version bump must stay: the helm-chart workflow
-	// publishes a new chart package only when Chart.yaml changes.
+	// The chart version bump must stay: every stable release that moves
+	// appVersion must move the chart version too, or the helm-chart workflow
+	// (which publishes a new chart package only when Chart.yaml version
+	// changes) never publishes the updated default image tag.
 	if !strings.Contains(exec.Cmd, "pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch") {
-		t.Error(".releaserc.yaml exec prepare step must keep the conditional chart version bump (pybump bump --level patch)")
+		t.Error(".releaserc.yaml exec prepare step must keep the chart version bump (pybump bump --level patch)")
 	}
 
 	// The appVersion change must be committed with the release.
@@ -218,6 +220,69 @@ func TestReleasercSyncsChartAppVersion(t *testing.T) {
 	}
 	if !chartAsset {
 		t.Error("@semantic-release/git assets must include helm-chart/ssr-operator/Chart.yaml so the appVersion sync is committed with the release")
+	}
+}
+
+// releasercExecCmd returns the code of the @semantic-release/exec prepare
+// step's cmd (full-line script comments stripped), failing the test if the
+// step is missing.
+func releasercExecCmd(t *testing.T) string {
+	t.Helper()
+	rc := loadReleaserc(t)
+	for i := range rc.Prepare {
+		if rc.Prepare[i].Path != "@semantic-release/exec" {
+			continue
+		}
+		var code []string
+		for _, line := range strings.Split(rc.Prepare[i].Cmd, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			code = append(code, line)
+		}
+		return strings.Join(code, "\n")
+	}
+	t.Fatal(".releaserc.yaml prepare has no @semantic-release/exec step")
+	return ""
+}
+
+// TestReleasercBumpsChartVersionOnEveryStableRelease guards the chart
+// publication contract: the helm-chart workflow publishes a new chart
+// package only when Chart.yaml version changes, so a stable (main) release
+// that moves appVersion must always bump the chart version too — otherwise
+// chart-releaser (skip_existing) skips the publication and Helm users stay
+// on the old chart and its old default operator image. The bump must not be
+// gated on tag resolution: develop prerelease tags become ancestors of main
+// through merges, and the former git describe --tags / git diff gate let a
+// merged prerelease tag shadow the last stable tag and suppress the bump on
+// appVersion-only releases.
+func TestReleasercBumpsChartVersionOnEveryStableRelease(t *testing.T) {
+	cmd := releasercExecCmd(t)
+
+	if !strings.Contains(cmd, "pybump bump --file helm-chart/ssr-operator/Chart.yaml --level patch") {
+		t.Error(".releaserc.yaml exec prepare step must bump the chart version (pybump bump --level patch) so every appVersion change publishes a new chart package")
+	}
+	if strings.Contains(cmd, "git describe") {
+		t.Error(".releaserc.yaml exec prepare step must not resolve the version-bump decision via git describe; develop prerelease tags merged into main shadow the last stable tag and suppressed the bump on appVersion-only releases")
+	}
+	if strings.Contains(cmd, "git diff --name-only") {
+		t.Error(".releaserc.yaml exec prepare step must not gate the chart version bump on a git diff; an appVersion-only release must still bump the chart version so the new default image tag is published")
+	}
+}
+
+// TestReleasercSkipsChartVersionBumpOnPrereleases guards the prerelease
+// guard: develop prerelease versions (e.g. 1.19.1-develop.1) never publish a
+// chart (the helm-chart workflow releases from main only), so the
+// version-bump logic must branch on the release version's prerelease suffix
+// and exclude prereleases from the stable-release bump path.
+func TestReleasercSkipsChartVersionBumpOnPrereleases(t *testing.T) {
+	cmd := releasercExecCmd(t)
+
+	if !strings.Contains(cmd, "case \"${nextRelease.version}\" in") {
+		t.Error(".releaserc.yaml exec prepare step must branch the version bump on the release version (case \"${nextRelease.version}\" in) so prereleases are excluded from the stable-release bump path")
+	}
+	if !strings.Contains(cmd, "*-*)") {
+		t.Error(".releaserc.yaml exec prepare step must detect prerelease versions by their dash suffix (*-*) so develop prereleases never take the stable-release bump path")
 	}
 }
 
@@ -265,6 +330,59 @@ func metadataFlavor(t *testing.T, wf workflowSteps, job string) string {
 	return ""
 }
 
+// metadataActionStepBlock returns the configuration text of the
+// docker/metadata-action step in the given workflow (full-line YAML
+// comments stripped) so tests can assert on the whole step configuration,
+// not only the fields the parsed structs expose.
+func metadataActionStepBlock(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", name))
+	if err != nil {
+		t.Fatalf("failed to read workflow %s: %v", name, err)
+	}
+	lines := strings.Split(string(data), "\n")
+	usesIdx := -1
+	for i, line := range lines {
+		if strings.Contains(line, "uses:") && strings.Contains(line, "docker/metadata-action") {
+			usesIdx = i
+			break
+		}
+	}
+	if usesIdx < 0 {
+		t.Fatalf("workflow %s has no docker/metadata-action step", name)
+	}
+	// Walk back to the start of the step (its "- name:" list item).
+	start := usesIdx
+	for i := usesIdx; i >= 0; i-- {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "- ") {
+			start = i
+			break
+		}
+	}
+	// The step ends at the next non-empty line indented no deeper than the
+	// list-item dash (the next step or job key).
+	dashIndent := len(lines[start]) - len(strings.TrimLeft(lines[start], " "))
+	var block []string
+	for i := start; i < len(lines); i++ {
+		line := lines[i]
+		if i > start {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if indent := len(line) - len(strings.TrimLeft(line, " ")); indent <= dashIndent {
+				break
+			}
+		}
+		// Strip full-line comments so assertions cover the step's actual
+		// configuration rather than its documentation.
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		block = append(block, line)
+	}
+	return strings.Join(block, "\n")
+}
+
 // TestDeployJobDoesNotOverwriteLatestTag guards the mutable-tag contract:
 // the Deploy job of test-release.yaml runs on every feature/fix branch push,
 // so it must not publish the mutable "latest" tag — otherwise any branch
@@ -279,12 +397,24 @@ func TestDeployJobDoesNotOverwriteLatestTag(t *testing.T) {
 
 // TestBuildWorkflowKeepsLatestTag guards the intended latest publisher: the
 // tag-triggered build workflow is the only place that publishes the mutable
-// "latest" tag (version-tag builds), so its metadata flavor must stay
-// latest=true.
+// "latest" tag, and only for non-prerelease semver tags. latest=auto lets
+// docker/metadata-action derive latest from the tag, so stable tags
+// (1.19.0) publish :latest while prerelease tags cut from develop
+// (1.19.1-develop.1, matched by the '*.*.*' trigger) do not — latest=true
+// would force the mutable tag on every prerelease build and overwrite
+// ghcr.io/randsw/strimzi-schema-registry-operator:latest with unreleased
+// code.
 func TestBuildWorkflowKeepsLatestTag(t *testing.T) {
 	wf := loadWorkflowSteps(t, "build.yaml")
-	if flavor := metadataFlavor(t, wf, "Deploy"); flavor != "latest=true" {
-		t.Errorf("build.yaml Deploy job metadata flavor = %q, want latest=true; the tag-triggered build is the intended latest publisher", flavor)
+	if flavor := metadataFlavor(t, wf, "Deploy"); flavor != "latest=auto" {
+		t.Errorf("build.yaml Deploy job metadata flavor = %q, want latest=auto; latest must be derived from the tag so prerelease builds do not overwrite it", flavor)
+	}
+
+	// latest=true must not appear anywhere in the metadata-action step: the
+	// flavor is the only place the mutable tag is configured there, and
+	// forcing it would republish :latest on prerelease builds too.
+	if block := metadataActionStepBlock(t, "build.yaml"); strings.Contains(block, "latest=true") {
+		t.Error("build.yaml metadata-action step must not contain latest=true; it forces the mutable latest tag on prerelease builds (use latest=auto)")
 	}
 }
 
@@ -399,5 +529,132 @@ func TestDependabotDockerEntriesHaveDockerfiles(t *testing.T) {
 	}
 	if dockerEntries == 0 {
 		t.Error(".github/dependabot.yml has no docker ecosystem entry; the root Dockerfile must stay covered")
+	}
+}
+
+// workflowTriggers is the subset of the GitHub Actions workflow schema
+// needed to inspect the push/pull_request path filters. The top-level "on"
+// key is resolved to the boolean true by the YAML 1.1 parser underneath
+// sigs.k8s.io/yaml, so the decoded document carries it under the "true"
+// key (with an "on" fallback should the resolver change).
+type workflowTriggers struct {
+	Push struct {
+		Paths []string `json:"paths"`
+	} `json:"push"`
+	PullRequest struct {
+		Paths []string `json:"paths"`
+	} `json:"pull_request"`
+}
+
+func loadWorkflowTriggers(t *testing.T, name string) workflowTriggers {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", name))
+	if err != nil {
+		t.Fatalf("failed to read workflow %s: %v", name, err)
+	}
+	// The document is decoded key-by-key: the other top-level keys (name,
+	// jobs, ...) have unrelated shapes, so only the trigger document is
+	// unmarshaled into the struct.
+	var raw map[string]json.RawMessage
+	if err := sigsyaml.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to parse workflow %s: %v", name, err)
+	}
+	doc, ok := raw["true"]
+	if !ok {
+		doc, ok = raw["on"]
+	}
+	if !ok {
+		t.Fatalf("workflow %s has no push/pull_request triggers (on: key not found)", name)
+	}
+	var triggers workflowTriggers
+	if err := json.Unmarshal(doc, &triggers); err != nil {
+		t.Fatalf("failed to parse workflow %s triggers: %v", name, err)
+	}
+	return triggers
+}
+
+// TestTestReleasePathFiltersCoverConfigReleasercAndMakefile guards the
+// trigger contract: config/** carries the CRD/RBAC manifests asserted by
+// internal/chart/chart_test.go, .releaserc.yaml the release automation
+// asserted by internal/ci/ci_test.go, and the Makefile the build/test
+// entry points. A change touching only those files must trigger this
+// workflow on pushes and pull requests instead of bypassing CI entirely.
+func TestTestReleasePathFiltersCoverConfigReleasercAndMakefile(t *testing.T) {
+	triggers := loadWorkflowTriggers(t, "test-release.yaml")
+
+	for _, filter := range []struct {
+		event string
+		paths []string
+	}{
+		{"push", triggers.Push.Paths},
+		{"pull_request", triggers.PullRequest.Paths},
+	} {
+		if len(filter.paths) == 0 {
+			t.Fatalf("test-release.yaml %s trigger has no paths filter", filter.event)
+		}
+		for _, entry := range []string{"config/**", ".releaserc.yaml", "Makefile"} {
+			found := false
+			for _, p := range filter.paths {
+				if p == entry {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("test-release.yaml %s paths filter is missing %q; changes to that file alone would bypass CI", filter.event, entry)
+			}
+		}
+	}
+}
+
+// TestDeployAndSemanticReleaseJobsCarryExplicitGates guards the explicit
+// job gates: Deploy and Semantic-Release previously relied on the implicit
+// needs-skip cascade when a semantic-release commit ("chore(release):
+// x.y.z") was pushed, which is fragile — the gates must be spelled out in
+// the job if expressions (mirroring the Lint/e2e_gate style) so a release
+// commit push can never re-publish a branch image or re-run a release.
+func TestDeployAndSemanticReleaseJobsCarryExplicitGates(t *testing.T) {
+	wf := loadWorkflow(t, "test-release.yaml")
+
+	for _, name := range []string{"Deploy", "Semantic-Release"} {
+		job, ok := wf.Jobs[name]
+		if !ok {
+			t.Fatalf("%s job missing from test-release.yaml", name)
+		}
+		needsTest := false
+		for _, n := range job.Needs {
+			if n == "Test" {
+				needsTest = true
+			}
+		}
+		if !needsTest {
+			t.Errorf("%s job must need Test so needs.Test.result is a valid gate", name)
+		}
+		if !strings.Contains(job.If, "needs.Test.result == 'success'") {
+			t.Errorf("%s job if expression must require a successful Test (needs.Test.result == 'success')", name)
+		}
+		if !strings.Contains(job.If, "!startsWith(github.event.head_commit.message, 'chore(release):')") {
+			t.Errorf("%s job if expression must skip semantic-release commits (!startsWith(github.event.head_commit.message, 'chore(release):'))", name)
+		}
+	}
+}
+
+// TestE2EDiagnosticsReferenceCurrentOperatorDeploymentName guards the
+// diagnostics collection: the chart rename derives resource names from the
+// fullname template, so the e2e release "ssr-operator" deploys the operator
+// as "ssr-operator" and the pre-rename strimzi-schema-registry-operator
+// deployment no longer exists. A stale kubectl logs reference would
+// silently collect nothing (the step tolerates failure with || true).
+func TestE2EDiagnosticsReferenceCurrentOperatorDeploymentName(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "test-release.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read workflow test-release.yaml: %v", err)
+	}
+	content := string(data)
+	if strings.Contains(content, "deployment/strimzi-schema-registry-operator") {
+		t.Error("test-release.yaml still references deployment/strimzi-schema-registry-operator; the chart rename derives resource names from fullname (ssr-operator for the e2e release), so the diagnostics kubectl logs would silently collect nothing")
+	}
+	if !strings.Contains(content, "deployment/ssr-operator") {
+		t.Error("test-release.yaml diagnostics must log the operator deployment via its fullname-derived name (deployment/ssr-operator for the e2e release name)")
 	}
 }

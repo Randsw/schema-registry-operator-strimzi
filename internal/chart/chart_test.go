@@ -227,14 +227,29 @@ func helmAvailable(t *testing.T) bool {
 	return err == nil
 }
 
-// renderChart renders the chart with `helm template` and the given --set
+// renderChart renders the chart with `helm template` under the canonical
+// "ssr-operator" release name in the default namespace, with the given --set
 // flags, returning the rendered multi-document YAML.
 func renderChart(t *testing.T, sets ...string) []byte {
 	t.Helper()
-	args := append([]string{"template", "ssr-operator", chartDir(t)}, sets...)
+	return renderChartAs(t, "ssr-operator", "", sets...)
+}
+
+// renderChartAs renders the chart with `helm template` under an explicit
+// release name and, when non-empty, an explicit --namespace, with the given
+// --set flags. The release name and namespace drive ssr-operator.fullname and
+// .Release.Namespace, which the naming tests vary to prove resource names are
+// not pinned to a single install.
+func renderChartAs(t *testing.T, release, namespace string, sets ...string) []byte {
+	t.Helper()
+	args := []string{"template", release, chartDir(t)}
+	if namespace != "" {
+		args = append(args, "--namespace", namespace)
+	}
+	args = append(args, sets...)
 	out, err := exec.Command("helm", args...).CombinedOutput()
 	if err != nil {
-		t.Fatalf("helm template %v failed: %v\n%s", sets, err, out)
+		t.Fatalf("helm template %v failed: %v\n%s", args, err, out)
 	}
 	return out
 }
@@ -777,5 +792,387 @@ func TestChartManagerRoleMatchesGeneratedRBAC(t *testing.T) {
 		if !genRules[key] {
 			t.Errorf("chart manager role grants a rule config/rbac/role.yaml does not (keep the chart in sync with the generated role, or document the intentional difference here): %s", key)
 		}
+	}
+}
+
+// metaName returns the metadata.name of a rendered object.
+func metaName(t *testing.T, doc map[string]any) string {
+	t.Helper()
+	meta, _ := doc["metadata"].(map[string]any)
+	name, _ := meta["name"].(string)
+	return name
+}
+
+// renderedNames returns the metadata.name of every rendered object of the
+// given kind.
+func renderedNames(t *testing.T, docs []map[string]any, kind string) []string {
+	t.Helper()
+	var names []string
+	for _, doc := range docs {
+		if doc["kind"] == kind {
+			names = append(names, metaName(t, doc))
+		}
+	}
+	return names
+}
+
+// TestValuesNamingOverridesEmpty guards the multi-install naming contract at
+// the values level: nameOverride and serviceAccount.name must stay empty so
+// resource names derive from ssr-operator.fullname (release-name based) and
+// the ServiceAccount falls back to it. The old hardcoded
+// "strimzi-schema-registry-operator" overrides pinned identical names across
+// releases and broke multi-namespace installs.
+func TestValuesNamingOverridesEmpty(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+	var values struct {
+		NameOverride     string `json:"nameOverride"`
+		FullnameOverride string `json:"fullnameOverride"`
+		ServiceAccount   struct {
+			Name string `json:"name"`
+		} `json:"serviceAccount"`
+	}
+	if err := sigsyaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+	if strings.TrimSpace(values.NameOverride) != "" {
+		t.Errorf("values.yaml nameOverride = %q, want empty so resource names derive from the release name and vary per install", values.NameOverride)
+	}
+	if strings.TrimSpace(values.ServiceAccount.Name) != "" {
+		t.Errorf("values.yaml serviceAccount.name = %q, want empty so _helpers.tpl falls back to ssr-operator.fullname", values.ServiceAccount.Name)
+	}
+}
+
+// TestRenderedNamesDeriveFromFullname guards the multi-install naming
+// contract end to end: the Deployment, the metrics Service and the
+// ServiceAccount must be named from ssr-operator.fullname — which varies with
+// the Helm release name — instead of the chart-wide ssr-operator.name. With
+// the old nameOverride-pinned names, two installs of the chart in different
+// namespaces produced identically named namespaced resources and the second
+// install failed with Helm ownership/already-exists errors.
+func TestRenderedNamesDeriveFromFullname(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	for _, tc := range []struct {
+		name       string
+		release    string
+		wantPrefix string
+	}{
+		// A release named after the chart collapses to the release name.
+		{name: "release named after the chart", release: "ssr-operator", wantPrefix: "ssr-operator"},
+		// Any other release name is suffixed with the chart name.
+		{name: "arbitrary release name", release: "registry-two", wantPrefix: "registry-two-ssr-operator"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docs := renderedDocs(t, renderChartAs(t, tc.release, ""))
+			dep := findRendered(t, docs, "Deployment", "")
+			if got := metaName(t, dep); got != tc.wantPrefix {
+				t.Errorf("rendered Deployment name = %q, want the fullname %q", got, tc.wantPrefix)
+			}
+			svc := findRendered(t, docs, "Service", "")
+			if got := metaName(t, svc); got != tc.wantPrefix+"-metrics-service" {
+				t.Errorf("rendered Service name = %q, want the fullname-derived %q", got, tc.wantPrefix+"-metrics-service")
+			}
+			sa := findRendered(t, docs, "ServiceAccount", "")
+			if got := metaName(t, sa); got != tc.wantPrefix {
+				t.Errorf("rendered ServiceAccount name = %q, want the fullname %q", got, tc.wantPrefix)
+			}
+		})
+	}
+}
+
+// assertBindingsReferenceRenderedRoles fails the test when a rendered
+// RoleBinding/ClusterRoleBinding references a role that the same rendering
+// does not contain (wrong kind or wrong name): role templates and their
+// binding templates must keep their names internally consistent.
+func assertBindingsReferenceRenderedRoles(t *testing.T, docs []map[string]any) {
+	t.Helper()
+	roles := make(map[string]bool) // "Kind/Name" of every rendered role
+	for _, doc := range docs {
+		kind, _ := doc["kind"].(string)
+		if kind == "Role" || kind == "ClusterRole" {
+			roles[kind+"/"+metaName(t, doc)] = true
+		}
+	}
+	for _, doc := range docs {
+		kind, _ := doc["kind"].(string)
+		if kind != "RoleBinding" && kind != "ClusterRoleBinding" {
+			continue
+		}
+		roleRef, _ := doc["roleRef"].(map[string]any)
+		refKind, _ := roleRef["kind"].(string)
+		refName, _ := roleRef["name"].(string)
+		if !roles[refKind+"/"+refName] {
+			t.Errorf("rendered %s %q references %s %q, which the same rendering does not contain:\n%s", kind, metaName(t, doc), refKind, refName, renderedSummary(docs))
+		}
+	}
+}
+
+// TestRenderedClusterScopedRBACNamesNeverCollide guards the multi-namespace
+// install contract: ClusterRole and ClusterRoleBinding objects live outside
+// any namespace, so their names must embed the release namespace — two
+// installs of the chart in different namespaces (the primary use case of
+// rbac.namespaceScoped=true) must render disjoint cluster-scoped RBAC names,
+// and every binding must reference the role rendered by the same release.
+func TestRenderedClusterScopedRBACNamesNeverCollide(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	for _, tc := range []struct {
+		name string
+		sets []string
+	}{
+		{name: "default cluster-scoped mode", sets: nil},
+		{name: "rbac.namespaceScoped=true", sets: []string{"--set", "rbac.namespaceScoped=true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Same release name in two namespaces: only the embedded
+			// namespace can keep the cluster-scoped names apart.
+			docsA := renderedDocs(t, renderChartAs(t, "ssr-operator", "team-a", tc.sets...))
+			docsB := renderedDocs(t, renderChartAs(t, "ssr-operator", "team-b", tc.sets...))
+			for _, kind := range []string{"ClusterRole", "ClusterRoleBinding"} {
+				namesA := renderedNames(t, docsA, kind)
+				namesB := renderedNames(t, docsB, kind)
+				if len(namesA) == 0 {
+					t.Fatalf("no %s rendered in namespace team-a:\n%s", kind, renderedSummary(docsA))
+				}
+				for _, n := range namesA {
+					if !strings.Contains(n, "team-a") {
+						t.Errorf("cluster-scoped %s name %q does not embed the release namespace", kind, n)
+					}
+					if slices.Contains(namesB, n) {
+						t.Errorf("two installs in different namespaces both render %s %q; cluster-scoped names must be namespace-qualified", kind, n)
+					}
+				}
+			}
+
+			// Different release names in different namespaces must stay
+			// disjoint as well.
+			docsC := renderedDocs(t, renderChartAs(t, "registry-two", "team-c", tc.sets...))
+			for _, kind := range []string{"ClusterRole", "ClusterRoleBinding"} {
+				for _, n := range renderedNames(t, docsC, kind) {
+					if slices.Contains(renderedNames(t, docsA, kind), n) {
+						t.Errorf("releases with different names both render %s %q", kind, n)
+					}
+				}
+			}
+
+			// Role and binding names must stay internally consistent.
+			assertBindingsReferenceRenderedRoles(t, docsA)
+		})
+	}
+}
+
+// TestRenderedServiceAccountNameFallsBackToFullname guards the
+// serviceAccount.name contract end to end: the default (empty) name must fall
+// back to ssr-operator.fullname so the ServiceAccount name varies per release
+// like every other namespaced resource, while an explicit override stays
+// honored — including in the RBAC binding subjects, which must keep
+// referencing the ServiceAccount the Deployment actually runs as.
+func TestRenderedServiceAccountNameFallsBackToFullname(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+
+	// Default values: serviceAccount.name is empty and falls back to fullname.
+	docs := renderedDocs(t, renderChart(t))
+	sa := findRendered(t, docs, "ServiceAccount", "")
+	if got := metaName(t, sa); got != "ssr-operator" {
+		t.Errorf("rendered ServiceAccount name = %q, want the fullname %q when serviceAccount.name is empty", got, "ssr-operator")
+	}
+
+	// An explicit override is honored by the ServiceAccount and by every
+	// binding subject.
+	docs = renderedDocs(t, renderChart(t, "--set", "serviceAccount.name=custom-sa"))
+	sa = findRendered(t, docs, "ServiceAccount", "")
+	if got := metaName(t, sa); got != "custom-sa" {
+		t.Errorf("rendered ServiceAccount name = %q, want the explicit override %q", got, "custom-sa")
+	}
+	for _, doc := range docs {
+		kind, _ := doc["kind"].(string)
+		if kind != "RoleBinding" && kind != "ClusterRoleBinding" {
+			continue
+		}
+		subjects, _ := doc["subjects"].([]any)
+		if len(subjects) == 0 {
+			t.Fatalf("rendered %s has no subjects", kind)
+		}
+		subject, _ := subjects[0].(map[string]any)
+		if got, _ := subject["name"].(string); got != "custom-sa" {
+			t.Errorf("rendered %s subject name = %q, want the overridden ServiceAccount %q", kind, got, "custom-sa")
+		}
+	}
+}
+
+// bindingReferencesRole reports whether a rendered RoleBinding or
+// ClusterRoleBinding references a role whose name contains nameSuffix.
+func bindingReferencesRole(t *testing.T, docs []map[string]any, nameSuffix string) bool {
+	t.Helper()
+	for _, doc := range docs {
+		kind, _ := doc["kind"].(string)
+		if kind != "RoleBinding" && kind != "ClusterRoleBinding" {
+			continue
+		}
+		roleRef, _ := doc["roleRef"].(map[string]any)
+		refName, _ := roleRef["name"].(string)
+		if strings.Contains(refName, nameSuffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// valuesOverrideFile writes a copy of the chart's default values with the
+// given mutation applied and returns its path. --set cannot flip a single
+// entry of the cluster_roles/roles lists: Helm replaces the whole list,
+// dropping the other entries (and with them the very binding flag under
+// test), so the mutation must go through a values file.
+func valuesOverrideFile(t *testing.T, mutate func(values map[string]any)) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+	var values map[string]any
+	if err := sigsyaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+	mutate(values)
+	out, err := sigsyaml.Marshal(values)
+	if err != nil {
+		t.Fatalf("failed to re-marshal values: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "values-override.yaml")
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("failed to write values override: %v", err)
+	}
+	return path
+}
+
+// disableListEntry flips enabled=false on the first entry of the named
+// values list (cluster_roles or roles) while keeping every other field —
+// in particular the entry's binding flag — and every other entry intact.
+func disableListEntry(t *testing.T, values map[string]any, key string) {
+	t.Helper()
+	entries, ok := values[key].([]any)
+	if !ok || len(entries) == 0 {
+		t.Fatalf("values.yaml %s is not a non-empty list", key)
+	}
+	entry, ok := entries[0].(map[string]any)
+	if !ok {
+		t.Fatalf("values.yaml %s[0] is not a mapping", key)
+	}
+	entry["enabled"] = false
+}
+
+// TestRenderedBindingsGateOnRoleEnabled guards the binding-gating contract:
+// a RoleBinding/ClusterRoleBinding must render only when BOTH the role's
+// enabled flag and the binding flag are true. A binding rendered while its
+// role is disabled references a role that was never created and is rejected
+// by the API server, breaking the whole install.
+func TestRenderedBindingsGateOnRoleEnabled(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	for _, tc := range []struct {
+		name string
+		sets []string
+	}{
+		{name: "default cluster-scoped mode", sets: nil},
+		{name: "rbac.namespaceScoped=true", sets: []string{"--set", "rbac.namespaceScoped=true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Control: with the default values every enabled role with a
+			// binding flag renders its binding, and roles with binding=false
+			// (metrics-reader) render none.
+			docs := renderedDocs(t, renderChartAs(t, "ssr-operator", "", tc.sets...))
+			if !bindingReferencesRole(t, docs, "manager-role") {
+				t.Errorf("enabled manager role with cluster_role_binding=true renders no binding:\n%s", renderedSummary(docs))
+			}
+			if !bindingReferencesRole(t, docs, "leader-election-role") {
+				t.Errorf("enabled leader-election role with role_binding=true renders no binding:\n%s", renderedSummary(docs))
+			}
+			if bindingReferencesRole(t, docs, "metrics-reader") {
+				t.Errorf("metrics-reader with cluster_role_binding=false renders a binding:\n%s", renderedSummary(docs))
+			}
+
+			// A cluster_roles entry disabled while its binding flag stays
+			// true: neither the role nor a binding referencing it may render.
+			override := valuesOverrideFile(t, func(values map[string]any) {
+				disableListEntry(t, values, "cluster_roles")
+			})
+			docs = renderedDocs(t, renderChartAs(t, "ssr-operator", "", append(slices.Clone(tc.sets), "-f", override)...))
+			if bindingReferencesRole(t, docs, "manager-role") {
+				t.Errorf("disabled manager role still has a binding referencing it:\n%s", renderedSummary(docs))
+			}
+
+			// A roles entry disabled while its binding flag stays true.
+			override = valuesOverrideFile(t, func(values map[string]any) {
+				disableListEntry(t, values, "roles")
+			})
+			docs = renderedDocs(t, renderChartAs(t, "ssr-operator", "", append(slices.Clone(tc.sets), "-f", override)...))
+			if bindingReferencesRole(t, docs, "leader-election-role") {
+				t.Errorf("disabled leader-election role still has a binding referencing it:\n%s", renderedSummary(docs))
+			}
+		})
+	}
+}
+
+// TestValuesMemoryDefaultsCoverKeytoolOverhead guards the memory contract:
+// the operator spawns keytool (a JVM from default-jre-headless) and openssl
+// as child processes during reconciliation, and the old 128Mi limit left no
+// headroom for JVM startup next to the Go runtime — the operator pod gets
+// OOMKilled (exit 137) mid-reconciliation. The defaults must stay at a
+// 512Mi limit / 256Mi request (the plan's 256Mi–512Mi range) until the
+// keytool subprocesses are replaced with pure-Go keystore generation, and
+// the Deployment must render them into the operator container.
+func TestValuesMemoryDefaultsCoverKeytoolOverhead(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(chartDir(t), "values.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read values.yaml: %v", err)
+	}
+	var values struct {
+		Image struct {
+			Resources struct {
+				Limits   map[string]string `json:"limits"`
+				Requests map[string]string `json:"requests"`
+			} `json:"resources"`
+		} `json:"image"`
+	}
+	if err := sigsyaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("failed to parse values.yaml: %v", err)
+	}
+	if got := values.Image.Resources.Limits["memory"]; got != "512Mi" {
+		t.Errorf("values.yaml image.resources.limits.memory = %q, want 512Mi: the operator spawns keytool (a JVM) and openssl subprocesses, and a smaller limit OOMKills the pod mid-reconciliation", got)
+	}
+	if got := values.Image.Resources.Requests["memory"]; got != "256Mi" {
+		t.Errorf("values.yaml image.resources.requests.memory = %q, want 256Mi", got)
+	}
+
+	// The defaults must survive rendering into the operator container.
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	docs := renderedDocs(t, renderChart(t))
+	dep := findRendered(t, docs, "Deployment", "")
+	spec, _ := dep["spec"].(map[string]any)
+	template, _ := spec["template"].(map[string]any)
+	podSpec, _ := template["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	if len(containers) == 0 {
+		t.Fatal("rendered Deployment has no containers")
+	}
+	container, _ := containers[0].(map[string]any)
+	resources, _ := container["resources"].(map[string]any)
+	limits, _ := resources["limits"].(map[string]any)
+	requests, _ := resources["requests"].(map[string]any)
+	if got, _ := limits["memory"].(string); got != "512Mi" {
+		t.Errorf("rendered Deployment container resources.limits.memory = %v, want 512Mi (the values.yaml default)", limits["memory"])
+	}
+	if got, _ := requests["memory"].(string); got != "256Mi" {
+		t.Errorf("rendered Deployment container resources.requests.memory = %v, want 256Mi (the values.yaml default)", requests["memory"])
 	}
 }
