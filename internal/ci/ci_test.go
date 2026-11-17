@@ -265,6 +265,59 @@ func metadataFlavor(t *testing.T, wf workflowSteps, job string) string {
 	return ""
 }
 
+// metadataActionStepBlock returns the configuration text of the
+// docker/metadata-action step in the given workflow (full-line YAML
+// comments stripped) so tests can assert on the whole step configuration,
+// not only the fields the parsed structs expose.
+func metadataActionStepBlock(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", name))
+	if err != nil {
+		t.Fatalf("failed to read workflow %s: %v", name, err)
+	}
+	lines := strings.Split(string(data), "\n")
+	usesIdx := -1
+	for i, line := range lines {
+		if strings.Contains(line, "uses:") && strings.Contains(line, "docker/metadata-action") {
+			usesIdx = i
+			break
+		}
+	}
+	if usesIdx < 0 {
+		t.Fatalf("workflow %s has no docker/metadata-action step", name)
+	}
+	// Walk back to the start of the step (its "- name:" list item).
+	start := usesIdx
+	for i := usesIdx; i >= 0; i-- {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "- ") {
+			start = i
+			break
+		}
+	}
+	// The step ends at the next non-empty line indented no deeper than the
+	// list-item dash (the next step or job key).
+	dashIndent := len(lines[start]) - len(strings.TrimLeft(lines[start], " "))
+	var block []string
+	for i := start; i < len(lines); i++ {
+		line := lines[i]
+		if i > start {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if indent := len(line) - len(strings.TrimLeft(line, " ")); indent <= dashIndent {
+				break
+			}
+		}
+		// Strip full-line comments so assertions cover the step's actual
+		// configuration rather than its documentation.
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		block = append(block, line)
+	}
+	return strings.Join(block, "\n")
+}
+
 // TestDeployJobDoesNotOverwriteLatestTag guards the mutable-tag contract:
 // the Deploy job of test-release.yaml runs on every feature/fix branch push,
 // so it must not publish the mutable "latest" tag — otherwise any branch
@@ -279,12 +332,24 @@ func TestDeployJobDoesNotOverwriteLatestTag(t *testing.T) {
 
 // TestBuildWorkflowKeepsLatestTag guards the intended latest publisher: the
 // tag-triggered build workflow is the only place that publishes the mutable
-// "latest" tag (version-tag builds), so its metadata flavor must stay
-// latest=true.
+// "latest" tag, and only for non-prerelease semver tags. latest=auto lets
+// docker/metadata-action derive latest from the tag, so stable tags
+// (1.19.0) publish :latest while prerelease tags cut from develop
+// (1.19.1-develop.1, matched by the '*.*.*' trigger) do not — latest=true
+// would force the mutable tag on every prerelease build and overwrite
+// ghcr.io/randsw/strimzi-schema-registry-operator:latest with unreleased
+// code.
 func TestBuildWorkflowKeepsLatestTag(t *testing.T) {
 	wf := loadWorkflowSteps(t, "build.yaml")
-	if flavor := metadataFlavor(t, wf, "Deploy"); flavor != "latest=true" {
-		t.Errorf("build.yaml Deploy job metadata flavor = %q, want latest=true; the tag-triggered build is the intended latest publisher", flavor)
+	if flavor := metadataFlavor(t, wf, "Deploy"); flavor != "latest=auto" {
+		t.Errorf("build.yaml Deploy job metadata flavor = %q, want latest=auto; latest must be derived from the tag so prerelease builds do not overwrite it", flavor)
+	}
+
+	// latest=true must not appear anywhere in the metadata-action step: the
+	// flavor is the only place the mutable tag is configured there, and
+	// forcing it would republish :latest on prerelease builds too.
+	if block := metadataActionStepBlock(t, "build.yaml"); strings.Contains(block, "latest=true") {
+		t.Error("build.yaml metadata-action step must not contain latest=true; it forces the mutable latest tag on prerelease builds (use latest=auto)")
 	}
 }
 
