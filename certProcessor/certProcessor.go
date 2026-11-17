@@ -131,6 +131,8 @@ func (cp *CertProcessor) removeTempDir(dir string) {
 // The file is created with 0600 permissions so certificate/key material is
 // not readable by other users. The caller is responsible for removing dir
 // when it is no longer needed.
+//
+//lint:ignore U1000 temporarily unused — removed together with the remaining exec/temp infrastructure in the next Phase 5 subtask
 func writeTempFileIn(dir, name, content string) (string, error) {
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -574,12 +576,9 @@ func (cp *CertProcessor) CreateKeystore(ctx context.Context, userCACert string, 
 // trust. An empty or unparseable ca.crt/ca.key, or a bundle in which no
 // certificate matches the key, is rejected with an actionable error.
 //
-// ctx bounds the openssl and keytool child processes (see CreateTruststore
-// for the deadline semantics, B5).
+// ctx is honoured with explicit cancellation checks around the RSA key
+// generation and the JKS encoding (B5).
 func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, caKey string, password string, name string, namespace string) ([]byte, string, error) {
-	ctx, cancel := withExecDeadline(ctx)
-	defer cancel()
-
 	// Validate the DNS identity inputs. name is the CR name — which may
 	// itself contain dots (e.g. my.registry) — and namespace the CR
 	// namespace; the certificate SANs are built from <name>.<namespace>, so
@@ -590,9 +589,9 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 	if namespace == "" {
 		return nil, "", fmt.Errorf("namespace cannot be empty; the REST API certificate DNS SANs are built from <name>.<namespace>")
 	}
-	// Empty CA material would otherwise surface as a cryptic openssl/keytool
-	// failure or an invalid signed certificate; reject it up front with an
-	// actionable error naming the offending input.
+	// Empty CA material would otherwise surface as a cryptic tool failure or
+	// an invalid signed certificate; reject it up front with an actionable
+	// error naming the offending input.
 	if strings.TrimSpace(caCert) == "" {
 		err := errors.New("cluster CA certificate (ca.crt) is empty; the <cluster>-cluster-ca-cert secret must contain a CA certificate to sign the REST API certificate")
 		cp.log.Error(err, "Empty cluster CA certificate")
@@ -603,7 +602,7 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 		cp.log.Error(err, "Empty cluster CA private key")
 		return nil, "", err
 	}
-	// Create key, create clr. Sign clr with CACert. Create keystore.
+	// Create key, create csr. Sign csr with CACert. Create keystore.
 	if password == "" {
 		var err error
 		password, err = GeneratePassword(24, true, false)
@@ -613,17 +612,9 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 		}
 	}
 
-	tempDir, err := os.MkdirTemp("", "ssr-tls-*")
-	if err != nil {
-		cp.log.Error(err, "Failed to create temp dir")
-		return nil, "", err
-	}
-	defer cp.removeTempDir(tempDir)
-
-	// Write cluster CA cert into the private temp dir.
-	caCertPath, err := writeTempFileIn(tempDir, "tls-ca-cert.crt", caCert)
-	if err != nil {
-		cp.log.Error(err, "Failed to write temp file", "File", "tls-ca-cert.crt")
+	// Honour caller cancellation around the expensive RSA key generation (B5).
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while generating the REST API certificate")
 		return nil, "", err
 	}
 
@@ -631,6 +622,10 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 	serverKey, csr, err := cp.generateCSR(name, namespace)
 	if err != nil {
 		cp.log.Error(err, "Failed to generate CSR")
+		return nil, "", err
+	}
+	if err := ensureContextAlive(ctx); err != nil {
+		cp.log.Error(err, "Context cancelled while generating the REST API certificate")
 		return nil, "", err
 	}
 	caCerts, err := StringToCertificates(caCert)
@@ -660,45 +655,28 @@ func (cp *CertProcessor) GenerateTLSforHTTP(ctx context.Context, caCert string, 
 		cp.log.Error(err, "Failed to sign CSR")
 		return nil, "", err
 	}
-	// Save TLS cert and key into the private temp dir.
-	keyPath, certPath, err := cp.saveFiles(tempDir, serverKey, serverCert)
+
+	// The JKS chain mirrors what openssl pkcs12 -export -chain used to
+	// produce: the server certificate followed by its issuers from the CA
+	// bundle, up to a self-signed root.
+	chain, err := buildCertChain(serverCert, caCerts)
 	if err != nil {
-		cp.log.Error(err, "Failed to save files")
+		cp.log.Error(err, "Failed to build the server certificate chain")
 		return nil, "", err
 	}
 
-	p12Path := filepath.Join(tempDir, "tls.p12")
-	// Generate p12 format bundle
-	cmd := opensslExportPKCS12Cmd(ctx, certPath, keyPath, caCertPath, "confluent-schema-registry-tls", p12Path, password)
-	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
+	keyDER, err := x509.MarshalPKCS8PrivateKey(serverKey)
+	if err != nil {
+		err = fmt.Errorf("failed to encode the server private key: %w", err)
+		cp.log.Error(err, "Failed to encode the server private key")
 		return nil, "", err
 	}
 
-	// Check if p12 format bundle exists
-	if _, err := os.Stat(p12Path); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", p12Path)
-		return nil, "", err
-	}
-
-	keystorePath := filepath.Join(tempDir, "tls.keystore.jks")
-
-	// Generate keystore
+	// Encode the keystore to save in kubernetes secret
 	cp.log.V(1).Info("Generate tls keystore")
-	cmd = keytoolImportKeystoreCmd(ctx, keystorePath, p12Path, password)
-	if _, err := runCertCommand(ctx, cp, cmd); err != nil {
-		return nil, "", err
-	}
-
-	// Check if keystore exists
-	if _, err := os.Stat(keystorePath); os.IsNotExist(err) {
-		cp.log.Error(err, "File not exist", "File", keystorePath)
-		return nil, "", err
-	}
-
-	// Read keystore from file to save in kubernetes secret
-	b, err := os.ReadFile(keystorePath)
+	b, err := encodeJKSKeystore("confluent-schema-registry-tls", keyDER, jksChain(chain), password)
 	if err != nil {
-		cp.log.Error(err, "File read fail", "File", keystorePath)
+		cp.log.Error(err, "Failed to encode the JKS keystore")
 		return nil, "", err
 	}
 
@@ -1008,6 +986,8 @@ func selectCACertForKey(caCerts []*x509.Certificate, caKey crypto.Signer) (*x509
 
 // saveFiles writes the server private key and certificate into dir using
 // restrictive permissions. The caller is responsible for removing dir.
+//
+//lint:ignore U1000 temporarily unused — removed together with the remaining exec/temp infrastructure in the next Phase 5 subtask
 func (cp *CertProcessor) saveFiles(dir string, serverKey *rsa.PrivateKey, serverCert *x509.Certificate) (string, string, error) {
 	keyPath := filepath.Join(dir, "tls-server.key")
 	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}), 0o600); err != nil {

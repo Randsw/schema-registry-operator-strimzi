@@ -14,8 +14,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -229,17 +227,41 @@ func TestCreateTLSKeystore(t *testing.T) {
 	cp := NewCertProcessor(logr.Logger{})
 	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "confluent-schema-registry", "kafka")
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	if len(keystore) <= 0 {
-		t.Error("Empty Keystore")
-		return
+		t.Fatal("Empty Keystore")
 	}
 	if password != "test1234" {
 		t.Errorf("Password no equal. Want - %s, got - %s", "test1234", password)
-		return
 	}
-	t.Log("Keystore is created")
+	// The JKS must decode in Go with the returned password and hold the
+	// freshly signed server certificate under the
+	// confluent-schema-registry-tls alias.
+	entries := decodeJKS(t, keystore, password)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 keystore entry, got %d (%s)", len(entries), jksAliases(entries))
+	}
+	entry := findJKSEntry(entries, "confluent-schema-registry-tls")
+	if entry == nil {
+		t.Fatalf("expected the confluent-schema-registry-tls alias in the keystore, got %s", jksAliases(entries))
+	}
+	if !entry.isKey {
+		t.Error("expected a private key entry")
+	}
+	if len(entry.chain) != 2 {
+		t.Fatalf("expected the keystore chain to hold the server certificate and the CA, got %d certs: %s", len(entry.chain), certSubjects(entry.chain))
+	}
+	leaf := entry.chain[0]
+	if leaf.Subject.CommonName != "confluent-schema-registry" {
+		t.Errorf("expected the server certificate CN %q, got %q", "confluent-schema-registry", leaf.Subject.CommonName)
+	}
+	if err := leaf.CheckSignatureFrom(ca.CACert); err != nil {
+		t.Errorf("expected the server certificate to be signed by the cluster CA, but signature verification failed: %v", err)
+	}
+	if !bytes.Equal(entry.chain[1].Raw, ca.CACert.Raw) {
+		t.Errorf("expected the CA certificate in the keystore chain, got %s", certSubjects(entry.chain))
+	}
 }
 
 // TestConvertPEMToJKS verifies the PEM → JKS conversion used for standard
@@ -805,54 +827,6 @@ func TestGenerateTLSforHTTP_EmptyNamespace(t *testing.T) {
 	}
 }
 
-// listStoreEntries runs keytool -list -rfc on the JKS file at path and
-// returns the alias names (as keytool displays them) and the certificates the
-// store contains. It is a test helper for asserting the truststore and
-// keystore contents produced by CreateTruststore and GenerateTLSforHTTP.
-func listStoreEntries(t *testing.T, cp *CertProcessor, path, password string) ([]string, []*x509.Certificate) {
-	t.Helper()
-	out, err := runCertCommand(context.Background(), cp, keytoolListCmd(context.Background(), path, password))
-	if err != nil {
-		t.Fatalf("keytool -list failed: %v", err)
-	}
-	var aliases []string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if alias, ok := strings.CutPrefix(line, "Alias name: "); ok {
-			aliases = append(aliases, strings.TrimSpace(alias))
-		}
-	}
-	var certs []*x509.Certificate
-	rest := out
-	for {
-		block, next := pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		rest = next
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			t.Fatalf("failed to parse a certificate from the keytool -list output: %v", err)
-		}
-		certs = append(certs, cert)
-	}
-	return aliases, certs
-}
-
-// writeStoreFile writes JKS bytes to a fresh temporary file and returns its
-// path, ready for a keytool -list inspection.
-func writeStoreFile(t *testing.T, data []byte) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "store.jks")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("failed to write the store temp file: %v", err)
-	}
-	return path
-}
-
 // certRawSet maps the DER encodings of certs into a set for comparisons.
 func certRawSet(certs []*x509.Certificate) map[string]struct{} {
 	set := make(map[string]struct{}, len(certs))
@@ -1209,7 +1183,11 @@ func TestGenerateTLSforHTTP_SelectsCAMatchingKey(t *testing.T) {
 		t.Fatal("empty keystore")
 	}
 
-	_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+	entries := decodeJKS(t, keystore, password)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 keystore entry, got %d (%s)", len(entries), jksAliases(entries))
+	}
+	certs := entries[0].chain
 	var leaf *x509.Certificate
 	for _, cert := range certs {
 		// The REST API server certificate carries the CSR's subject CN; the
@@ -1590,8 +1568,11 @@ func TestGenerateTLSforHTTP_ECDSACA(t *testing.T) {
 
 	findLeaf := func(t *testing.T, keystore []byte, password string) *x509.Certificate {
 		t.Helper()
-		cp := NewCertProcessor(logr.Logger{})
-		_, certs := listStoreEntries(t, cp, writeStoreFile(t, keystore), password)
+		entries := decodeJKS(t, keystore, password)
+		var certs []*x509.Certificate
+		for _, entry := range entries {
+			certs = append(certs, entry.chain...)
+		}
 		for _, cert := range certs {
 			if cert.Subject.CommonName == "confluent-schema-registry" {
 				return cert
