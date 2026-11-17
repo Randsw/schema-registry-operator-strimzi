@@ -166,8 +166,7 @@ func TestReconcileDeploymentGetError(t *testing.T) {
 	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
 
 	var err error
-	var delta float64
-	delta = reconcileErrorsDelta(func() {
+	delta := reconcileErrorsDelta(func() {
 		_, err = r.Reconcile(context.Background(), reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
 		})
@@ -201,8 +200,7 @@ func TestReconcileStatusUpdateError(t *testing.T) {
 	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
 
 	var err error
-	var delta float64
-	delta = reconcileErrorsDelta(func() {
+	delta := reconcileErrorsDelta(func() {
 		_, err = r.Reconcile(context.Background(), reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
 		})
@@ -299,8 +297,7 @@ func TestReconcileServiceGetError(t *testing.T) {
 	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
 
 	var err error
-	var delta float64
-	delta = reconcileErrorsDelta(func() {
+	delta := reconcileErrorsDelta(func() {
 		_, err = r.Reconcile(context.Background(), reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
 		})
