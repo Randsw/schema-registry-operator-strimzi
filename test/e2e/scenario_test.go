@@ -129,9 +129,11 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
 
 // applyRegistryCR creates or updates the StrimziSchemaRegistry CR for the
 // scenario with the given clientauth/securehttp values. A nil replicas leaves
-// spec.replicas unset (the operator default of 1 applies). It returns the
-// apply error so callers can assert admission rejections.
-func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas *int32) error {
+// spec.replicas unset (the operator default of 1 applies). Optional mutators
+// customize the spec before the apply (e.g. setting spec.tlssecretname). It
+// returns the apply error so callers can assert admission rejections.
+func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas *int32,
+	mutators ...func(*strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec)) error {
 	replicationFactor := int32(1)
 
 	cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
@@ -167,6 +169,9 @@ func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas 
 
 	if replicas != nil {
 		cr.Spec.Replicas = replicas
+	}
+	for _, mutate := range mutators {
+		mutate(&cr.Spec)
 	}
 	desiredSpec := cr.Spec
 
