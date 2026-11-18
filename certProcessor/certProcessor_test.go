@@ -1711,3 +1711,100 @@ func TestGenerateTLSforHTTP_ECDSACA(t *testing.T) {
 		}
 	})
 }
+
+// TestCreateKeystore_CorruptPKCS12 guards the p12 decode error branches: a
+// corrupted p12 bundle and a bundle sealed with a different password must
+// both fail with an error naming the offending input (user.p12) instead of
+// producing a partial or unusable keystore.
+func TestCreateKeystore_CorruptPKCS12(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "test1234")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+
+	t.Run("corrupted p12 bytes are rejected", func(t *testing.T) {
+		corrupted := append([]byte(nil), uc.PKCS12Data...)
+		// Flip bytes deep inside the bundle so the ASN.1 structure breaks
+		// while the file keeps a plausible size.
+		for i := 100; i < len(corrupted); i += 97 {
+			corrupted[i] ^= 0xFF
+		}
+		keystore, _, err := cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, string(corrupted), "test1234")
+		if err == nil {
+			t.Fatal("expected an error for corrupted p12 bytes, got nil")
+		}
+		if len(keystore) != 0 {
+			t.Error("expected no keystore output on the p12 decode failure")
+		}
+		if !strings.Contains(err.Error(), "user.p12") {
+			t.Errorf("expected the error to name the offending input user.p12, got: %v", err)
+		}
+	})
+
+	t.Run("p12 sealed with a wrong password is rejected", func(t *testing.T) {
+		keystore, _, err := cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, string(uc.PKCS12Data), "wrong-password")
+		if err == nil {
+			t.Fatal("expected an error for a p12 opened with the wrong password, got nil")
+		}
+		if len(keystore) != 0 {
+			t.Error("expected no keystore output on the p12 decode failure")
+		}
+		if !strings.Contains(err.Error(), "user.p12") {
+			t.Errorf("expected the error to name the offending input user.p12, got: %v", err)
+		}
+	})
+}
+
+// TestCreateKeystore_EmptyPassword_PKCS12 pins the p12-path password
+// contract: the p12 bundle is encrypted with its own password, so an empty
+// password cannot be replaced by a generated one (the generated value would
+// be used to DECODE the p12 and never opens it). The call fails with the
+// user.p12 decode error; the operator's KafkaUser-secret validation rejects
+// this combination up front for exactly this reason (k8s.go, the
+// clientp12-without-user.password guard), so the contract here is the
+// library-level safety net.
+func TestCreateKeystore_EmptyPassword_PKCS12(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+	uc, err := testutil.GenerateTestUserCert(ca, "p12-source-password")
+	if err != nil {
+		t.Fatalf("failed to generate user cert: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	keystore, _, err := cp.CreateKeystore(context.Background(), ca.CACertPEM, uc.UserCertPEM, uc.UserKeyPEM, string(uc.PKCS12Data), "")
+	if err == nil {
+		t.Fatal("expected an error for a p12 with an empty password (the generated password cannot decode the p12), got nil")
+	}
+	if len(keystore) != 0 {
+		t.Error("expected no keystore output on the p12 decode failure")
+	}
+	if !strings.Contains(err.Error(), "user.p12") {
+		t.Errorf("expected the error to name the offending input user.p12, got: %v", err)
+	}
+}
+
+// TestKeystoreCertExpiry_StructurallyValidNonJKS verifies that
+// KeystoreCertExpiry rejects structurally valid data that is not a JKS
+// keystore (here: a valid PEM certificate) with an error instead of
+// panicking — the caller logs and skips, so a panic would crash the
+// reconciliation worker.
+func TestKeystoreCertExpiry_StructurallyValidNonJKS(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate CA: %v", err)
+	}
+
+	cp := NewCertProcessor(logr.Logger{})
+	if _, err := cp.KeystoreCertExpiry(context.Background(), []byte(ca.CACertPEM), "test1234"); err == nil {
+		t.Fatal("expected an error for PEM bytes that are not a JKS keystore, got nil")
+	}
+}

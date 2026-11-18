@@ -4203,6 +4203,48 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed keystore is logged-and-skipped with the standing recheck", func(t *testing.T) {
+		// U-13 caller path: a -tls secret whose tls-keystore.jks does not
+		// decode must not fail (and hot-loop) reconciliation — the expiry
+		// check is skipped for this pass while the periodic recheck keeps
+		// the certificate inspected, and no renewal is attempted.
+		malformed := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            inst.Name + tlsSecretSuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "2000",
+				Annotations:     map[string]string{CAVersionKey: "1000"},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				// Structurally valid data that is not a JKS keystore.
+				"tls-keystore.jks":  []byte(caCertSecret.Data["ca.crt"]),
+				"keystore_password": []byte("test1234"),
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, malformed, jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, recheck, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("expected the malformed keystore to be skipped without an error, got %v", err)
+		}
+		if result.RequeueAfter != 0 {
+			t.Errorf("expected no immediate requeue on the skip path, got %v", result.RequeueAfter)
+		}
+		if recheck != tlsCertRecheckInterval {
+			t.Errorf("expected the standing recheck interval %v so the certificate is re-inspected, got %v", tlsCertRecheckInterval, recheck)
+		}
+		// The malformed secret must be left untouched: no renewal was attempted.
+		untouched := &corev1.Secret{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, untouched); err != nil {
+			t.Fatalf("failed to get the TLS secret: %v", err)
+		}
+		if untouched.ResourceVersion != "2000" {
+			t.Errorf("expected the malformed secret to be left untouched, got resourceVersion %s", untouched.ResourceVersion)
+		}
+	})
+
 	t.Run("already-expired certificate is renewed with the default threshold", func(t *testing.T) {
 		// B1 failure path: with the default 30-day threshold, a certificate
 		// whose NotAfter is already in the past must enter the renewal
