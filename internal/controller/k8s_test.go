@@ -858,12 +858,11 @@ func TestCRDManifestReplicasValidation(t *testing.T) {
 }
 
 // TestCRDManifestHeapOptsValidation guards the F7 CRD contract: the
-// generated CRD must validate the documented heapopts forms — "-Xms<size>",
-// "-Xmx<size>", or both in the common "-Xms ... -Xmx" order, with k/K/m/M/g/G
-// units and flexible spacing — while still rejecting garbage, unit-less and
-// hex-letter sizes, and the reversed option order. The pattern is compiled
-// from the generated manifest, so dropping or mistyping the kubebuilder
-// marker fails here.
+// generated CRD's spec.heapopts pattern must compile. The accepted/rejected
+// form lists were removed: the same pattern is exercised through real
+// admission in the envtest spec "When validating the HeapOpts pattern at the
+// API server", and controller-gen compiles the pattern at make manifests
+// time — this test only needs to catch a dropped or mistyped marker.
 func TestCRDManifestHeapOptsValidation(t *testing.T) {
 	crdPath := filepath.Join("..", "..", "config", "crd", "bases",
 		"strimziregistryoperator.randsw.code_strimzischemaregistries.yaml")
@@ -885,38 +884,8 @@ func TestCRDManifestHeapOptsValidation(t *testing.T) {
 	if !ok || pattern == "" {
 		t.Fatalf("expected spec.heapopts to carry a pattern, got %v", heapopts["pattern"])
 	}
-	re, err := regexp.Compile(pattern)
-	if err != nil {
+	if _, err := regexp.Compile(pattern); err != nil {
 		t.Fatalf("spec.heapopts pattern does not compile: %v", err)
-	}
-
-	accepted := []string{
-		"",
-		"-Xms512M -Xmx512M",
-		"-Xmx1g",
-		"-Xms512m",
-		"-Xms512m -Xmx2g",
-		"-Xms1K  -Xmx2048k", // multiple spaces, k/K units
-		"-Xmx1024k",
-	}
-	for _, v := range accepted {
-		if !re.MatchString(v) {
-			t.Errorf("expected %q to be accepted by the heapopts pattern", v)
-		}
-	}
-	rejected := []string{
-		"foo",
-		"12a",
-		"-Xms12aM -Xmx12aM",
-		"-XmsabcM -XmxabcM",
-		"-Xmx1024",         // unit-less
-		"-Xmx1g -Xms512m",  // reversed order
-		"-Xms512m -Xmx2g ", // trailing space
-	}
-	for _, v := range rejected {
-		if re.MatchString(v) {
-			t.Errorf("expected %q to be rejected by the heapopts pattern", v)
-		}
 	}
 }
 
@@ -1211,29 +1180,9 @@ func TestComputeSpecHash(t *testing.T) {
 }
 
 func TestMustParseQuantity(t *testing.T) {
-	// Valid quantities
-	validCases := []struct {
-		name  string
-		input string
-	}{
-		{"512Mi", "512Mi"},
-		{"1Gi", "1Gi"},
-		{"256M", "256M"},
-		{"100m", "100m"},
-		{"500Mi", "500Mi"},
-		{"2G", "2G"},
-	}
-
-	for _, tc := range validCases {
-		t.Run(tc.name, func(t *testing.T) {
-			q := mustParseQuantity(tc.input)
-			if q.String() == "" {
-				t.Errorf("expected non-empty quantity string for %q", tc.input)
-			}
-		})
-	}
-
-	// Invalid quantities should panic
+	// Invalid quantities should panic. The valid-quantity cases were removed:
+	// they only asserted that apimachinery's resource.ParseQuantity
+	// round-trips known-good strings — framework behavior, not project logic.
 	invalidCases := []string{
 		"invalid",
 		"abc",
