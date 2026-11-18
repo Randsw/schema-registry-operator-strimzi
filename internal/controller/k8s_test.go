@@ -4145,6 +4145,61 @@ func TestHandleTLSCertExpiry(t *testing.T) {
 		}
 	})
 
+	t.Run("certificate expiring exactly at the renewal threshold is renewed", func(t *testing.T) {
+		// U-15 boundary: the renewal condition is time.Until(notAfter) <=
+		// tlsCertRenewalThreshold, so a certificate whose remaining lifetime
+		// EQUALS the threshold must be renewed, not skipped. A strict <
+		// comparison would leave such a certificate un-renewed until the
+		// next recheck observes it inside the window.
+		originalThreshold := tlsCertRenewalThreshold
+		tlsCertRenewalThreshold = 30 * 24 * time.Hour
+		defer func() { tlsCertRenewalThreshold = originalThreshold }()
+
+		cp := certprocessor.NewCertProcessor(logr.Logger{})
+		uc, err := testutil.GenerateTestUserCertWithValidity(ca, "boundarypw123",
+			time.Now().Add(-time.Hour), time.Now().Add(tlsCertRenewalThreshold))
+		if err != nil {
+			t.Fatalf("failed to generate the boundary certificate: %v", err)
+		}
+		keystore, keystorePassword, err := cp.ConvertPEMToJKS(context.Background(), uc.UserCertPEM, uc.UserKeyPEM, "", "boundarypw123")
+		if err != nil {
+			t.Fatalf("failed to build the boundary keystore: %v", err)
+		}
+		boundaryTLSSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            inst.Name + tlsSecretSuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "2000",
+				Annotations:     map[string]string{CAVersionKey: "1000"},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"tls-keystore.jks":  keystore,
+				"keystore_password": []byte(keystorePassword),
+				"key_password":      []byte(keystorePassword),
+			},
+		}
+
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, caCertSecret, caKeySecret, boundaryTLSSecret, jksSecret.DeepCopy(), deployment.DeepCopy()).Build()
+		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		result, _, err := reconciler.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			t.Fatal("expected a requeue after the boundary renewal")
+		}
+
+		renewed := &corev1.Secret{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, renewed); err != nil {
+			t.Fatalf("failed to get the renewed TLS secret: %v", err)
+		}
+		if string(renewed.Data["keystore_password"]) == "boundarypw123" {
+			t.Error("expected the boundary certificate to be renewed (fresh keystore material)")
+		}
+	})
+
 	t.Run("renews without a -jks secret (PLAINTEXT + securehttp)", func(t *testing.T) {
 		originalThreshold := tlsCertRenewalThreshold
 		tlsCertRenewalThreshold = 400 * 24 * time.Hour
@@ -4330,6 +4385,7 @@ func TestCertRecheckInterval(t *testing.T) {
 		name      string
 		notAfter  time.Time
 		wantExact bool // interval equals the standing value exactly
+		tolerance time.Duration
 		min       time.Duration
 		max       time.Duration
 	}{
@@ -4354,6 +4410,27 @@ func TestCertRecheckInterval(t *testing.T) {
 			notAfter:  time.Now().AddDate(0, 0, 10),
 			wantExact: true,
 		},
+		{
+			// U-16 boundary: untilWindow == the standing interval exactly.
+			// The shortening branch requires untilWindow < interval, so the
+			// standing interval must be returned unchanged (no off-by-one
+			// shortening to a value one tick below the standing interval).
+			// The notAfter is computed from the test's own clock, so a few
+			// microseconds elapse before certRecheckInterval reads the clock
+			// again; the tolerance covers that skew while still failing for
+			// any real off-by-one (which would be a full tick or more).
+			name:      "window opening exactly at the standing interval keeps it",
+			notAfter:  time.Now().Add(tlsCertRenewalThreshold + tlsCertRecheckInterval),
+			wantExact: true,
+			tolerance: time.Minute,
+		},
+		{
+			// One tick past the boundary: the shortening branch applies and
+			// the interval is clamped to (just under) the standing value.
+			name:      "window opening one tick sooner shortens the recheck",
+			notAfter:  time.Now().Add(tlsCertRenewalThreshold + tlsCertRecheckInterval - time.Minute),
+			tolerance: time.Minute,
+		},
 	}
 
 	for _, tt := range tests {
@@ -4363,13 +4440,13 @@ func TestCertRecheckInterval(t *testing.T) {
 				t.Fatalf("recheck interval must be positive, got %v", got)
 			}
 			if tt.wantExact {
-				if got != tlsCertRecheckInterval {
-					t.Errorf("expected the standing interval %v, got %v", tlsCertRecheckInterval, got)
+				if diff := got - tlsCertRecheckInterval; diff > tt.tolerance || diff < -tt.tolerance {
+					t.Errorf("expected the standing interval %v (±%v), got %v", tlsCertRecheckInterval, tt.tolerance, got)
 				}
 				return
 			}
-			if got < tt.min || got > tt.max {
-				t.Errorf("expected a recheck in [%v, %v], got %v", tt.min, tt.max, got)
+			if got >= tlsCertRecheckInterval-tt.tolerance {
+				t.Errorf("expected the recheck to be shortened below the standing interval %v (±%v), got %v", tlsCertRecheckInterval, tt.tolerance, got)
 			}
 		})
 	}
