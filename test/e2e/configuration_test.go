@@ -55,21 +55,19 @@ var _ = Describe("StrimziSchemaRegistry e2e configuration passthrough scenario",
 		waitForDeploymentEnv(ctx, readyTimeout, kafkastoreTimeoutEnv, "15000")
 
 		By("verifying the reserved key was filtered out")
+		// The operator-managed SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
+		// env var legitimately exists (rendered from the Kafka CR status);
+		// the reserved-key filter means the user-supplied value must not
+		// override it.
 		dep := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, registryDeploymentKey(), dep)).To(Succeed())
-		for _, container := range dep.Spec.Template.Spec.Containers {
-			for _, env := range container.Env {
-				Expect(env.Name).NotTo(Equal("SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS"),
-					"the reserved kafkastore.bootstrap.servers key must not leak into the env")
-			}
-		}
-		// The operator-managed bootstrap env var must still carry the real
-		// Kafka bootstrap address.
 		found := false
 		for _, container := range dep.Spec.Template.Spec.Containers {
 			for _, env := range container.Env {
 				if env.Name == "SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS" {
 					found = true
+					Expect(env.Value).NotTo(Equal("evil.example.com:9092"),
+						"the reserved kafkastore.bootstrap.servers key must not leak the user-supplied value into the env")
 					Expect(env.Value).To(ContainSubstring(scenario.ClusterName),
 						"the operator-managed bootstrap env var must carry the Kafka bootstrap address")
 				}
