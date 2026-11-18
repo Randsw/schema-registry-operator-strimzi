@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // annotationRolloutScheme builds the scheme shared by the rotation rollout
@@ -288,4 +290,43 @@ func TestHandleMTLSSecretRotationAnnotationRollout(t *testing.T) {
 			t.Errorf("expected no requeue once the annotation matches, got %v", result.RequeueAfter)
 		}
 	})
+}
+
+// TestRollDeploymentForSecretVersion_UpdateError covers the U-7 error branch:
+// a Deployment Update failure (e.g. a 409 Conflict) must be returned to the
+// caller so the next reconcile retries, and the pod-template annotation must
+// stay unchanged — the recorded annotation is only written by a successful
+// update, which is what keeps the rollout recoverable.
+func TestRollDeploymentForSecretVersion_UpdateError(t *testing.T) {
+	scheme := annotationRolloutScheme(t)
+	inst := newTestInstance()
+	depName := types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}
+	injected := errors.New("injected deployment update conflict")
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, newAnnotationRolloutDeployment(depName.Name, depName.Namespace, map[string]string{jksVersionKey: "2999"})).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if _, ok := obj.(*apps.Deployment); ok {
+					return injected
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	patched, err := r.rollDeploymentForSecretVersion(context.Background(), inst, logr.Logger{}, jksVersionKey, "3000", "test")
+	if err == nil {
+		t.Fatal("expected the Deployment Update failure to be returned")
+	}
+	if !errors.Is(err, injected) {
+		t.Fatalf("expected the injected error, got %v", err)
+	}
+	if patched {
+		t.Error("expected patched=false on the failed update")
+	}
+	if got := deploymentAnnotation(t, c, depName, jksVersionKey); got != "2999" {
+		t.Errorf("expected the annotation to stay %q after the failed update, got %q", "2999", got)
+	}
 }

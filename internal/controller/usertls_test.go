@@ -1664,3 +1664,151 @@ func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
 		}
 	})
 }
+
+// TestHandleUserTLSSecretRotationPEM_DerivedSecretError covers the U-10 error
+// branch: when the derived JKS secret regeneration fails (here: the derived
+// secret exists but is controlled by another registry, which
+// ensureDerivedJKSSecret refuses to touch), the error must be propagated and
+// the deployment must not be rolled.
+func TestHandleUserTLSSecretRotationPEM_DerivedSecretError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = "user-tls"
+	userSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+		Data:       realPEMSecretData(t),
+	}
+	// The derived secret exists but is owned by a DIFFERENT registry:
+	// ensureDerivedJKSSecret must refuse to touch it.
+	foreignDerived := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sr-user-tls-jks",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+				Kind:       "StrimziSchemaRegistry",
+				Name:       "another-registry",
+				UID:        "other-uid",
+				Controller: ptr.To(true),
+			}},
+		},
+		Data: map[string][]byte{"tls-keystore.jks": []byte("foreign")},
+	}
+	dep := newRestAPITLSDeployment("user-tls")
+	dep.Spec.Template.Annotations = map[string]string{tlsVersionKey: "50"}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, userSecret, foreignDerived, dep).
+		Build()
+	reconciler := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	result, err := reconciler.handleUserTLSSecretRotation(context.Background(), inst, logr.Logger{})
+	if err == nil {
+		t.Fatal("expected the derived-secret ownership conflict to be returned")
+	}
+	if !strings.Contains(err.Error(), "test-sr-user-tls-jks") {
+		t.Errorf("expected the error to name the derived secret, got: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue on the error path, got %v", result.RequeueAfter)
+	}
+
+	// The deployment must not be rolled: the tlsVersion annotation still
+	// records the old user secret version.
+	untouched := &apps.Deployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test-sr-deploy", Namespace: "default"}, untouched); err != nil {
+		t.Fatalf("failed to get the deployment: %v", err)
+	}
+	if got := untouched.Spec.Template.Annotations[tlsVersionKey]; got != "50" {
+		t.Errorf("expected the tlsVersion annotation to stay %q (no rollout), got %q", "50", got)
+	}
+}
+
+// TestHandleUserTLSSecretRotationPEM_LegacyMountMigration covers the U-17
+// upgrade-migration branch: the deployment's tlsVersion annotation already
+// matches the user secret version, but the rest-api-tls volume still mounts
+// the legacy derived-secret name. The mounts must be repointed and the pods
+// rolled exactly once, then the state must be stable.
+func TestHandleUserTLSSecretRotationPEM_LegacyMountMigration(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = "user-tls"
+	userSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "user-tls", Namespace: "default", ResourceVersion: "100"},
+		Data:       realPEMSecretData(t),
+	}
+	// The derived secret is up to date (annotation matches the user secret
+	// version) but the deployment mounts the LEGACY derived-secret name.
+	derived := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sr-user-tls-jks",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+				Kind:       "StrimziSchemaRegistry",
+				Name:       "test-sr",
+				UID:        "test-uid",
+				Controller: ptr.To(true),
+			}},
+			Annotations: map[string]string{userSecretVersionKey: "100"},
+		},
+		Data: map[string][]byte{
+			"tls-keystore.jks":  []byte("keystore"),
+			"keystore_password": []byte("password"),
+			"key_password":      []byte("password"),
+		},
+	}
+	dep := newRestAPITLSDeployment("legacy-derived-name")
+	dep.Spec.Template.Annotations = map[string]string{tlsVersionKey: "100"}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, userSecret, derived, dep).
+		Build()
+	reconciler := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+	ctx := context.Background()
+
+	result, err := reconciler.handleUserTLSSecretRotation(ctx, inst, logr.Logger{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Errorf("expected requeue after 1s for the migration rollout, got %v", result.RequeueAfter)
+	}
+
+	migrated := &apps.Deployment{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "test-sr-deploy", Namespace: "default"}, migrated); err != nil {
+		t.Fatalf("failed to get the deployment: %v", err)
+	}
+	if got := restAPITLSVolumeSecretName(migrated); got != "test-sr-user-tls-jks" {
+		t.Errorf("expected the rest-api-tls volume to be repointed at the derived secret, got %q", got)
+	}
+	for _, envName := range []string{sslKeystorePasswordEnv, sslKeyPasswordEnv} {
+		for _, e := range migrated.Spec.Template.Spec.Containers[0].Env {
+			if e.Name == envName && (e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil || e.ValueFrom.SecretKeyRef.Name != "test-sr-user-tls-jks") {
+				t.Errorf("expected %s to reference the derived secret, got %+v", envName, e.ValueFrom)
+			}
+		}
+	}
+	if got := migrated.Spec.Template.Annotations[tlsVersionKey]; got != "100" {
+		t.Errorf("expected the tlsVersion annotation to stay %q (the user secret did not rotate), got %q", "100", got)
+	}
+
+	// The next reconcile must be stable: no spurious second rollout.
+	result, err = reconciler.handleUserTLSSecretRotation(ctx, inst, logr.Logger{})
+	if err != nil {
+		t.Fatalf("unexpected error on the second reconcile: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue once the migration is complete, got %v", result.RequeueAfter)
+	}
+}
