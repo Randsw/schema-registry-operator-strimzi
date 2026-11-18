@@ -125,9 +125,11 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# Run the e2e tests against a local Kubernetes API server (envtest).
-.PHONY: test-e2e  # Run the e2e tests against a local Kubernetes API server (envtest).
-test-e2e: envtest
+# Run the envtest controller suite verbosely (the integration tests against
+# a local Kubernetes API server; NOT the kind-cluster e2e tests, which are
+# the `e2e` target below).
+.PHONY: test-integration-verbose
+test-integration-verbose: envtest
 	$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path >/dev/null
 	ENVTEST_K8S_VERSION=$(ENVTEST_K8S_VERSION) go test ./internal/controller/... -v -ginkgo.v
 

@@ -163,10 +163,11 @@ var _ = AfterSuite(func() {
 })
 
 // envtestVersion returns the k8s version for envtest binaries,
-// reading from ENVTEST_K8S_VERSION env var (set by Makefile) or falling back to a default.
+// reading from ENVTEST_K8S_VERSION env var (set by Makefile) or falling back
+// to the same default the Makefile pins (ENVTEST_K8S_VERSION).
 func envtestVersion() string {
 	if v := os.Getenv("ENVTEST_K8S_VERSION"); v != "" {
 		return v
 	}
-	return "1.36.0"
+	return "1.37.0"
 }
