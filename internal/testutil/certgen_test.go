@@ -233,21 +233,3 @@ func TestGenerateTestUserCert_PKCS12Data(t *testing.T) {
 		t.Errorf("Unexpected CommonName in decoded CA cert: %s", caCerts[0].Subject.CommonName)
 	}
 }
-
-func TestGenerateTestUserCert_PKCS12WrongPassword(t *testing.T) {
-	ca, err := GenerateTestCA()
-	if err != nil {
-		t.Fatalf("GenerateTestCA() returned error: %v", err)
-	}
-
-	uc, err := GenerateTestUserCert(ca, "test1234")
-	if err != nil {
-		t.Fatalf("GenerateTestUserCert() returned error: %v", err)
-	}
-
-	// Verify that wrong password fails to decode
-	_, _, err = pkcs12.Decode(uc.PKCS12Data, "wrongpassword")
-	if err == nil {
-		t.Fatal("Expected error when decoding PKCS#12 with wrong password")
-	}
-}

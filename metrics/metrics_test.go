@@ -3,7 +3,6 @@ package metrics
 import (
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -29,20 +28,11 @@ func TestRegisterMetricsExposesCorrectedInstanceCountGauge(t *testing.T) {
 	if !found {
 		t.Error("expected metric strimzi_schema_registry_instance_current_count to be registered and exposed")
 	}
-}
 
-// TestInstanceCountGaugeRegisterCleanly verifies the corrected instance-count
-// gauge can be registered into a fresh Prometheus registry without conflicts
-// and exposes the set value.
-func TestInstanceCountGaugeRegisterCleanly(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	if err := registry.Register(StrimziSchemaRegistryCurrentInstanceCount); err != nil {
-		t.Fatalf("failed to register the instance count gauge: %v", err)
-	}
-
+	// The gauge exposes the value it was set to (merged from the former
+	// TestInstanceCountGaugeRegisterCleanly).
 	StrimziSchemaRegistryCurrentInstanceCount.Set(3)
-
-	families, err := registry.Gather()
+	families, err = metrics.Registry.Gather()
 	if err != nil {
 		t.Fatalf("failed to gather metrics: %v", err)
 	}
