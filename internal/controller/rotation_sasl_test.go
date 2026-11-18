@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -245,4 +246,66 @@ func TestHandleClientAuthTruststoreRotationAnnotationRollout(t *testing.T) {
 			t.Errorf("expected the jksVersion annotation %q, got %q", "3000", got)
 		}
 	})
+}
+
+// TestHandleSASLSecretRotation_ClusterCAGetError covers the U-8 error branch:
+// a cluster CA secret Get failure in SASL_SSL must be returned to the caller
+// instead of being treated as a rotation trigger, and no truststore rebuild
+// may be attempted (the -jks secret stays untouched).
+func TestHandleSASLSecretRotation_ClusterCAGetError(t *testing.T) {
+	scheme := annotationRolloutScheme(t)
+
+	cluster := "test-cluster"
+	inst := newTestInstance()
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+	auth := kafkaAuth{Protocol: "SASL_SSL", Mode: authSASLSSL, NeedsTruststore: true, NeedsSASL: true}
+	depName := types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}
+
+	userSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            inst.Name,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "2000",
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"sasl.jaas.config": []byte("jaas")},
+	}
+	jksSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            inst.Name + jksSecretSuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "3000",
+			Annotations:     map[string]string{CAVersionKey: "1000"},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"truststore.jks": []byte("stub")},
+	}
+	injected := errors.New("injected cluster CA secret get failure")
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, userSecret.DeepCopy(), jksSecret.DeepCopy(),
+			newAnnotationRolloutDeployment(depName.Name, depName.Namespace, nil)).
+		WithInterceptorFuncs(failGets(&corev1.Secret{}, cluster+clusterCASuffix, injected)).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	result, err := r.handleSASLSecretRotation(context.Background(), inst, logr.Logger{}, cluster, auth)
+	if err == nil {
+		t.Fatal("expected the cluster CA secret Get failure to be returned")
+	}
+	if !errors.Is(err, injected) {
+		t.Fatalf("expected the injected error, got %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue on the error path, got %v", result.RequeueAfter)
+	}
+
+	// No truststore rebuild may be attempted: the -jks secret is untouched.
+	untouched := &corev1.Secret{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name + jksSecretSuffix, Namespace: inst.Namespace}, untouched); err != nil {
+		t.Fatalf("failed to get the -jks secret: %v", err)
+	}
+	if untouched.ResourceVersion != "3000" {
+		t.Errorf("expected the -jks secret to be untouched, got resourceVersion %s", untouched.ResourceVersion)
+	}
 }

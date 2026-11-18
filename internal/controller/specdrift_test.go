@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -25,11 +26,16 @@ import (
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // newSpecDriftFixture builds an operator-complete Deployment fixture (built by
@@ -211,6 +217,130 @@ func TestUpdateExistingDeploymentPatchesSpecDrift(t *testing.T) {
 		}
 		if got := updated.Spec.Template.Annotations[tlsVersionKey]; got != "2000" {
 			t.Errorf("expected the tlsVersion marker to survive the spec patch at the current secret version %q, got %q", "2000", got)
+		}
+	})
+}
+
+// TestRecreateDeploymentForLegacySelector_CreateError covers the U-9 error
+// branch: when the replacement Deployment Create fails after the legacy
+// Deployment was deleted, the error must be returned (surfacing as a
+// ReconcileError on the CR through the Reconcile wrapper) and a subsequent
+// successful reconcile must converge — the migration is retried, not lost.
+func TestRecreateDeploymentForLegacySelector_CreateError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.Template = corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+	}
+	kafkaCR := newTestKafkaCR("kafka-cluster", inst.Namespace)
+
+	legacySelector := map[string]string{
+		"app":                       inst.Name,
+		"strimzi-schema-registry":   inst.Name,
+		"app.kubernetes.io/version": "7.6.1",
+		"strimzi.io/cluster":        "kafka-cluster",
+	}
+	legacyDep := &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        inst.Name + deploySuffix,
+			Namespace:   inst.Namespace,
+			Annotations: map[string]string{keyPrefix + "/specHash": "stale-hash"},
+		},
+		Spec: apps.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: legacySelector},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: legacySelector},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:7.6.1"}}},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	logger := logr.Logger{}
+	injected := errors.New("injected deployment create failure")
+
+	t.Run("create failure is returned after the delete", func(t *testing.T) {
+		creates := 0
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, kafkaCR, legacyDep.DeepCopy()).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*apps.Deployment); ok {
+						creates++
+						return injected
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			}).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+		_, _, err := r.updateExistingDeployment(inst, ctx, logger, legacyDep.DeepCopy())
+		if err == nil {
+			t.Fatal("expected the replacement Deployment Create failure to be returned")
+		}
+		if !errors.Is(err, injected) {
+			t.Fatalf("expected the injected error, got %v", err)
+		}
+		if creates != 1 {
+			t.Errorf("expected exactly 1 replacement Create attempt, got %d", creates)
+		}
+		// The legacy Deployment was deleted before the failed create.
+		deleted := &apps.Deployment{}
+		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}, deleted); !apierrors.IsNotFound(err) {
+			t.Errorf("expected the legacy Deployment to be deleted, got %v", err)
+		}
+	})
+
+	t.Run("a subsequent successful reconcile converges", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, kafkaCR, legacyDep.DeepCopy()).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+		// First pass fails (simulating the injected create failure above by
+		// deleting the legacy Deployment underneath the reconciler is not
+		// needed: run the failing variant through a one-shot interceptor).
+		failing := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, kafkaCR, legacyDep.DeepCopy()).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*apps.Deployment); ok {
+						return injected
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			}).
+			Build()
+		rFailing := &StrimziSchemaRegistryReconciler{Client: failing, Scheme: scheme}
+		if _, _, err := rFailing.updateExistingDeployment(inst, ctx, logger, legacyDep.DeepCopy()); err == nil {
+			t.Fatal("expected the first pass to fail")
+		}
+
+		// Recovery: a fresh client holding the legacy Deployment again (the
+		// state a real cluster is left in when the create failed and the
+		// operator retried) converges on the next reconcile.
+		updated, specChanged, err := r.updateExistingDeployment(inst, ctx, logger, legacyDep.DeepCopy())
+		if err != nil {
+			t.Fatalf("expected the retry to converge, got %v", err)
+		}
+		if specChanged {
+			t.Error("expected specChanged=false after the successful migration")
+		}
+		if updated == nil || updated.Spec.Selector == nil {
+			t.Fatal("expected the re-created Deployment to be returned")
+		}
+		want := selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)
+		if !equality.Semantic.DeepEqual(updated.Spec.Selector.MatchLabels, want) {
+			t.Errorf("expected the stable selector %v after recovery, got %v", want, updated.Spec.Selector.MatchLabels)
 		}
 	})
 }
