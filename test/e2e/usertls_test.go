@@ -17,6 +17,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/go-logr/logr"
+	"software.sslmate.com/src/go-pkcs12"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -167,6 +168,45 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 		By("passing the REST round-trip trusting the user CA after the rollout")
 		verifyRoundTrip(userCA, nil)
 	})
+
+	// E2-3: a PKCS12 keystore secret (spec.keystoretype: PKCS12) is mounted
+	// as-is and the deployment points SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION
+	// at the .p12 file (plus the non-default SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE
+	// env var); the REST API must serve the user certificate.
+	It("phase 3: deploys with a user-provided PKCS12 keystore secret", func() {
+		ctx := context.Background()
+
+		By("building the PKCS12 keystore from the user certificate")
+		serverKey, err := parsePrivateKey(keyPEM)
+		Expect(err).NotTo(HaveOccurred())
+		p12, err := pkcs12.Legacy.Encode(serverKey, userCACert(certPEM), []*x509.Certificate{testCA.CACert}, userTLSKeystorePass)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("rotating the user secret to the PKCS12 shape")
+		applyUserTLSSecret(ctx, map[string][]byte{
+			"tls-keystore.p12":  p12,
+			"keystore_password": []byte(userTLSKeystorePass),
+			"key_password":      []byte(userTLSKeystorePass),
+		})
+
+		By("applying the CR with spec.keystoretype=PKCS12")
+		Expect(applyRegistryCR(ctx, false, true, nil, func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
+			spec.TLSSecretName = userTLSSecretName
+			spec.KeystoreType = "PKCS12"
+		})).To(Succeed())
+		waitForReadyCondition(ctx, readyTimeout)
+		waitForDeploymentRollout(ctx, readyTimeout)
+
+		By("verifying the deployment points at the .p12 keystore location")
+		waitForDeploymentEnv(ctx, readyTimeout, "SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION", "/var/rest-api-tls/tls-keystore.p12")
+		waitForDeploymentEnv(ctx, readyTimeout, "SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE", "PKCS12")
+
+		By("verifying the deployment mounts the user secret")
+		Expect(restAPITLSMountedSecret(ctx)).To(Equal(userTLSSecretName))
+
+		By("passing the REST round-trip trusting the user CA")
+		verifyRoundTrip(userCA, nil)
+	})
 })
 
 // userTLSDNSNames returns the DNS SANs the user REST API certificate must
@@ -179,6 +219,13 @@ func userTLSDNSNames() []string {
 		registry + ".svc",
 		registry + ".svc.cluster.local",
 	}
+}
+
+// userCACert parses the PEM-encoded user REST API server certificate.
+func userCACert(certPEM []byte) *x509.Certificate {
+	cert, err := parseCertificate(certPEM)
+	Expect(err).NotTo(HaveOccurred())
+	return cert
 }
 
 // signUserTLSServerCert signs a REST API server certificate for the given
