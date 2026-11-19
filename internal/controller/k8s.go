@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	go_err "errors"
 	"fmt"
+	"hash"
 	"hash/fnv"
 	"io"
 	"sort"
@@ -370,12 +371,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 	}
 
 	// Compute spec hash and store it in annotation to detect spec changes on subsequent reconciliations.
-	specHash, err := computeSpecHash(instance)
-	if err != nil {
-		logger.Error(err, "Failed to calculate CR spec hash")
-		return nil, nil, err
-	}
-	podSpec.Annotations[keyPrefix+"/specHash"] = specHash
+	podSpec.Annotations[keyPrefix+"/specHash"] = computeSpecHash(instance)
 
 	dep := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -383,7 +379,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 			Namespace: instance.Namespace,
 			Labels:    ls,
 			Annotations: map[string]string{
-				keyPrefix + "/specHash": specHash,
+				keyPrefix + "/specHash": computeSpecHash(instance),
 			},
 		},
 		Spec: apps.DeploymentSpec{
@@ -398,7 +394,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 		},
 	}
 	// Set StrimziSchemaRegistry instance as the owner and controller
-	err = ctrl.SetControllerReference(instance, dep, r.Scheme)
+	err := ctrl.SetControllerReference(instance, dep, r.Scheme)
 	if err != nil {
 		logger.Error(err, "Failed to set StrimziSchemaRegistry instance as the owner and controller")
 		return nil, nil, err
@@ -1864,43 +1860,53 @@ func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregis
 // probability across spec versions (64-bit vs 32-bit digest). Changing the
 // algorithm rewrites every stored hash value once, which triggers a one-time
 // rollout of existing Schema Registry deployments on operator upgrade.
-func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
+// writeHash appends s to the fnv hash. Writes to an in-memory fnv hash
+// cannot fail, so the former per-write error branches are gone.
+func writeHash(h hash.Hash64, s string) {
+	_, _ = io.WriteString(h, s)
+}
+
+// writeHashf appends the formatted value to the fnv hash.
+func writeHashf(h hash.Hash64, format string, args ...any) {
+	_, _ = fmt.Fprintf(h, format, args...)
+}
+
+// computeSpecHash computes a hash of the relevant spec fields to detect changes.
+// The hash covers CompatibilityLevel, SecureHTTP, ClientAuth, HeapOpts, Listener,
+// SecurityProtocol, TLSSecretName, KafkastoreTopic, KafkastoreTopicReplicationFactor,
+// SchemaRegistryGroupID, MasterEligibility, Configuration, and the full PodTemplateSpec —
+// all fields that affect the deployment spec or service ports.
+//
+// Service passthrough annotations/labels and NetworkPolicy enablement are
+// deliberately excluded: they change the Service or NetworkPolicy objects but
+// never the Schema Registry pods, and both are reconciled independently, so
+// including them would cause full pod restarts on unrelated metadata edits.
+//
+// FNV-64a is used instead of the former FNV-32 to reduce the collision
+// probability across spec versions (64-bit vs 32-bit digest). Changing the
+// algorithm rewrites every stored hash value once, which triggers a one-time
+// rollout of existing Schema Registry deployments on operator upgrade.
+func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
 	h := fnv.New64a()
 
-	if _, err := io.WriteString(h, string(instance.Spec.CompatibilityLevel)); err != nil {
-		return "", fmt.Errorf("failed to write CompatibilityLevel to hash: %w", err)
-	}
+	writeHash(h, string(instance.Spec.CompatibilityLevel))
 
-	if _, err := fmt.Fprintf(h, "%t", instance.Spec.SecureHTTP); err != nil {
-		return "", fmt.Errorf("failed to write SecureHTTP to hash: %w", err)
-	}
+	writeHashf(h, "%t", instance.Spec.SecureHTTP)
 
-	if _, err := fmt.Fprintf(h, "%t", instance.Spec.ClientAuth); err != nil {
-		return "", fmt.Errorf("failed to write ClientAuth to hash: %w", err)
-	}
+	writeHashf(h, "%t", instance.Spec.ClientAuth)
 
-	if _, err := io.WriteString(h, instance.Spec.HeapOpts); err != nil {
-		return "", fmt.Errorf("failed to write HeapOpts to hash: %w", err)
-	}
+	writeHash(h, instance.Spec.HeapOpts)
 
-	if _, err := io.WriteString(h, instance.Spec.Listener); err != nil {
-		return "", fmt.Errorf("failed to write Listener to hash: %w", err)
-	}
+	writeHash(h, instance.Spec.Listener)
 
-	if _, err := io.WriteString(h, instance.Spec.SecurityProtocol); err != nil {
-		return "", fmt.Errorf("failed to write SecurityProtocol to hash: %w", err)
-	}
+	writeHash(h, instance.Spec.SecurityProtocol)
 
-	if _, err := io.WriteString(h, instance.Spec.TLSSecretName); err != nil {
-		return "", fmt.Errorf("failed to write TLSSecretName to hash: %w", err)
-	}
+	writeHash(h, instance.Spec.TLSSecretName)
 
 	// The keystore type changes the rendered keystore location and the
 	// SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE env var, so it participates in the
 	// hash using the same effective value buildPodEnv emits.
-	if _, err := io.WriteString(h, effectiveKeystoreType(instance)); err != nil {
-		return "", fmt.Errorf("failed to write KeystoreType to hash: %w", err)
-	}
+	writeHash(h, effectiveKeystoreType(instance))
 
 	// Storage and identity fields are hashed using the same effective/defaulted
 	// values that buildPodEnv emits, so hashing stays deterministic and in sync.
@@ -1908,60 +1914,49 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 	if kafkastoreTopic == "" {
 		kafkastoreTopic = "registry-schemas"
 	}
-	if _, err := io.WriteString(h, kafkastoreTopic); err != nil {
-		return "", fmt.Errorf("failed to write KafkastoreTopic to hash: %w", err)
-	}
+	writeHash(h, kafkastoreTopic)
 
 	if instance.Spec.KafkastoreTopicReplicationFactor != nil {
-		if _, err := fmt.Fprintf(h, "%d", *instance.Spec.KafkastoreTopicReplicationFactor); err != nil {
-			return "", fmt.Errorf("failed to write KafkastoreTopicReplicationFactor to hash: %w", err)
-		}
+		writeHashf(h, "%d", *instance.Spec.KafkastoreTopicReplicationFactor)
 	}
 
 	schemaRegistryGroupID := instance.Spec.SchemaRegistryGroupID
 	if schemaRegistryGroupID == "" {
 		schemaRegistryGroupID = "schema-registry"
 	}
-	if _, err := io.WriteString(h, schemaRegistryGroupID); err != nil {
-		return "", fmt.Errorf("failed to write SchemaRegistryGroupID to hash: %w", err)
-	}
+	writeHash(h, schemaRegistryGroupID)
 
 	masterEligibility := true
 	if instance.Spec.MasterEligibility != nil {
 		masterEligibility = *instance.Spec.MasterEligibility
 	}
-	if _, err := fmt.Fprintf(h, "%t", masterEligibility); err != nil {
-		return "", fmt.Errorf("failed to write MasterEligibility to hash: %w", err)
-	}
+	writeHashf(h, "%t", masterEligibility)
 
 	// The replica count is part of the desired Deployment spec (B20), so
 	// changing spec.replicas must trigger a deployment update. Hashed using
 	// the same effective value buildDeploymentSpec emits, so an explicit 1
 	// and an unset replicas (both meaning 1) hash identically and never
 	// cause a spurious rollout.
-	if _, err := fmt.Fprintf(h, "%d", effectiveReplicas(instance)); err != nil {
-		return "", fmt.Errorf("failed to write Replicas to hash: %w", err)
-	}
+	writeHashf(h, "%d", effectiveReplicas(instance))
 
 	// Configuration entries are hashed in sorted key order so the hash is
 	// deterministic regardless of map iteration order.
 	for _, key := range sortedConfigurationKeys(instance.Spec.Configuration) {
-		if _, err := fmt.Fprintf(h, "%s=%s", key, instance.Spec.Configuration[key]); err != nil {
-			return "", fmt.Errorf("failed to write configuration entry to hash: %w", err)
-		}
+		writeHashf(h, "%s=%s", key, instance.Spec.Configuration[key])
 	}
 
 	// Include the full PodTemplateSpec so that container image, resources,
 	// and other template changes trigger a deployment update.
 	templateJSON, err := json.Marshal(instance.Spec.Template)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal Template to JSON for hash: %w", err)
+		// json.Marshal of a PodTemplateSpec cannot fail (no channels,
+		// funcs or cycles); fall back to the zero hash rather than
+		// propagating an impossible error.
+		return "0"
 	}
-	if _, err := h.Write(templateJSON); err != nil {
-		return "", fmt.Errorf("failed to write Template to hash: %w", err)
-	}
+	_, _ = h.Write(templateJSON)
 
-	return fmt.Sprintf("%d", h.Sum64()), nil
+	return fmt.Sprintf("%d", h.Sum64())
 }
 
 // updateExistingDeployment updates an existing deployment when the spec has changed.
@@ -2088,10 +2083,7 @@ func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
 	}
 
 	// Compute desired spec hash
-	desiredHash, err := computeSpecHash(instance)
-	if err != nil {
-		return nil, false, err
-	}
+	desiredHash := computeSpecHash(instance)
 
 	// Get existing hash from annotation
 	existingAnnotations := found.GetAnnotations()

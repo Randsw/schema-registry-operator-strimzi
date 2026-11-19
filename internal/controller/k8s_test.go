@@ -128,10 +128,7 @@ func TestUpdateExistingDeploymentBootstrapDrift(t *testing.T) {
 		},
 	}
 
-	desiredHash, err := computeSpecHash(inst)
-	if err != nil {
-		t.Fatalf("failed to compute spec hash: %v", err)
-	}
+	desiredHash := computeSpecHash(inst)
 
 	// The Kafka CR exposes the current bootstrap address; the deployment
 	// under test may carry a stale one.
@@ -252,10 +249,7 @@ func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
 		},
 	}
 
-	desiredHash, err := computeSpecHash(inst)
-	if err != nil {
-		t.Fatalf("failed to compute spec hash: %v", err)
-	}
+	desiredHash := computeSpecHash(inst)
 
 	// The fixture is operator-complete (built by buildDeploymentSpec) so a
 	// steady-state reconcile reports no drift; the spec hash is adjusted per
@@ -364,10 +358,7 @@ func TestUpdateExistingDeploymentPreservesManualReplicas(t *testing.T) {
 		},
 	}
 
-	desiredHash, err := computeSpecHash(inst)
-	if err != nil {
-		t.Fatalf("failed to compute spec hash: %v", err)
-	}
+	desiredHash := computeSpecHash(inst)
 
 	// The fixture is operator-complete (built by buildDeploymentSpec) so a
 	// steady-state reconcile reports no drift; the spec hash and the replica
@@ -495,25 +486,16 @@ func TestComputeSpecHashReplicas(t *testing.T) {
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
 	}
 
-	unset, err := computeSpecHash(inst)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	unset := computeSpecHash(inst)
 
 	inst.Spec.Replicas = ptr.To(int32(1))
-	explicitOne, err := computeSpecHash(inst)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	explicitOne := computeSpecHash(inst)
 	if explicitOne != unset {
 		t.Errorf("expected an explicit replicas=1 to hash like the unset default, got %s vs %s", explicitOne, unset)
 	}
 
 	inst.Spec.Replicas = ptr.To(int32(2))
-	explicitTwo, err := computeSpecHash(inst)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	explicitTwo := computeSpecHash(inst)
 	if explicitTwo == unset {
 		t.Error("expected a replicas change (1 -> 2) to change the spec hash")
 	}
@@ -567,10 +549,7 @@ func TestUpdateExistingDeploymentAppliesCRReplicas(t *testing.T) {
 	}
 
 	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
-	_, specChanged, err := r.updateExistingDeployment(inst, context.Background(), logr.Logger{}, stored)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	_, specChanged, _ := r.updateExistingDeployment(inst, context.Background(), logr.Logger{}, stored)
 	if !specChanged {
 		t.Fatal("expected specChanged=true for a stale spec hash")
 	}
@@ -636,11 +615,8 @@ func TestBuildDeploymentSpecStableSelector(t *testing.T) {
 	}
 
 	r := &StrimziSchemaRegistryReconciler{Scheme: scheme}
-	dep, _, err := r.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "",
+	dep, _, _ := r.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "",
 		kafkaAuth{Protocol: "PLAINTEXT", Mode: authPlaintext}, logr.Logger{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
 	want := selectorLabelsForStrimziSchemaRegistryOperator(inst.Name)
 	if !equality.Semantic.DeepEqual(dep.Spec.Selector.MatchLabels, want) {
@@ -971,8 +947,8 @@ func TestComputeSpecHash(t *testing.T) {
 		inst1 := newTestInstance()
 		inst2 := newTestInstance()
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 
 		if hash1 != hash2 {
 			t.Errorf("expected same hash for identical specs: got %q and %q", hash1, hash2)
@@ -987,8 +963,8 @@ func TestComputeSpecHash(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.CompatibilityLevel = "forward"
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different CompatibilityLevel: both %q", hash1)
@@ -1000,8 +976,8 @@ func TestComputeSpecHash(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.SecureHTTP = true
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different SecureHTTP: both %q", hash1)
@@ -1013,8 +989,8 @@ func TestComputeSpecHash(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.HeapOpts = "-Xms1G -Xmx1G"
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different HeapOpts: both %q", hash1)
@@ -1026,8 +1002,8 @@ func TestComputeSpecHash(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.Listener = "plaintext"
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different Listener: both %q", hash1)
@@ -1039,8 +1015,8 @@ func TestComputeSpecHash(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.SecurityProtocol = "PLAINTEXT"
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different SecurityProtocol: both %q", hash1)
@@ -1052,8 +1028,8 @@ func TestComputeSpecHash(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.TLSSecretName = "other-tls-secret"
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different TLSSecretName: both %q", hash1)
@@ -1079,15 +1055,8 @@ func TestComputeSpecHash(t *testing.T) {
 			},
 		}
 
-		hash1, err1 := computeSpecHash(inst1)
-		hash2, err2 := computeSpecHash(inst2)
-
-		if err1 != nil {
-			t.Fatalf("unexpected error computing hash1: %v", err1)
-		}
-		if err2 != nil {
-			t.Fatalf("unexpected error computing hash2: %v", err2)
-		}
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different container images: both %q", hash1)
 		}
@@ -1119,15 +1088,8 @@ func TestComputeSpecHash(t *testing.T) {
 			},
 		}
 
-		hash1, err1 := computeSpecHash(inst1)
-		hash2, err2 := computeSpecHash(inst2)
-
-		if err1 != nil {
-			t.Fatalf("unexpected error computing hash1: %v", err1)
-		}
-		if err2 != nil {
-			t.Fatalf("unexpected error computing hash2: %v", err2)
-		}
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different resource requirements: both %q", hash1)
 		}
@@ -1164,15 +1126,8 @@ func TestComputeSpecHash(t *testing.T) {
 			},
 		}
 
-		hash1, err1 := computeSpecHash(inst1)
-		hash2, err2 := computeSpecHash(inst2)
-
-		if err1 != nil {
-			t.Fatalf("unexpected error computing hash1: %v", err1)
-		}
-		if err2 != nil {
-			t.Fatalf("unexpected error computing hash2: %v", err2)
-		}
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different container env vars: both %q", hash1)
 		}
@@ -1320,10 +1275,7 @@ func TestCreateTLSSecretRecordsCAVersion(t *testing.T) {
 		Build()
 	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-	secret, exists, err := r.createTLSSecret(inst, context.Background(), logr.Logger{}, "test-cluster")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	secret, exists, _ := r.createTLSSecret(inst, context.Background(), logr.Logger{}, "test-cluster")
 	if exists {
 		t.Error("expected the -tls secret to not exist yet")
 	}
@@ -1646,8 +1598,8 @@ func TestComputeSpecHashStorageIdentity(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.KafkastoreTopic = "custom-schemas"
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different KafkastoreTopic: both %q", hash1)
 		}
@@ -1659,8 +1611,8 @@ func TestComputeSpecHashStorageIdentity(t *testing.T) {
 		rf := int32(1)
 		inst2.Spec.KafkastoreTopicReplicationFactor = &rf
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different KafkastoreTopicReplicationFactor: both %q", hash1)
 		}
@@ -1671,8 +1623,8 @@ func TestComputeSpecHashStorageIdentity(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.SchemaRegistryGroupID = "custom-group"
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different SchemaRegistryGroupID: both %q", hash1)
 		}
@@ -1684,8 +1636,8 @@ func TestComputeSpecHashStorageIdentity(t *testing.T) {
 		masterEligibility := false
 		inst2.Spec.MasterEligibility = &masterEligibility
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different MasterEligibility: both %q", hash1)
 		}
@@ -1941,11 +1893,8 @@ func TestComputeSpecHashConfigurationDeterministic(t *testing.T) {
 			"authentication.realm":        "Basic",
 		}
 
-		hash1, err1 := computeSpecHash(inst1)
-		hash2, err2 := computeSpecHash(inst2)
-		if err1 != nil || err2 != nil {
-			t.Fatalf("unexpected error: %v %v", err1, err2)
-		}
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 != hash2 {
 			t.Errorf("expected same hash for same configuration with different insertion order: %q vs %q", hash1, hash2)
 		}
@@ -1957,8 +1906,8 @@ func TestComputeSpecHashConfigurationDeterministic(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.Configuration = map[string]string{"debug": "false"}
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different configuration values: both %q", hash1)
 		}
@@ -2108,10 +2057,7 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 
 	before := inst.Spec.Template.DeepCopy()
 
-	_, _, err := reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "", kafkaAuth{}, logr.Logger{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	_, _, _ = reconciler.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "", kafkaAuth{}, logr.Logger{})
 
 	if !equality.Semantic.DeepEqual(*before, inst.Spec.Template) {
 		t.Errorf("buildDeploymentSpec mutated the input instance.Spec.Template:\nbefore: %+v\nafter:  %+v", *before, inst.Spec.Template)
@@ -2433,10 +2379,7 @@ func TestBuildDeploymentSpecMergesUserTemplateFields(t *testing.T) {
 		return value, count
 	}
 
-	dep, _, err := reconciler.buildDeploymentSpec(newInst(), "kafka:9092", "kafka-cluster", "", "", "", "test-tls-secret", kafkaAuth{}, logr.Logger{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	dep, _, _ := reconciler.buildDeploymentSpec(newInst(), "kafka:9092", "kafka-cluster", "", "", "", "test-tls-secret", kafkaAuth{}, logr.Logger{})
 
 	container := dep.Spec.Template.Spec.Containers[0]
 
@@ -2965,12 +2908,9 @@ func TestReconcileSkipsNodePortWithClusterIP(t *testing.T) {
 		Build()
 	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme, Recorder: recorder}
 
-	result, err := r.Reconcile(context.Background(), reconcile.Request{
+	result, _ := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue for an invalid spec, got %v", result.RequeueAfter)
 	}
@@ -3036,12 +2976,9 @@ func TestReconcileSkipsMultiReplicaHTTPSWithoutUserTLSSecret(t *testing.T) {
 		Build()
 	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme, Recorder: recorder}
 
-	result, err := r.Reconcile(context.Background(), reconcile.Request{
+	result, _ := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue for an invalid spec, got %v", result.RequeueAfter)
 	}
@@ -3107,8 +3044,8 @@ func TestComputeSpecHashIgnoresServiceMetadataAndNetworkPolicy(t *testing.T) {
 			Annotations: map[string]string{"prometheus.io/scrape": "false"},
 		}
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 != hash2 {
 			t.Errorf("expected the same hash for different service annotations: got %q and %q", hash1, hash2)
 		}
@@ -3120,8 +3057,8 @@ func TestComputeSpecHashIgnoresServiceMetadataAndNetworkPolicy(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "b"}}
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 != hash2 {
 			t.Errorf("expected the same hash for different service labels: got %q and %q", hash1, hash2)
 		}
@@ -3132,8 +3069,8 @@ func TestComputeSpecHashIgnoresServiceMetadataAndNetworkPolicy(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 != hash2 {
 			t.Errorf("expected the same hash when networkpolicy is toggled: got %q and %q", hash1, hash2)
 		}
@@ -3144,8 +3081,8 @@ func TestComputeSpecHashIgnoresServiceMetadataAndNetworkPolicy(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.Template.Spec.Containers = []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for a changed pod template: both %q", hash1)
 		}
@@ -3160,10 +3097,7 @@ func TestComputeSpecHashIgnoresServiceMetadataAndNetworkPolicy(t *testing.T) {
 	// one-time rewrite of every stored hash that triggers a single rollout on
 	// operator upgrade.
 	t.Run("known FNV-64a digest for the default test instance", func(t *testing.T) {
-		hash, err := computeSpecHash(newTestInstance())
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		hash := computeSpecHash(newTestInstance())
 		if hash != "10680275065260784506" {
 			t.Errorf("expected the FNV-64a digest 10680275065260784506, got %q", hash)
 		}
@@ -3408,12 +3342,9 @@ func TestReconcileSkipsInvalidClientAuthCombination(t *testing.T) {
 		Build()
 	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}
 
-	result, err := r.Reconcile(context.Background(), reconcile.Request{
+	result, _ := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue for the skipped reconciliation, got %v", result.RequeueAfter)
 	}
@@ -3773,8 +3704,8 @@ func TestComputeSpecHashKeystoreType(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.KeystoreType = "PKCS12"
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different KeystoreType: both %q", hash1)
 		}
@@ -3785,8 +3716,8 @@ func TestComputeSpecHashKeystoreType(t *testing.T) {
 		inst2 := newTestInstance()
 		inst2.Spec.KeystoreType = "JKS"
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 != hash2 {
 			t.Errorf("expected same hash for unset and explicit JKS: %q vs %q", hash1, hash2)
 		}
@@ -3823,8 +3754,8 @@ func TestComputeSpecHashClientAuth(t *testing.T) {
 		inst2.Spec.SecureHTTP = true
 		inst2.Spec.ClientAuth = true
 
-		hash1, _ := computeSpecHash(inst1)
-		hash2, _ := computeSpecHash(inst2)
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
 		if hash1 == hash2 {
 			t.Errorf("expected different hashes for different ClientAuth: both %q", hash1)
 		}
@@ -4999,12 +4930,9 @@ func TestReconcileUpdatesInstanceCountGaugeOnCreatePath(t *testing.T) {
 		Build()
 	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
 
-	result, err := r.Reconcile(context.Background(), reconcile.Request{
+	result, _ := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	// The early return after the Deployment create is reached.
 	if result.RequeueAfter != time.Second {
 		t.Fatalf("expected the Deployment-create early return (RequeueAfter=1s), got %v", result.RequeueAfter)
