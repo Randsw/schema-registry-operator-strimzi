@@ -176,9 +176,13 @@ func curlFromPod(ctx context.Context, namespace, name string) string {
 	var logs string
 	Eventually(func(g Gomega) {
 		// The pod must reach a terminal phase before its logs are complete.
+		// A blocked probe exits non-zero (curl fails to connect), so the pod
+		// ends in Failed — that is the expected outcome for the
+		// foreign-namespace probe and its logs still carry the curl error.
 		fetched := &corev1.Pod{}
 		g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, fetched)).To(Succeed())
-		g.Expect(fetched.Status.Phase).To(Equal(corev1.PodSucceeded),
+		g.Expect(fetched.Status.Phase).To(SatisfyAny(
+			Equal(corev1.PodSucceeded), Equal(corev1.PodFailed)),
 			"the probe pod has not finished yet (phase %s)", fetched.Status.Phase)
 
 		out, err := podLogs(ctx, namespace, name)
