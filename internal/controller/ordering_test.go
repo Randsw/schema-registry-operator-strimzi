@@ -158,10 +158,7 @@ func TestReconcileAppliesSpecChangeBeforeRotationRollout(t *testing.T) {
 	if err := client.Get(ctx, depName, updated); err != nil {
 		t.Fatalf("failed to get deployment after the first reconcile: %v", err)
 	}
-	currentHash, err := computeSpecHash(inst)
-	if err != nil {
-		t.Fatalf("failed to compute the current spec hash: %v", err)
-	}
+	currentHash := computeSpecHash(inst)
 	if got := updated.Annotations[keyPrefix+"/specHash"]; got != currentHash {
 		t.Errorf("expected the spec change to be applied on the first reconcile (hash %q), got %q", currentHash, got)
 	}
