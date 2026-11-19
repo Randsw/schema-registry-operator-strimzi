@@ -1275,7 +1275,7 @@ func TestCreateTLSSecretRecordsCAVersion(t *testing.T) {
 		Build()
 	r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-	secret, exists, err := r.createTLSSecret(inst, context.Background(), logr.Logger{}, "test-cluster")
+	secret, exists, _ := r.createTLSSecret(inst, context.Background(), logr.Logger{}, "test-cluster")
 	if exists {
 		t.Error("expected the -tls secret to not exist yet")
 	}
@@ -2379,7 +2379,7 @@ func TestBuildDeploymentSpecMergesUserTemplateFields(t *testing.T) {
 		return value, count
 	}
 
-	dep, _, err := reconciler.buildDeploymentSpec(newInst(), "kafka:9092", "kafka-cluster", "", "", "", "test-tls-secret", kafkaAuth{}, logr.Logger{})
+	dep, _, _ := reconciler.buildDeploymentSpec(newInst(), "kafka:9092", "kafka-cluster", "", "", "", "test-tls-secret", kafkaAuth{}, logr.Logger{})
 
 	container := dep.Spec.Template.Spec.Containers[0]
 
