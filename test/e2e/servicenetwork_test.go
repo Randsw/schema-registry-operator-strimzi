@@ -83,12 +83,15 @@ var _ = Describe("StrimziSchemaRegistry e2e service networking scenario", Ordere
 
 		By("probing the REST API from a pod in the CR namespace (allowed)")
 		out := curlFromPod(ctx, scenario.Namespace, "networkpolicy-allowed")
-		Expect(out).To(ContainSubstring(`"error_code":401`),
-			"expected the Schema Registry REST API to answer (401 for an unauthenticated probe is fine)")
+		// GET / on Schema Registry answers with an empty JSON object; any
+		// non-empty body proves the request traversed the NetworkPolicy and
+		// the REST API answered.
+		Expect(out).To(ContainSubstring("{}"),
+			"expected the Schema Registry REST API to answer through the NetworkPolicy")
 
 		By("probing the REST API from a pod in a foreign namespace (blocked)")
 		out = curlFromPod(ctx, foreignNamespace, "networkpolicy-blocked")
-		Expect(out).NotTo(ContainSubstring(`"error_code":401`),
+		Expect(out).NotTo(ContainSubstring("{}"),
 			"expected the foreign-namespace probe to be blocked by the NetworkPolicy")
 	})
 
