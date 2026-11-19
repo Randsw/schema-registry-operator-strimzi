@@ -23,7 +23,7 @@ import (
 func withRegistryClient(ca *clusterCA, clientCert *tls.Certificate, f func(*registryClient)) {
 	waitForService(context.Background(), 2*time.Minute)
 
-	stop, err := startPortForward(localPort)
+	stop, err := startPortForward(scenario.RegistryName, 443, localPort)
 	Expect(err).NotTo(HaveOccurred())
 	defer stop()
 
@@ -43,13 +43,14 @@ func waitForService(ctx context.Context, timeout time.Duration) {
 	}, timeout, 2*time.Second).Should(Succeed())
 }
 
-// startPortForward starts `kubectl port-forward` for the Schema Registry
-// service and returns a stop function that must be called when done.
-func startPortForward(port int) (func(), error) {
+// startPortForward starts `kubectl port-forward` for the given service in the
+// scenario namespace, mapping the local port to the remote service port, and
+// returns a stop function that must be called when done.
+func startPortForward(serviceName string, remotePort, localPort int) (func(), error) {
 	cmd := exec.Command("kubectl", "port-forward",
 		"-n", scenario.Namespace,
-		fmt.Sprintf("svc/%s", scenario.RegistryName),
-		fmt.Sprintf("%d:443", port),
+		fmt.Sprintf("svc/%s", serviceName),
+		fmt.Sprintf("%d:%d", localPort, remotePort),
 	)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -73,13 +74,13 @@ func startPortForward(port int) (func(), error) {
 		}
 	}
 
-	address := fmt.Sprintf("127.0.0.1:%d", port)
+	address := fmt.Sprintf("127.0.0.1:%d", localPort)
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case <-exited:
-			return nil, fmt.Errorf("kubectl port-forward to svc/%s/%s exited before the port became ready",
-				scenario.Namespace, scenario.RegistryName)
+			return nil, fmt.Errorf("kubectl port-forward to svc/%s exited before the port became ready",
+				serviceName)
 		default:
 		}
 		if conn, err := net.DialTimeout("tcp", address, time.Second); err == nil {
@@ -90,6 +91,6 @@ func startPortForward(port int) (func(), error) {
 	}
 
 	stop()
-	return nil, fmt.Errorf("port-forward to svc/%s/%s did not become ready within 30s",
-		scenario.Namespace, scenario.RegistryName)
+	return nil, fmt.Errorf("port-forward to svc/%s did not become ready within 30s",
+		serviceName)
 }
