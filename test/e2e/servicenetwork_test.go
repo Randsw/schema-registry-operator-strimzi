@@ -110,14 +110,21 @@ var _ = Describe("StrimziSchemaRegistry e2e service networking scenario", Ordere
 		waitForDeploymentRollout(ctx, readyTimeout)
 
 		By("verifying the Service exposes the pinned node port")
-		svc := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{
-			Name:      scenario.RegistryName,
-			Namespace: scenario.Namespace,
-		}, svc)).To(Succeed())
-		Expect(svc.Spec.Type).To(Equal(corev1.ServiceTypeNodePort))
-		Expect(svc.Spec.Ports).To(HaveLen(1))
-		Expect(svc.Spec.Ports[0].NodePort).To(Equal(pinnedNodePort))
+		// The operator reconciles the Service asynchronously after the CR
+		// apply, so the type/nodePort transition is polled.
+		Eventually(func(g Gomega) corev1.ServicePort {
+			svc := &corev1.Service{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      scenario.RegistryName,
+				Namespace: scenario.Namespace,
+			}, svc)).To(Succeed())
+			g.Expect(svc.Spec.Type).To(Equal(corev1.ServiceTypeNodePort),
+				"the Service type must transition to NodePort")
+			g.Expect(svc.Spec.Ports).To(HaveLen(1))
+			return svc.Spec.Ports[0]
+		}, readyTimeout, 2*time.Second).Should(
+			HaveField("NodePort", Equal(pinnedNodePort)),
+			"the Service must expose the pinned node port")
 
 		By("un-pinning the node port")
 		Expect(applyRegistryCR(ctx, false, false, nil, func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
