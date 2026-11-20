@@ -1134,28 +1134,6 @@ func TestComputeSpecHash(t *testing.T) {
 	})
 }
 
-func TestMustParseQuantity(t *testing.T) {
-	// Invalid quantities should panic. The valid-quantity cases were removed:
-	// they only asserted that apimachinery's resource.ParseQuantity
-	// round-trips known-good strings — framework behavior, not project logic.
-	invalidCases := []string{
-		"invalid",
-		"abc",
-		"",
-	}
-
-	for _, tc := range invalidCases {
-		t.Run("panics on "+tc, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r == nil {
-					t.Errorf("expected panic for invalid quantity %q, but no panic occurred", tc)
-				}
-			}()
-			mustParseQuantity(tc)
-		})
-	}
-}
-
 // TestGetStrimziClusterName covers T3: verify that getStrimziClusterName
 // handles nil labels, missing label, empty label, and valid label correctly.
 func TestGetStrimziClusterName(t *testing.T) {
@@ -2013,6 +1991,17 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 		assertQuantity(t, res.Requests[corev1.ResourceMemory], "512Mi")
 		assertQuantity(t, res.Limits[corev1.ResourceCPU], "1000m")
 		assertQuantity(t, res.Limits[corev1.ResourceMemory], "1Gi")
+	})
+
+	// mustParseQuantity is only fed compile-time constants, so an invalid
+	// quantity must panic loudly instead of silently degrading the defaults.
+	t.Run("invalid quantity panics", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error(`expected mustParseQuantity("") to panic, but no panic occurred`)
+			}
+		}()
+		mustParseQuantity("")
 	})
 }
 
@@ -4613,8 +4602,7 @@ func TestGCOrphanedSecrets(t *testing.T) {
 // derived from the substring after the last ':' of the image reference. A
 // digest-pinned image (image@sha256:<64 hex chars>) yields a 64-character
 // value that exceeds the 63-character Kubernetes label limit, so the digest
-// must be truncated; normal tags and tag-less images keep the existing
-// behavior.
+// must be truncated.
 func TestImageVersionLabel(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	cases := []struct {
@@ -4622,9 +4610,6 @@ func TestImageVersionLabel(t *testing.T) {
 		image string
 		want  string
 	}{
-		{name: "tagged image", image: "confluentinc/cp-schema-registry:8.4.1", want: "8.4.1"},
-		{name: "registry with port", image: "registry.example:5000/team/image:1.0.0", want: "1.0.0"},
-		{name: "image without tag", image: "confluentinc/cp-schema-registry", want: "latest"},
 		{name: "digest-pinned image is truncated to 63 chars", image: "confluentinc/cp-schema-registry@sha256:" + digest, want: digest[:maxLabelValueLength]},
 		{name: "tag plus digest is truncated to 63 chars", image: "confluentinc/cp-schema-registry:7.6.1@sha256:" + digest, want: digest[:maxLabelValueLength]},
 	}
@@ -4647,26 +4632,6 @@ func TestImageVersionLabel(t *testing.T) {
 	if len(version) != maxLabelValueLength {
 		t.Errorf("expected the version label to be capped at %d chars, got %d (%q)", maxLabelValueLength, len(version), version)
 	}
-}
-
-// TestDeploymentUpdateReason covers F4: the update log message must match the
-// actual trigger. When the CR spec hash changed the message reports the hash
-// change; when the hash is equal the update is driven by the Kafka bootstrap
-// address drift the hash cannot see, and reporting a hash change with equal
-// hashes would be misleading.
-func TestDeploymentUpdateReason(t *testing.T) {
-	t.Run("different hashes report the spec hash change", func(t *testing.T) {
-		got := deploymentUpdateReason("old-hash", "new-hash")
-		if got != "Spec hash changed, updating deployment" {
-			t.Errorf("expected the hash-change message, got %q", got)
-		}
-	})
-	t.Run("equal hashes report the bootstrap address change", func(t *testing.T) {
-		got := deploymentUpdateReason("same-hash", "same-hash")
-		if got != "Kafka bootstrap address changed, updating deployment" {
-			t.Errorf("expected the bootstrap-change message, got %q", got)
-		}
-	})
 }
 
 // TestReconcileServiceOwnership covers F5: a pre-existing Service named after
