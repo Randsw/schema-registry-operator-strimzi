@@ -148,7 +148,7 @@ var _ = Describe("StrimziSchemaRegistry e2e service networking scenario", Ordere
 				"the Service type must transition to NodePort")
 			g.Expect(svc.Spec.Ports).To(HaveLen(1))
 			return svc.Spec.Ports[0]
-		}, readyTimeout, 2*time.Second).Should(
+		}, statusTimeout, 2*time.Second).Should(
 			HaveField("NodePort", Equal(pinnedNodePort)),
 			"the Service must expose the pinned node port")
 
@@ -167,7 +167,7 @@ var _ = Describe("StrimziSchemaRegistry e2e service networking scenario", Ordere
 			g.Expect(updated.Spec.Type).To(Equal(corev1.ServiceTypeNodePort))
 			g.Expect(updated.Spec.Ports).To(HaveLen(1))
 			return updated.Spec.Ports[0].NodePort
-		}, readyTimeout, 2*time.Second).Should(Equal(pinnedNodePort),
+		}, statusTimeout, 2*time.Second).Should(Equal(pinnedNodePort),
 			"the API-server-allocated node port must be preserved when the pin is removed")
 	})
 })

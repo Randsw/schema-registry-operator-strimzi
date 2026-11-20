@@ -63,7 +63,8 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 			body, scrapeErr = scrapeMetrics(localPort)
 			g.Expect(scrapeErr).NotTo(HaveOccurred())
 			g.Expect(body).To(ContainSubstring(instanceCountMetric))
-		}, readyTimeout, 2*time.Second).Should(Succeed())
+		}, statusTimeout, 2*time.Second).Should(Succeed(),
+			"the metrics endpoint did not expose %s within %s", instanceCountMetric, statusTimeout)
 
 		By("verifying the gauge matches the live CR count")
 		crList := &v1alpha1.StrimziSchemaRegistryList{}
@@ -91,7 +92,7 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 			g.Expect(metricErr).NotTo(HaveOccurred())
 			g.Expect(value).To(Equal(0.0),
 				"the instance-count gauge must drop after the CR is deleted")
-		}, readyTimeout, 2*time.Second).Should(Succeed())
+		}, statusTimeout, 2*time.Second).Should(Succeed())
 	})
 })
 

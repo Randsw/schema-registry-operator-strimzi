@@ -80,7 +80,7 @@ var _ = Describe("StrimziSchemaRegistry e2e configuration passthrough scenario",
 			events, err := listRegistryEvents(ctx)
 			g.Expect(err).NotTo(HaveOccurred())
 			return events
-		}, 2*time.Minute, 2*time.Second).Should(ContainElement(ContainSubstring("ConfigKeyOverridden")),
+		}, statusTimeout, 2*time.Second).Should(ContainElement(ContainSubstring("ConfigKeyOverridden")),
 			"expected a ConfigKeyOverridden Warning event for the reserved key")
 	})
 })
