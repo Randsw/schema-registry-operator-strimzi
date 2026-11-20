@@ -121,9 +121,18 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+# Coverage intentionally excludes two non-project entries (filtered from
+# cover.out by hack/coverage-filter.sh, and never tested directly):
+#   * api/v1alpha1/zz_generated.deepcopy.go is controller-gen output from
+#     `make generate`; it is regenerated, not hand-written project code.
+#   * main() in cmd/main.go is process wiring (flags, manager construction,
+#     signal handling) that only runs inside the operator binary. The rest of
+#     cmd/main.go (watchNamespace, managerCacheOptions) stays in the profile
+#     and is covered by cmd/main_test.go.
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	./hack/coverage-filter.sh cover.out
 
 # Run the envtest controller suite verbosely (the integration tests against
 # a local Kubernetes API server; NOT the kind-cluster e2e tests, which are
