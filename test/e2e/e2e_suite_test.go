@@ -77,16 +77,16 @@ var (
 	scenario   scenarioConfig
 )
 
-// TestE2E runs the suite. The specs execute serially (no Ginkgo parallel
-// processes) on purpose: every container drives the same StrimziSchemaRegistry
-// CR, the same registry-schemas Kafka topic and the same Schema Registry
-// group.id, so two live registries would elect leaders against each other and
-// reject the mixed configuration; the NetworkPolicy scenario asserts
-// namespace-scoped ingress and the operator-metrics scenario asserts a
-// cluster-wide gauge. Container-level parallelism would require per-container
-// CR names, Kafka topics and group IDs plus isolated Kafka fixtures, which is
-// a separate infrastructure change (§4.2 fix 6 is documented in the Phase 3
-// PR).
+// TestE2E runs the suite. Every container is decorated Ordered, Serial on
+// purpose: the containers share cluster-wide fixtures — the same
+// StrimziSchemaRegistry CR name/namespace, the same registry-schemas Kafka
+// topic and Schema Registry group.id (two live registries would elect leaders
+// against each other and reject the mixed configuration), the same REST
+// Service, and the operator metrics gauge plus the NetworkPolicy assertions
+// are cluster/namespace scoped. Marking them Serial keeps a `-p` invocation
+// from interleaving them; container-level parallelism is only safe once each
+// container owns an isolated CR, Kafka topic and group ID (plus its own
+// fixtures), which is a separate infrastructure change (§4.2 fix 6).
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Schema Registry Operator E2E Suite")

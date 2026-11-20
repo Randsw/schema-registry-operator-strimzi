@@ -33,7 +33,7 @@ import (
 //
 // The scenario deploys with securehttp disabled (plain HTTP on port 80), so
 // the probes need no TLS material.
-var _ = Describe("StrimziSchemaRegistry e2e service networking scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e service networking scenario", Ordered, Serial, func() {
 	// pinnedNodePort is the node port the E2-6 phase pins. It must be in the
 	// API server's default node-port range (30000-32767) and unlikely to
 	// collide on a fresh kind cluster.

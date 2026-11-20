@@ -68,7 +68,7 @@ const (
 //  3. clientauth=true, securehttp=true — the deployment is updated, the REST
 //     round-trip succeeds with a cluster-CA-signed client certificate and
 //     requests without a client certificate are rejected.
-var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, Serial, func() {
 	var ca *clusterCA
 
 	BeforeAll(func() {
@@ -369,7 +369,7 @@ func verifyClientAuthEnforced(ca *clusterCA) {
 // master-eligible and Schema Registry performs the election among them;
 // host.name is resolved per pod through the downward API (status.podIP), so
 // each replica advertises a unique address.
-var _ = Describe("StrimziSchemaRegistry e2e multi-replica scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e multi-replica scenario", Ordered, Serial, func() {
 	// Same CR name and namespace as the main scenario above; clean up so the
 	// specs stay order-independent under Ginkgo's randomized ordering.
 	AfterAll(func() {

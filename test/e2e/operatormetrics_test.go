@@ -37,7 +37,7 @@ const (
 	instanceCountMetric = "strimzi_schema_registry_instance_current_count"
 )
 
-var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered, Serial, func() {
 	AfterAll(func() {
 		By("deleting the StrimziSchemaRegistry CR to leave a clean slate")
 		deleteRegistryCR(context.Background(), readyTimeout)

@@ -25,7 +25,7 @@ import (
 // securehttp is disabled so the scenario needs no TLS material and the
 // deployment env stays small; the REST round-trip itself is covered by the
 // main scenario.
-var _ = Describe("StrimziSchemaRegistry e2e configuration passthrough scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e configuration passthrough scenario", Ordered, Serial, func() {
 	// kafkastoreTimeoutEnv is the env var rendered from the benign
 	// kafkastore.timeout.ms property.
 	const kafkastoreTimeoutEnv = "SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS"

@@ -48,7 +48,7 @@ const (
 	restAPIKeystoreLocJKS = "/var/rest-api-tls/tls-keystore.jks"
 )
 
-var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, Serial, func() {
 	var (
 		testCA  *testutil.TestCA
 		userCA  *clusterCA
