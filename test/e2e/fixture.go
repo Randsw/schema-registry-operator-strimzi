@@ -56,11 +56,6 @@ func newRegistryFixture(suffix string) *registryFixture {
 	}
 }
 
-// deploymentKey returns the NamespacedName of the fixture's Deployment.
-func (f *registryFixture) deploymentKey() types.NamespacedName {
-	return deploymentKeyFor(f.Name)
-}
-
 // apply creates or updates the fixture CR with the shared spec builder.
 func (f *registryFixture) apply(ctx context.Context, clientAuth, secureHTTP bool, replicas *int32,
 	mutators ...func(*v1alpha1.StrimziSchemaRegistrySpec)) error {
