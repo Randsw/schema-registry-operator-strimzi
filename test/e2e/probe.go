@@ -24,6 +24,10 @@ const (
 	// probeContainerName is the container the probes are executed in.
 	probeContainerName = "probe"
 
+	// probeImage is the curl image the probe pods run. It is pulled once per
+	// probe pod (not once per assertion) and reused for the whole suite.
+	probeImage = "curlimages/curl:8.10.1"
+
 	// probeTimeout bounds a single curl execution inside the probe pod.
 	probeTimeout = 30 * time.Second
 )
@@ -31,9 +35,7 @@ const (
 // probePod is a long-lived pod used to run curl probes against the Schema
 // Registry Service from inside the cluster. It is created once per namespace
 // and reused for every assertion, so pod scheduling and image pulls are paid
-// once instead of once per probe. The image is the same Confluent image the
-// scenario already runs, so the node has it cached and no extra image pull is
-// needed.
+// once per container instead of once per probe.
 type probePod struct {
 	namespace string
 	name      string
@@ -69,7 +71,7 @@ func (p *probePod) build() *corev1.Pod {
 			RestartPolicy: corev1.RestartPolicyAlways,
 			Containers: []corev1.Container{{
 				Name:            probeContainerName,
-				Image:           registryImage,
+				Image:           probeImage,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Command:         []string{"sleep", "infinity"},
 			}},

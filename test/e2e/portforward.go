@@ -152,18 +152,15 @@ func serviceEndpoint(ctx context.Context, serviceName string, servicePort int) (
 		return corev1.Pod{}, 0, fmt.Errorf("service %s/%s has no pod selector", svc.Namespace, svc.Name)
 	}
 
-	targetPort := int32(servicePort)
-	for _, port := range svc.Spec.Ports {
-		if int(port.Port) != servicePort {
-			continue
+	var svcPort *corev1.ServicePort
+	for i := range svc.Spec.Ports {
+		if int(svc.Spec.Ports[i].Port) == servicePort {
+			svcPort = &svc.Spec.Ports[i]
+			break
 		}
-		if port.TargetPort.IntVal != 0 {
-			targetPort = port.TargetPort.IntVal
-		}
-		break
 	}
-	if targetPort <= 0 {
-		return corev1.Pod{}, 0, fmt.Errorf("service %s/%s port %d has no numeric target port",
+	if svcPort == nil {
+		return corev1.Pod{}, 0, fmt.Errorf("service %s/%s has no port %d",
 			svc.Namespace, svc.Name, servicePort)
 	}
 
@@ -173,9 +170,39 @@ func serviceEndpoint(ctx context.Context, serviceName string, servicePort int) (
 		return corev1.Pod{}, 0, err
 	}
 	for _, pod := range pods.Items {
-		if podReady(&pod) {
-			return pod, targetPort, nil
+		if !podReady(&pod) {
+			continue
 		}
+		targetPort, err := resolveTargetPort(&pod, *svcPort)
+		if err != nil {
+			return corev1.Pod{}, 0, err
+		}
+		return pod, targetPort, nil
 	}
 	return corev1.Pod{}, 0, fmt.Errorf("service %s/%s has no ready pod", svc.Namespace, svc.Name)
+}
+
+// resolveTargetPort maps a Service port to the container port it targets. It
+// supports numeric target ports, named target ports (the chart's metrics
+// Service uses name "metrics") and an unset target port (which defaults to the
+// Service port), mirroring kubectl's service-to-pod resolution.
+func resolveTargetPort(pod *corev1.Pod, svcPort corev1.ServicePort) (int32, error) {
+	if svcPort.TargetPort.IntVal > 0 {
+		return svcPort.TargetPort.IntVal, nil
+	}
+	if name := svcPort.TargetPort.StrVal; name != "" {
+		for _, container := range pod.Spec.Containers {
+			for _, port := range container.Ports {
+				if port.Name == name && port.ContainerPort > 0 {
+					return port.ContainerPort, nil
+				}
+			}
+		}
+		return 0, fmt.Errorf("pod %s/%s has no container port named %q",
+			pod.Namespace, pod.Name, name)
+	}
+	if svcPort.Port > 0 {
+		return svcPort.Port, nil
+	}
+	return 0, fmt.Errorf("service port %s has no target port", svcPort.Name)
 }
