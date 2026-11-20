@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
@@ -5149,6 +5151,37 @@ func TestReconcileUpdatesInstanceCountGaugeOnCreatePath(t *testing.T) {
 	}
 	if value != 2 {
 		t.Errorf("expected the gauge to expose 2 instances on the create early-return path, got %v", value)
+	}
+}
+
+// TestUpdateInstanceCountMetricListError covers the log-and-ignore contract of
+// updateInstanceCountMetric: a List failure must leave the gauge untouched and
+// must neither panic nor surface an error, so metric bookkeeping can never
+// fail reconciliation.
+func TestUpdateInstanceCountMetricListError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+
+	gauge := monitoring.StrimziSchemaRegistryCurrentInstanceCount
+	original := promtestutil.ToFloat64(gauge)
+	defer gauge.Set(original)
+
+	gauge.Set(7)
+	injected := errors.New("injected list failure")
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				return injected
+			},
+		}).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	// Must not panic and must not touch the gauge.
+	r.updateInstanceCountMetric(context.Background())
+
+	if got := promtestutil.ToFloat64(gauge); got != 7 {
+		t.Errorf("expected the gauge to stay at 7 after the List failure, got %v", got)
 	}
 }
 
