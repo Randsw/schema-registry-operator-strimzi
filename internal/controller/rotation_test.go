@@ -19,11 +19,13 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
+	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -290,6 +292,164 @@ func TestHandleMTLSSecretRotationAnnotationRollout(t *testing.T) {
 			t.Errorf("expected no requeue once the annotation matches, got %v", result.RequeueAfter)
 		}
 	})
+}
+
+// TestHandleSecretRotationResolveAuthError covers the auth-resolution error
+// branch of the rotation dispatcher: a security protocol that requires TLS
+// client authentication paired with a SCRAM KafkaUser cannot be resolved, so
+// handleSecretRotation must return the error before dispatching to any
+// rotation handler (and before creating a -jks secret).
+func TestHandleSecretRotationResolveAuthError(t *testing.T) {
+	scheme := newErrorPathScheme()
+
+	inst := newTestInstance()
+	inst.Spec.SecurityProtocol = "SSL"
+	inst.Spec.Listener = "tls"
+	inst.Spec.TLSSecretName = ""
+	depName := types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}
+	// A SCRAM user under SSL: resolveKafkaAuth rejects the combination.
+	user := newTestKafkaUser(kafka.SCRAM_SHA_512_KAFKAUSERAUTHENTICATIONTYPE)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, user,
+			newAnnotationRolloutDeployment(depName.Name, depName.Namespace, nil)).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	result, err := r.handleSecretRotation(context.Background(), inst, logr.Logger{}, "test-cluster")
+	if err == nil {
+		t.Fatal("expected the SSL + SCRAM auth resolution error to be returned")
+	}
+	if !strings.Contains(err.Error(), "requires a KafkaUser with tls authentication") {
+		t.Errorf("expected the auth resolution error, got %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue on the error path, got %v", result.RequeueAfter)
+	}
+
+	// No rotation may have run: the -jks secret must not exist.
+	if err := c.Get(context.Background(),
+		types.NamespacedName{Name: inst.Name + jksSecretSuffix, Namespace: inst.Namespace}, &corev1.Secret{}); err == nil {
+		t.Error("expected no -jks secret to be created before the auth mode resolves")
+	}
+}
+
+// TestHandleMTLSSecretRotationGetErrors covers the three secret lookups of the
+// mTLS rotation handler: a generic (non-NotFound) Get failure on the -jks
+// secret, the KafkaUser secret or the cluster CA secret must be returned so
+// the reconcile retries. A swallowed error would leave the keystore stale
+// while reconciliation reported success.
+func TestHandleMTLSSecretRotationGetErrors(t *testing.T) {
+	scheme := annotationRolloutScheme(t)
+
+	cluster := "test-cluster"
+	inst := newTestInstance()
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+	auth := kafkaAuth{Protocol: "SSL", Mode: authMTLS, NeedsTruststore: true, NeedsKeystore: true}
+
+	jksSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            inst.Name + jksSecretSuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "3000",
+		},
+	}
+	userSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            inst.Name,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "2000",
+		},
+	}
+
+	cases := []struct {
+		name     string
+		objects  []client.Object
+		failName string
+		injected error
+	}{
+		{
+			name:     "-jks secret Get error",
+			objects:  []client.Object{inst},
+			failName: inst.Name + jksSecretSuffix,
+		},
+		{
+			name:     "KafkaUser secret Get error",
+			objects:  []client.Object{inst, jksSecret.DeepCopy()},
+			failName: inst.Name,
+		},
+		{
+			name:     "cluster CA secret Get error",
+			objects:  []client.Object{inst, jksSecret.DeepCopy(), userSecret.DeepCopy()},
+			failName: cluster + clusterCASuffix,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			injected := errors.New("injected secret get failure")
+			c := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(tc.objects...).
+				WithInterceptorFuncs(failGets(&corev1.Secret{}, tc.failName, injected)).
+				Build()
+			r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+			result, err := r.handleMTLSSecretRotation(context.Background(), inst, logr.Logger{}, cluster, auth)
+			if !errors.Is(err, injected) {
+				t.Fatalf("expected the injected Get error to be returned, got %v", err)
+			}
+			if result.RequeueAfter != 0 {
+				t.Errorf("expected no requeue on the error path, got %v", result.RequeueAfter)
+			}
+		})
+	}
+}
+
+// TestEnsureClientAuthTruststoreSecretPersistError covers the persist failure
+// branch: when the truststore is (re)built but storing it fails, the error
+// must be returned instead of reporting a secret that is not on the cluster.
+func TestEnsureClientAuthTruststoreSecretPersistError(t *testing.T) {
+	scheme := annotationRolloutScheme(t)
+
+	ca, err := testutil.GenerateClusterCACert("test-clientauth-persist")
+	if err != nil {
+		t.Fatalf("failed to generate cluster CA: %v", err)
+	}
+
+	cluster := "test-cluster"
+	inst := newTestInstance()
+	inst.Spec.ClientAuth = true
+	inst.Spec.SecureHTTP = true
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+
+	clusterCASecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            cluster + clusterCASuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "1000",
+		},
+		Data: map[string][]byte{"ca.crt": []byte(ca.CACertPEM)},
+	}
+	injected := errors.New("injected secret create failure")
+
+	// No -jks secret exists, so the truststore is newly built (created=true)
+	// and persistJKSSecret Creates it — the injected failure.
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, clusterCASecret).
+		WithInterceptorFuncs(failCreates(&corev1.Secret{}, injected)).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	secret, created, err := r.ensureClientAuthTruststoreSecret(inst, context.Background(), logr.Logger{}, cluster)
+	if !errors.Is(err, injected) {
+		t.Fatalf("expected the persist failure to be returned, got %v", err)
+	}
+	if created {
+		t.Error("expected created=false on the failed persist")
+	}
+	if secret != nil {
+		t.Errorf("expected no secret on the failed persist, got %v", secret)
+	}
 }
 
 // TestRollDeploymentForSecretVersion_UpdateError covers the U-7 error branch:

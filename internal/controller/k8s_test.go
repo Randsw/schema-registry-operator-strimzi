@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
@@ -4819,6 +4821,85 @@ func TestGCOrphanedSecrets(t *testing.T) {
 	})
 }
 
+// TestGCOrphanedSecretsOwnerGetError covers the owner-lookup failure during
+// garbage collection: when the owning CR cannot be read (a generic API error,
+// not NotFound), the secret must be skipped — never deleted — because the
+// operator cannot prove the owner is gone. Secret hygiene must also never fail
+// reconciliation.
+func TestGCOrphanedSecretsOwnerGetError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	inst.Name = "test-sr"
+	owned := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-sr-jks",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+				Kind:       "StrimziSchemaRegistry",
+				Name:       "other-sr",
+				UID:        types.UID("uid-other-sr"),
+				Controller: ptr.To(true),
+			}},
+		},
+		Data: map[string][]byte{"payload": []byte("x")},
+	}
+	injected := errors.New("injected owner CR get failure")
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, owned).
+		WithInterceptorFuncs(failGets(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}, "other-sr", injected)).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	// Must not panic and must leave the secret in place.
+	r.gcOrphanedSecrets(context.Background(), inst, logr.Logger{})
+
+	if err := c.Get(context.Background(),
+		types.NamespacedName{Name: "other-sr-jks", Namespace: "default"}, &corev1.Secret{}); err != nil {
+		t.Errorf("expected the secret whose owner lookup failed to be kept, got %v", err)
+	}
+}
+
+// TestIsStaleDerivedJKSSecret covers the boundaries of the derived-JKS
+// staleness predicate that drives the spec.tlssecretname transition cleanup:
+// only a <name>-<middle>-jks secret whose middle segment differs from the
+// current spec.tlssecretname is stale. The mTLS keystore (-jks with an empty
+// middle), the REST API TLS secret (-tls) and foreign names never match.
+func TestIsStaleDerivedJKSSecret(t *testing.T) {
+	inst := newTestInstance()
+	inst.Name = "test-sr"
+	inst.Spec.TLSSecretName = "user-tls"
+
+	cases := []struct {
+		name       string
+		secretName string
+		tlsName    string
+		want       bool
+	}{
+		{name: "no CR-name prefix", secretName: "other-sr-old-jks", tlsName: "user-tls", want: false},
+		{name: "mTLS keystore has an empty middle segment", secretName: "test-sr-jks", tlsName: "user-tls", want: false},
+		{name: "double dash leaves an empty middle segment", secretName: "test-sr--jks", tlsName: "user-tls", want: false},
+		{name: "REST API TLS secret is not -jks suffixed", secretName: "test-sr-tls", tlsName: "user-tls", want: false},
+		{name: "derived secret matches the current tlssecretname", secretName: "test-sr-user-tls-jks", tlsName: "user-tls", want: false},
+		{name: "derived secret of a previous tlssecretname is stale", secretName: "test-sr-old-tls-jks", tlsName: "user-tls", want: true},
+		{name: "unrelated -jks suffix appended to the full name", secretName: "test-sr-user-tls-jks-extra", tlsName: "user-tls", want: false},
+		{name: "derived secret is stale when tlssecretname is empty", secretName: "test-sr-old-tls-jks", tlsName: "", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inst.Spec.TLSSecretName = tc.tlsName
+			if got := isStaleDerivedJKSSecret(inst, tc.secretName); got != tc.want {
+				t.Errorf("isStaleDerivedJKSSecret(%q) with tlssecretname %q = %v, want %v",
+					tc.secretName, tc.tlsName, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestImageVersionLabel covers F3: the app.kubernetes.io/version label is
 // derived from the substring after the last ':' of the image reference. A
 // digest-pinned image (image@sha256:<64 hex chars>) yields a 64-character
@@ -5149,6 +5230,37 @@ func TestReconcileUpdatesInstanceCountGaugeOnCreatePath(t *testing.T) {
 	}
 	if value != 2 {
 		t.Errorf("expected the gauge to expose 2 instances on the create early-return path, got %v", value)
+	}
+}
+
+// TestUpdateInstanceCountMetricListError covers the log-and-ignore contract of
+// updateInstanceCountMetric: a List failure must leave the gauge untouched and
+// must neither panic nor surface an error, so metric bookkeeping can never
+// fail reconciliation.
+func TestUpdateInstanceCountMetricListError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+
+	gauge := monitoring.StrimziSchemaRegistryCurrentInstanceCount
+	original := promtestutil.ToFloat64(gauge)
+	defer gauge.Set(original)
+
+	gauge.Set(7)
+	injected := errors.New("injected list failure")
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				return injected
+			},
+		}).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	// Must not panic and must not touch the gauge.
+	r.updateInstanceCountMetric(context.Background())
+
+	if got := promtestutil.ToFloat64(gauge); got != 7 {
+		t.Errorf("expected the gauge to stay at 7 after the List failure, got %v", got)
 	}
 }
 

@@ -1101,6 +1101,20 @@ func TestStringToCertificates(t *testing.T) {
 		}
 	})
 
+	t.Run("names the position of a malformed later certificate", func(t *testing.T) {
+		// A malformed second block must report position #1, not #0: an
+		// off-by-one here sends operators looking at the wrong certificate
+		// in a rotation bundle.
+		broken := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("junk-der")}))
+		_, err := StringToCertificates(ca1.CACertPEM + broken)
+		if err == nil {
+			t.Fatal("expected an error for a malformed second certificate, got nil")
+		}
+		if !strings.Contains(err.Error(), "#1") {
+			t.Errorf("expected the error to name position #1, got: %v", err)
+		}
+	})
+
 	t.Run("StringToCertificate returns the first certificate", func(t *testing.T) {
 		cert, err := StringToCertificate(ca1.CACertPEM + ca2.CACertPEM)
 		if err != nil {
@@ -1598,6 +1612,38 @@ func TestSignCSRWithECDSACA(t *testing.T) {
 			t.Errorf("expected the server certificate to be signed by the RSA CA, but signature verification failed: %v", err)
 		}
 	})
+}
+
+// TestSelectCACertForKeyMismatch covers the RSA CA-cert/key mismatch case
+// directly: a bundle that matches none of the provided key must fail with the
+// explicit ca.crt/ca.key error instead of silently signing with an untrusted
+// issuer. The ECDSA variant (including a mixed bundle) is covered by
+// TestSelectCACertForKeyECDSA.
+func TestSelectCACertForKeyMismatch(t *testing.T) {
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate the CA: %v", err)
+	}
+	other, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate the other CA: %v", err)
+	}
+
+	certs, err := StringToCertificates(ca.CACertPEM)
+	if err != nil {
+		t.Fatalf("failed to parse the CA bundle: %v", err)
+	}
+
+	selected, err := selectCACertForKey(certs, other.CAKey)
+	if err == nil {
+		t.Fatal("expected an error when no bundle certificate matches ca.key, got nil")
+	}
+	if selected != nil {
+		t.Errorf("expected no certificate on the mismatch error, got %v", selected)
+	}
+	if !strings.Contains(err.Error(), "ca.crt") || !strings.Contains(err.Error(), "ca.key") {
+		t.Errorf("expected the explicit ca.crt/ca.key mismatch error, got: %v", err)
+	}
 }
 
 // TestSelectCACertForKeyECDSA covers the CA-cert/key matching with an ECDSA

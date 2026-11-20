@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
@@ -227,6 +229,215 @@ func TestRecreateMissingTLSSecretAnnotationRollout(t *testing.T) {
 		}
 		if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, &corev1.Secret{}); err == nil {
 			t.Error("expected no -tls secret to be created before the Deployment exists")
+		}
+	})
+}
+
+// TestHandleTLSCertExpiryNoKeystoreMaterial covers the skip branch for a -tls
+// secret that cannot be expiry-checked: the keystore bytes or the keystore
+// password are missing. The certificate must not be renewed and reconciliation
+// must not fail; the standing recheck keeps the secret inspected so a later
+// repair is picked up without a watch event.
+func TestHandleTLSCertExpiryNoKeystoreMaterial(t *testing.T) {
+	scheme := annotationRolloutScheme(t)
+
+	cluster := "test-cluster"
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "plaintext"
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+	depName := types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}
+
+	// The recorded CA version matches the cluster CA secret, so the CA-change
+	// branch is not taken and the expiry branch is evaluated.
+	caCertSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            cluster + clusterCASuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "1000",
+		},
+		Data: map[string][]byte{"ca.crt": []byte("stub")},
+	}
+	newTLSSecret := func(data map[string][]byte) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            inst.Name + tlsSecretSuffix,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "2000",
+				Annotations:     map[string]string{CAVersionKey: "1000"},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: data,
+		}
+	}
+
+	cases := []struct {
+		name string
+		data map[string][]byte
+	}{
+		{"tls-keystore.jks is missing", map[string][]byte{"keystore_password": []byte("pw")}},
+		{"keystore_password is missing", map[string][]byte{"tls-keystore.jks": []byte("stub")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(inst, caCertSecret.DeepCopy(), newTLSSecret(tc.data),
+					newAnnotationRolloutDeployment(depName.Name, depName.Namespace, map[string]string{tlsVersionKey: "2000"})).
+				Build()
+			r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+			result, recheck, err := r.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+			if err != nil {
+				t.Fatalf("expected the missing keystore material to be skipped without an error, got %v", err)
+			}
+			if result.RequeueAfter != 0 {
+				t.Errorf("expected no immediate requeue on the skip path, got %v", result.RequeueAfter)
+			}
+			if recheck != tlsCertRecheckInterval {
+				t.Errorf("expected the standing recheck interval %v, got %v", tlsCertRecheckInterval, recheck)
+			}
+
+			untouched := &corev1.Secret{}
+			if err := c.Get(context.Background(),
+				types.NamespacedName{Name: inst.Name + tlsSecretSuffix, Namespace: inst.Namespace}, untouched); err != nil {
+				t.Fatalf("failed to get the -tls secret: %v", err)
+			}
+			if untouched.ResourceVersion != "2000" {
+				t.Errorf("expected the secret to be left untouched, got resourceVersion %s", untouched.ResourceVersion)
+			}
+		})
+	}
+}
+
+// TestHandleTLSCertExpiryCASecretGetError covers the cluster CA Get failure in
+// the CA-version renewal check: a generic API error must be returned so the
+// reconcile retries. Treating it as "CA not rotated" would silently keep a
+// certificate signed by a retired CA.
+func TestHandleTLSCertExpiryCASecretGetError(t *testing.T) {
+	scheme := annotationRolloutScheme(t)
+
+	cluster := "test-cluster"
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "plaintext"
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            inst.Name + tlsSecretSuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "2000",
+			Annotations:     map[string]string{CAVersionKey: "1000"},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"tls-keystore.jks":  []byte("stub"),
+			"keystore_password": []byte("pw"),
+		},
+	}
+	injected := errors.New("injected cluster CA secret get failure")
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(inst, tlsSecret).
+		WithInterceptorFuncs(failGets(&corev1.Secret{}, cluster+clusterCASuffix, injected)).
+		Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	result, recheck, err := r.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+	if !errors.Is(err, injected) {
+		t.Fatalf("expected the cluster CA secret Get failure to be returned, got %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue on the error path, got %v", result.RequeueAfter)
+	}
+	if recheck != 0 {
+		t.Errorf("expected no standing recheck on the error path, got %v", recheck)
+	}
+}
+
+// TestHandleTLSCertExpiryCASecretNotFound covers the missing cluster CA secret
+// branch: without a CA version to compare, the handler skips only the
+// CA-rotation check and still evaluates the certificate expiry. With a fresh
+// certificate that is a clean no-op plus the standing recheck; when renewal is
+// due the handler proceeds past the check and surfaces the missing signing
+// material instead of silently skipping the renewal.
+func TestHandleTLSCertExpiryCASecretNotFound(t *testing.T) {
+	scheme := annotationRolloutScheme(t)
+
+	ca, err := testutil.GenerateClusterCACert("test-tls-ca-notfound")
+	if err != nil {
+		t.Fatalf("failed to generate cluster CA: %v", err)
+	}
+	cp := certprocessor.NewCertProcessor(logr.Logger{})
+	keystore, password, err := cp.GenerateTLSforHTTP(context.Background(), ca.CACertPEM, ca.CAKeyPEM, "test1234", "test-sr", "default")
+	if err != nil {
+		t.Fatalf("failed to generate TLS keystore: %v", err)
+	}
+
+	cluster := "test-cluster"
+	inst := newTestInstance()
+	inst.Spec.SecureHTTP = true
+	inst.Spec.TLSSecretName = ""
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "plaintext"
+	inst.Labels = map[string]string{strimziClusterLabel: cluster}
+	depName := types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}
+
+	// No cluster CA cert/key secrets exist at all.
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            inst.Name + tlsSecretSuffix,
+			Namespace:       inst.Namespace,
+			ResourceVersion: "2000",
+			Annotations:     map[string]string{CAVersionKey: "1000"},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"tls-keystore.jks":  keystore,
+			"keystore_password": []byte(password),
+			"key_password":      []byte(password),
+		},
+	}
+
+	t.Run("fresh certificate keeps the standing recheck instead of failing", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, tlsSecret.DeepCopy(),
+				newAnnotationRolloutDeployment(depName.Name, depName.Namespace, map[string]string{tlsVersionKey: "2000"})).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+		result, recheck, err := r.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster)
+		if err != nil {
+			t.Fatalf("expected the missing CA secret to be skipped without an error, got %v", err)
+		}
+		if result.RequeueAfter != 0 {
+			t.Errorf("expected no immediate requeue for a fresh certificate, got %v", result.RequeueAfter)
+		}
+		if recheck != tlsCertRecheckInterval {
+			t.Errorf("expected the standing recheck interval %v, got %v", tlsCertRecheckInterval, recheck)
+		}
+	})
+
+	t.Run("renewal is attempted when the certificate is inside the window", func(t *testing.T) {
+		originalThreshold := tlsCertRenewalThreshold
+		tlsCertRenewalThreshold = 400 * 24 * time.Hour
+		defer func() { tlsCertRenewalThreshold = originalThreshold }()
+
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, tlsSecret.DeepCopy(),
+				newAnnotationRolloutDeployment(depName.Name, depName.Namespace, map[string]string{tlsVersionKey: "2000"})).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+		// The expiry branch is reached (past the skipped CA-version check) and
+		// the renewal cannot proceed without the signing CA material, so the
+		// failure is surfaced rather than silently swallowed.
+		if _, _, err := r.handleTLSCertExpiry(context.Background(), inst, logr.Logger{}, cluster); err == nil {
+			t.Fatal("expected the renewal to fail when the cluster CA material is missing")
 		}
 	})
 }
