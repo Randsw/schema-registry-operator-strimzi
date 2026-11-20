@@ -5151,3 +5151,313 @@ func TestReconcileUpdatesInstanceCountGaugeOnCreatePath(t *testing.T) {
 		t.Errorf("expected the gauge to expose 2 instances on the create early-return path, got %v", value)
 	}
 }
+
+// TestNormalizeVolumesForCompare covers the volume defaultMode normalization
+// podTemplateEqual applies to a deep copy of the live pod template. The API
+// server materializes defaultMode=420 on Secret, ConfigMap, Projected and
+// DownwardAPI sources; when the desired volume leaves it unset the live value
+// must be cleared, otherwise every reconcile reads a freshly defaulted
+// Deployment as drifted. When the desired volume sets defaultMode explicitly
+// it is operator-managed and must NOT be cleared, so a genuine change still
+// reads as drift.
+func TestNormalizeVolumesForCompare(t *testing.T) {
+	const (
+		apiServerDefaultMode = int32(420) // 0644, what the API server materializes
+		explicitMode         = int32(256) // 0400, explicitly set in the desired volume
+	)
+
+	deepCopyVolumes := func(in []corev1.Volume) []corev1.Volume {
+		if in == nil {
+			return nil
+		}
+		out := make([]corev1.Volume, len(in))
+		for i := range in {
+			out[i] = *in[i].DeepCopy()
+		}
+		return out
+	}
+
+	configMapVolume := func(mode *int32) corev1.Volume {
+		return corev1.Volume{
+			Name: "sr-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "sr-config"},
+					DefaultMode:          mode,
+				},
+			},
+		}
+	}
+	projectedVolume := func(mode *int32) corev1.Volume {
+		return corev1.Volume{
+			Name: "sr-projected",
+			VolumeSource: corev1.VolumeSource{
+				Projected: &corev1.ProjectedVolumeSource{DefaultMode: mode},
+			},
+		}
+	}
+	downwardAPIVolume := func(mode *int32) corev1.Volume {
+		return corev1.Volume{
+			Name: "sr-downward-api",
+			VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{DefaultMode: mode},
+			},
+		}
+	}
+	secretVolume := func(mode *int32) corev1.Volume {
+		return corev1.Volume{
+			Name: "sr-secret",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: "sr-secret", DefaultMode: mode},
+			},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		live      []corev1.Volume
+		desired   []corev1.Volume
+		wantEqual bool
+	}{
+		{
+			name:      "configmap defaultMode is cleared",
+			live:      []corev1.Volume{configMapVolume(ptr.To(apiServerDefaultMode))},
+			desired:   []corev1.Volume{configMapVolume(nil)},
+			wantEqual: true,
+		},
+		{
+			name:      "projected defaultMode is cleared",
+			live:      []corev1.Volume{projectedVolume(ptr.To(apiServerDefaultMode))},
+			desired:   []corev1.Volume{projectedVolume(nil)},
+			wantEqual: true,
+		},
+		{
+			name:      "downwardAPI defaultMode is cleared",
+			live:      []corev1.Volume{downwardAPIVolume(ptr.To(apiServerDefaultMode))},
+			desired:   []corev1.Volume{downwardAPIVolume(nil)},
+			wantEqual: true,
+		},
+		{
+			name:      "secret defaultMode is cleared",
+			live:      []corev1.Volume{secretVolume(ptr.To(apiServerDefaultMode))},
+			desired:   []corev1.Volume{secretVolume(nil)},
+			wantEqual: true,
+		},
+		{
+			name:      "explicit desired defaultMode is not cleared",
+			live:      []corev1.Volume{configMapVolume(ptr.To(apiServerDefaultMode))},
+			desired:   []corev1.Volume{configMapVolume(ptr.To(explicitMode))},
+			wantEqual: false,
+		},
+		{
+			name:      "matching explicit defaultMode stays equal",
+			live:      []corev1.Volume{configMapVolume(ptr.To(explicitMode))},
+			desired:   []corev1.Volume{configMapVolume(ptr.To(explicitMode))},
+			wantEqual: true,
+		},
+		{
+			name:      "mismatched volume counts are left untouched",
+			live:      []corev1.Volume{configMapVolume(nil)},
+			desired:   []corev1.Volume{configMapVolume(nil), projectedVolume(nil)},
+			wantEqual: false,
+		},
+		{
+			name:      "mismatched source types are not normalized",
+			live:      []corev1.Volume{secretVolume(ptr.To(apiServerDefaultMode))},
+			desired:   []corev1.Volume{configMapVolume(nil)},
+			wantEqual: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desiredBefore := deepCopyVolumes(tc.desired)
+
+			// podTemplateEqual normalizes a deep copy of the live template;
+			// normalizing our own copy keeps the table fixtures reusable.
+			live := deepCopyVolumes(tc.live)
+			normalizeVolumesForCompare(live, tc.desired)
+
+			if got := equality.Semantic.DeepEqual(live, tc.desired); got != tc.wantEqual {
+				t.Errorf("after normalization DeepEqual(live, desired) = %v, want %v (live=%+v, desired=%+v)",
+					got, tc.wantEqual, live, tc.desired)
+			}
+			if !equality.Semantic.DeepEqual(tc.desired, desiredBefore) {
+				t.Error("normalizeVolumesForCompare must not mutate the desired volumes")
+			}
+		})
+	}
+}
+
+// TestNormalizeProbeForCompare covers the probe default clearing podTemplateEqual
+// relies on: the API server fills in success threshold 1, timeout 1s, period
+// 10s and failure threshold 3, and an initial delay may linger from an earlier
+// template, so all of them must be cleared whenever the desired probe leaves
+// them unset. Explicit desired values are operator-managed and must stay, so a
+// genuinely different probe still reads as drift; nil probes on either side are
+// a no-op.
+func TestNormalizeProbeForCompare(t *testing.T) {
+	newHandlerProbe := func(path string) *corev1.Probe {
+		return &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: path, Port: intstr.FromInt32(8081)},
+			},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		live      *corev1.Probe
+		desired   *corev1.Probe
+		wantEqual bool
+	}{
+		{
+			name:      "nil live probe is a no-op",
+			live:      nil,
+			desired:   newHandlerProbe("/health"),
+			wantEqual: false,
+		},
+		{
+			name:      "nil desired probe is a no-op",
+			live:      newHandlerProbe("/health"),
+			desired:   nil,
+			wantEqual: false,
+		},
+		{
+			name: "API-server defaults and initial delay are cleared",
+			live: func() *corev1.Probe {
+				p := newHandlerProbe("/health")
+				p.InitialDelaySeconds = 15
+				p.TimeoutSeconds = 1
+				p.PeriodSeconds = 10
+				p.SuccessThreshold = 1
+				p.FailureThreshold = 3
+				return p
+			}(),
+			desired:   newHandlerProbe("/health"),
+			wantEqual: true,
+		},
+		{
+			name:      "genuinely different handlers stay different",
+			live:      newHandlerProbe("/health"),
+			desired:   newHandlerProbe("/status"),
+			wantEqual: false,
+		},
+		{
+			name: "explicit desired thresholds are not cleared",
+			live: func() *corev1.Probe {
+				p := newHandlerProbe("/health")
+				p.TimeoutSeconds = 5
+				return p
+			}(),
+			desired: func() *corev1.Probe {
+				p := newHandlerProbe("/health")
+				p.TimeoutSeconds = 10
+				return p
+			}(),
+			wantEqual: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desiredBefore := tc.desired.DeepCopy()
+
+			normalizeProbeForCompare(tc.live, tc.desired)
+
+			if got := equality.Semantic.DeepEqual(tc.live, tc.desired); got != tc.wantEqual {
+				t.Errorf("after normalization DeepEqual(live, desired) = %v, want %v (live=%+v, desired=%+v)",
+					got, tc.wantEqual, tc.live, tc.desired)
+			}
+			if !equality.Semantic.DeepEqual(tc.desired, desiredBefore) {
+				t.Error("normalizeProbeForCompare must not mutate the desired probe")
+			}
+		})
+	}
+}
+
+// TestPreservePodTemplateAnnotation covers the rollout-marker carry-over used
+// before replacing a drifted pod template: a non-empty annotation on the live
+// Deployment is copied into the desired template so a spec patch does not drop
+// a marker the desired build could not determine. A nil found map, a missing
+// key or an empty value are no-ops; a nil desired map must be allocated.
+func TestPreservePodTemplateAnnotation(t *testing.T) {
+	newDeployment := func(annotations map[string]string) *apps.Deployment {
+		return &apps.Deployment{
+			Spec: apps.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
+				},
+			},
+		}
+	}
+
+	// tlsVersionKey is one of the two rollout markers the operator preserves.
+	const key = tlsVersionKey
+
+	tests := []struct {
+		name          string
+		found         map[string]string
+		desired       map[string]string
+		wantPreserved bool
+		wantValue     string
+	}{
+		{
+			name:    "nil found annotations is a no-op",
+			found:   nil,
+			desired: nil,
+		},
+		{
+			name:    "empty value is not preserved",
+			found:   map[string]string{key: ""},
+			desired: nil,
+		},
+		{
+			name:    "key missing from found is a no-op",
+			found:   map[string]string{"example.com/other": "value"},
+			desired: map[string]string{"existing": "kept"},
+		},
+		{
+			name:          "existing value is preserved into a nil desired map",
+			found:         map[string]string{key: "12345"},
+			desired:       nil,
+			wantPreserved: true,
+			wantValue:     "12345",
+		},
+		{
+			name:          "existing value is preserved alongside desired annotations",
+			found:         map[string]string{key: "12345"},
+			desired:       map[string]string{"existing": "kept"},
+			wantPreserved: true,
+			wantValue:     "12345",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			found := newDeployment(tc.found)
+			foundBefore := found.DeepCopy()
+			desired := newDeployment(tc.desired)
+
+			preservePodTemplateAnnotation(found, desired, key)
+
+			got, ok := desired.Spec.Template.Annotations[key]
+			if ok != tc.wantPreserved {
+				t.Fatalf("expected key %q preserved=%v, got %v (annotations=%v)",
+					key, tc.wantPreserved, ok, desired.Spec.Template.Annotations)
+			}
+			if ok && got != tc.wantValue {
+				t.Errorf("expected the preserved value %q, got %q", tc.wantValue, got)
+			}
+			for k, v := range tc.desired {
+				if desired.Spec.Template.Annotations[k] != v {
+					t.Errorf("expected the pre-existing desired annotation %s=%q to survive, got %q",
+						k, v, desired.Spec.Template.Annotations[k])
+				}
+			}
+			if !equality.Semantic.DeepEqual(found, foundBefore) {
+				t.Error("preservePodTemplateAnnotation must not mutate the found Deployment")
+			}
+		})
+	}
+}
