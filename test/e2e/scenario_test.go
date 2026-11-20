@@ -27,6 +27,11 @@ import (
 )
 
 const (
+	// registryImage is the Schema Registry image used by the CR template and
+	// by the in-cluster probe pods (once the CR has been scheduled the node
+	// has the image cached, so probes never wait on an image pull).
+	registryImage = "confluentinc/cp-schema-registry:8.4.1"
+
 	// testSubject is the schema subject used for the REST round-trip.
 	testSubject = "e2e-test-value"
 
@@ -162,7 +167,7 @@ func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas 
 					RestartPolicy: corev1.RestartPolicyAlways,
 					Containers: []corev1.Container{{
 						Name:            "confluent-sr",
-						Image:           "confluentinc/cp-schema-registry:8.4.1",
+						Image:           registryImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 					}},
 				},

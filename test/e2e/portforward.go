@@ -173,20 +173,7 @@ func serviceEndpoint(ctx context.Context, serviceName string, servicePort int) (
 		return corev1.Pod{}, 0, err
 	}
 	for _, pod := range pods.Items {
-		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
-			continue
-		}
-		if len(pod.Status.ContainerStatuses) == 0 {
-			continue
-		}
-		ready := true
-		for _, status := range pod.Status.ContainerStatuses {
-			if !status.Ready {
-				ready = false
-				break
-			}
-		}
-		if ready {
+		if podReady(&pod) {
 			return pod, targetPort, nil
 		}
 	}
