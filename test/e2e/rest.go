@@ -29,7 +29,15 @@ type registryClient struct {
 }
 
 func newRegistryClient(caPool *x509.CertPool, clientCert *tls.Certificate, port int) *registryClient {
-	host := fmt.Sprintf("%s.%s.svc", scenario.RegistryName, scenario.Namespace)
+	return newRegistryClientFor(scenario.RegistryName, caPool, clientCert, port)
+}
+
+// newRegistryClientFor builds a REST client for the named registry's Service:
+// the TLS ServerName (and Host header) is the in-cluster service DNS name of
+// that CR, while the connection itself goes through the port-forward on
+// 127.0.0.1.
+func newRegistryClientFor(registryName string, caPool *x509.CertPool, clientCert *tls.Certificate, port int) *registryClient {
+	host := fmt.Sprintf("%s.%s.svc", registryName, scenario.Namespace)
 	tlsConfig := &tls.Config{
 		RootCAs:    caPool,
 		ServerName: host,
