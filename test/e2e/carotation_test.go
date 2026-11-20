@@ -25,11 +25,14 @@ import (
 // that version, and a real Strimzi CA rotation would invalidate the Kafka TLS
 // material of the running cluster.
 var _ = Describe("StrimziSchemaRegistry e2e cluster CA rotation scenario", Ordered, Serial, func() {
-	fixture := newRegistryFixture("ca-rotation")
+	// The fixture is built in BeforeAll: scenario is populated by BeforeSuite,
+	// which runs after the spec tree (and this Describe body) is constructed.
+	var fixture *registryFixture
 
 	var ca *clusterCA
 
 	BeforeAll(func() {
+		fixture = newRegistryFixture("ca-rotation")
 		var err error
 		ca, err = fetchClusterCA(context.Background())
 		Expect(err).NotTo(HaveOccurred())

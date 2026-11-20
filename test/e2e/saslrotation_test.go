@@ -27,11 +27,14 @@ import (
 // resourceVersion (the operator's rotation signal); replacing the real CA or
 // SCRAM material would break the running Kafka cluster.
 var _ = Describe("StrimziSchemaRegistry e2e SASL truststore rotation scenario", Ordered, Serial, func() {
-	fixture := newRegistryFixture("sasl-rotation")
+	// Built in BeforeAll: the Describe body runs before BeforeSuite populates
+	// the matrix scenario configuration.
+	var fixture *registryFixture
 
 	var ca *clusterCA
 
 	BeforeAll(func() {
+		fixture = newRegistryFixture("sasl-rotation")
 		var err error
 		ca, err = fetchClusterCA(context.Background())
 		Expect(err).NotTo(HaveOccurred())

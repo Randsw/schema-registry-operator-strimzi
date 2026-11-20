@@ -24,7 +24,9 @@ import (
 // Warning event and must not create a Deployment; creating the secret must let
 // reconciliation converge to Ready=True and serve the REST API.
 var _ = Describe("StrimziSchemaRegistry e2e InvalidTLSSecret recovery scenario", Ordered, Serial, func() {
-	fixture := newRegistryFixture("invalidtls")
+	// Built in BeforeAll: the Describe body runs before BeforeSuite populates
+	// the matrix scenario configuration.
+	var fixture *registryFixture
 
 	var (
 		material      *userTLSMaterial
@@ -32,6 +34,7 @@ var _ = Describe("StrimziSchemaRegistry e2e InvalidTLSSecret recovery scenario",
 	)
 
 	BeforeAll(func() {
+		fixture = newRegistryFixture("invalidtls")
 		material = newUserTLSMaterial(fixture.Name)
 		missingSecret = fixture.Name + "-missing-tls"
 	})

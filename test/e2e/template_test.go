@@ -33,7 +33,13 @@ const (
 // labels, rollout annotations, bootstrap env, default resources) must not be
 // clobbered or dropped.
 var _ = Describe("StrimziSchemaRegistry e2e template passthrough scenario", Ordered, Serial, func() {
-	fixture := newRegistryFixture("template")
+	// Built in BeforeAll: the Describe body runs before BeforeSuite populates
+	// the matrix scenario configuration.
+	var fixture *registryFixture
+
+	BeforeAll(func() {
+		fixture = newRegistryFixture("template")
+	})
 
 	AfterAll(func() {
 		ctx := context.Background()

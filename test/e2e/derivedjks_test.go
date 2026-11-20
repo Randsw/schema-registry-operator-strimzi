@@ -24,7 +24,9 @@ import (
 // repoint the Deployment mounts at the new derived secret and delete the stale
 // derived secret of the old one.
 var _ = Describe("StrimziSchemaRegistry e2e derived JKS garbage collection scenario", Ordered, Serial, func() {
-	fixture := newRegistryFixture("jksgc")
+	// Built in BeforeAll: the Describe body runs before BeforeSuite populates
+	// the matrix scenario configuration.
+	var fixture *registryFixture
 
 	var (
 		materialA *userTLSMaterial
@@ -34,6 +36,7 @@ var _ = Describe("StrimziSchemaRegistry e2e derived JKS garbage collection scena
 	)
 
 	BeforeAll(func() {
+		fixture = newRegistryFixture("jksgc")
 		materialA = newUserTLSMaterial(fixture.Name)
 		materialB = newUserTLSMaterial(fixture.Name)
 		secretA = fixture.Name + "-tls-a"

@@ -43,7 +43,9 @@ const (
 // passing REST round-trip (including a write, which exercises inter-instance
 // HTTPS forwarding to the elected master).
 var _ = Describe("StrimziSchemaRegistry e2e multi-replica HTTPS scenario", Ordered, Serial, func() {
-	fixture := newRegistryFixture("multitls")
+	// Built in BeforeAll: the Describe body runs before BeforeSuite populates
+	// the matrix scenario configuration.
+	var fixture *registryFixture
 
 	var (
 		material         *userTLSMaterial
@@ -52,6 +54,7 @@ var _ = Describe("StrimziSchemaRegistry e2e multi-replica HTTPS scenario", Order
 	)
 
 	BeforeAll(func() {
+		fixture = newRegistryFixture("multitls")
 		material = newUserTLSMaterial(fixture.Name)
 		userTLSSecret = fixture.Name + multiReplicaTLSSecretSuffix
 		truststoreSecret = fixture.Name + multiReplicaTruststoreSecretSuffix
