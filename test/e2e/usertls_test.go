@@ -48,7 +48,7 @@ const (
 	restAPIKeystoreLocJKS = "/var/rest-api-tls/tls-keystore.jks"
 )
 
-var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, Serial, func() {
 	var (
 		testCA  *testutil.TestCA
 		userCA  *clusterCA
@@ -153,13 +153,13 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 				Namespace: scenario.Namespace,
 			}, derived)).To(Succeed())
 			g.Expect(derived.Data).To(HaveKey("tls-keystore.jks"))
-		}, readyTimeout, 2*time.Second).Should(Succeed(),
+		}, statusTimeout, 2*time.Second).Should(Succeed(),
 			"timed out waiting for the derived secret %s/%s", scenario.Namespace, derivedName)
 
 		By("waiting for the deployment mounts to be repointed at the derived secret")
 		Eventually(func() string {
 			return restAPITLSMountedSecret(ctx)
-		}, readyTimeout, 2*time.Second).Should(Equal(derivedName),
+		}, statusTimeout, 2*time.Second).Should(Equal(derivedName),
 			"the rest-api-tls volume must mount the derived secret")
 
 		waitForReadyCondition(ctx, readyTimeout)

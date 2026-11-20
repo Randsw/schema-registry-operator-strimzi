@@ -27,9 +27,10 @@ import (
 )
 
 const (
-	// localPort is the local port used to port-forward the Schema Registry
-	// service (remote port 443, the TLS REST API port).
-	localPort = 18443
+	// registryImage is the Schema Registry image used by the CR template and
+	// by the in-cluster probe pods (once the CR has been scheduled the node
+	// has the image cached, so probes never wait on an image pull).
+	registryImage = "confluentinc/cp-schema-registry:8.4.1"
 
 	// testSubject is the schema subject used for the REST round-trip.
 	testSubject = "e2e-test-value"
@@ -37,14 +38,21 @@ const (
 	// testSchema is an Avro schema registered under testSubject.
 	testSchema = `{"type":"record","name":"e2etest","fields":[{"name":"user","type":"string"},{"name":"car","type":"string"},{"name":"color","type":"string"}]}`
 
-	// readyTimeout is the maximum time to wait for the CR or deployment
-	// transitions.
-	readyTimeout = 5 * time.Minute
-
 	// deploymentSuffix is appended to the CR name to form the name of the
 	// operator-created Schema Registry Deployment. It mirrors deploySuffix in
 	// internal/controller/k8s.go.
 	deploymentSuffix = "-deploy"
+
+	// readyTimeout is the maximum time to wait for deployment and CR
+	// readiness transitions. It stays generous because those waits include
+	// pod scheduling and image pulls.
+	readyTimeout = 5 * time.Minute
+
+	// statusTimeout bounds polls of API objects that the operator reconciles
+	// without scheduling a new pod (Service and NetworkPolicy shape, derived
+	// secrets, events, metrics scrapes, port-forward readiness). Using the
+	// deployment timeout there would only delay failure feedback.
+	statusTimeout = 90 * time.Second
 )
 
 // The scenario runs three phases against the same Kafka cluster:
@@ -60,7 +68,7 @@ const (
 //  3. clientauth=true, securehttp=true — the deployment is updated, the REST
 //     round-trip succeeds with a cluster-CA-signed client certificate and
 //     requests without a client certificate are rejected.
-var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, Serial, func() {
 	var ca *clusterCA
 
 	BeforeAll(func() {
@@ -159,7 +167,7 @@ func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas 
 					RestartPolicy: corev1.RestartPolicyAlways,
 					Containers: []corev1.Container{{
 						Name:            "confluent-sr",
-						Image:           "confluentinc/cp-schema-registry:8.4.1",
+						Image:           registryImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 					}},
 				},
@@ -361,7 +369,7 @@ func verifyClientAuthEnforced(ca *clusterCA) {
 // master-eligible and Schema Registry performs the election among them;
 // host.name is resolved per pod through the downward API (status.podIP), so
 // each replica advertises a unique address.
-var _ = Describe("StrimziSchemaRegistry e2e multi-replica scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e multi-replica scenario", Ordered, Serial, func() {
 	// Same CR name and namespace as the main scenario above; clean up so the
 	// specs stay order-independent under Ginkgo's randomized ordering.
 	AfterAll(func() {

@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 
 	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 )
@@ -24,15 +26,18 @@ import (
 //
 // The chart installs the operator with metrics.enabled=true served over
 // plain HTTP (metrics.secure=false) on port 8080 behind the
-// <fullname>-metrics-service Service, so the endpoint is reachable via a
-// plain kubectl port-forward.
+// <fullname>-metrics-service Service, so the endpoint is reachable through a
+// plain client-go port-forward.
 const (
 	operatorMetricsServiceName = "ssr-operator-metrics-service"
 	operatorMetricsRemotePort  = 8080
-	operatorMetricsLocalPort   = 18080
+
+	// instanceCountMetric is the operator gauge tracking the live
+	// StrimziSchemaRegistry CR count.
+	instanceCountMetric = "strimzi_schema_registry_instance_current_count"
 )
 
-var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered, func() {
+var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered, Serial, func() {
 	AfterAll(func() {
 		By("deleting the StrimziSchemaRegistry CR to leave a clean slate")
 		deleteRegistryCR(context.Background(), readyTimeout)
@@ -47,7 +52,7 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		waitForDeploymentRollout(ctx, readyTimeout)
 
 		By("port-forwarding the operator metrics endpoint")
-		stop, err := startPortForward(operatorMetricsServiceName, operatorMetricsRemotePort, operatorMetricsLocalPort)
+		localPort, stop, err := startPortForward(ctx, operatorMetricsServiceName, operatorMetricsRemotePort)
 		Expect(err).NotTo(HaveOccurred())
 		defer stop()
 
@@ -55,16 +60,18 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		var body string
 		Eventually(func(g Gomega) {
 			var scrapeErr error
-			body, scrapeErr = scrapeMetrics(operatorMetricsLocalPort)
+			body, scrapeErr = scrapeMetrics(localPort)
 			g.Expect(scrapeErr).NotTo(HaveOccurred())
-			g.Expect(body).To(ContainSubstring("strimzi_schema_registry_instance_current_count"))
-		}, readyTimeout, 2*time.Second).Should(Succeed())
+			g.Expect(body).To(ContainSubstring(instanceCountMetric))
+		}, statusTimeout, 2*time.Second).Should(Succeed(),
+			"the metrics endpoint did not expose %s within %s", instanceCountMetric, statusTimeout)
 
 		By("verifying the gauge matches the live CR count")
 		crList := &v1alpha1.StrimziSchemaRegistryList{}
 		Expect(k8sClient.List(ctx, crList)).To(Succeed())
-		Expect(metricValue(body, "strimzi_schema_registry_instance_current_count")).To(
-			Equal(float64(len(crList.Items))),
+		gauge, err := metricValue(body, instanceCountMetric)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(gauge).To(Equal(float64(len(crList.Items))),
 			"the instance-count gauge must track the live CR count")
 
 		By("verifying the reconcile counters are exposed")
@@ -79,11 +86,13 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		By("deleting the CR and verifying the gauge drops to zero")
 		deleteRegistryCR(ctx, readyTimeout)
 		Eventually(func(g Gomega) {
-			fresh, scrapeErr := scrapeMetrics(operatorMetricsLocalPort)
+			fresh, scrapeErr := scrapeMetrics(localPort)
 			g.Expect(scrapeErr).NotTo(HaveOccurred())
-			g.Expect(metricValue(fresh, "strimzi_schema_registry_instance_current_count")).To(
-				Equal(0.0), "the instance-count gauge must drop after the CR is deleted")
-		}, readyTimeout, 2*time.Second).Should(Succeed())
+			value, metricErr := metricValue(fresh, instanceCountMetric)
+			g.Expect(metricErr).NotTo(HaveOccurred())
+			g.Expect(value).To(Equal(0.0),
+				"the instance-count gauge must drop after the CR is deleted")
+		}, statusTimeout, 2*time.Second).Should(Succeed())
 	})
 })
 
@@ -102,20 +111,37 @@ func scrapeMetrics(port int) (string, error) {
 	return string(data), nil
 }
 
-// metricValue returns the value of the given (unlabeled) metric in a
-// Prometheus text body, or -1 when the metric is absent.
-func metricValue(body, name string) float64 {
-	for _, line := range strings.Split(body, "\n") {
-		if !strings.HasPrefix(line, name+" ") {
+// metricValue returns the value of the given unlabeled metric in a
+// Prometheus text body. The body is parsed with the official expfmt text
+// parser instead of string splitting, so HELP/TYPE lines, labels, float
+// formatting and the OpenMetrics/exposition variants are handled correctly.
+func metricValue(body, name string) (float64, error) {
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	families, err := parser.TextToMetricFamilies(strings.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse the metrics body: %w", err)
+	}
+	family, ok := families[name]
+	if !ok {
+		return 0, fmt.Errorf("metric %q is not exposed", name)
+	}
+	for _, metric := range family.GetMetric() {
+		// The operator metrics asserted here carry no labels; skip labeled
+		// samples so a future label dimension cannot silently return the
+		// wrong series.
+		if len(metric.GetLabel()) != 0 {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		if value, err := strconv.ParseFloat(fields[1], 64); err == nil {
-			return value
+		switch {
+		case metric.GetGauge() != nil:
+			return metric.GetGauge().GetValue(), nil
+		case metric.GetCounter() != nil:
+			return metric.GetCounter().GetValue(), nil
+		case metric.GetUntyped() != nil:
+			return metric.GetUntyped().GetValue(), nil
+		default:
+			return 0, fmt.Errorf("metric %q has an unsupported type", name)
 		}
 	}
-	return -1
+	return 0, fmt.Errorf("metric %q has no unlabeled sample", name)
 }

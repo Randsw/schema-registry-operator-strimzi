@@ -46,7 +46,9 @@ import (
 	. "github.com/onsi/gomega"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
@@ -63,10 +65,28 @@ type scenarioConfig struct {
 }
 
 var (
+	// k8sClient is the controller-runtime client used to create and inspect
+	// the test fixtures.
 	k8sClient client.Client
-	scenario  scenarioConfig
+	// kubeClient exposes the subresource APIs (port-forward, exec) that the
+	// controller-runtime client does not surface.
+	kubeClient kubernetes.Interface
+	// restConfig is the cluster connection used by the client-go port-forward
+	// and exec helpers.
+	restConfig *rest.Config
+	scenario   scenarioConfig
 )
 
+// TestE2E runs the suite. Every container is decorated Ordered, Serial on
+// purpose: the containers share cluster-wide fixtures — the same
+// StrimziSchemaRegistry CR name/namespace, the same registry-schemas Kafka
+// topic and Schema Registry group.id (two live registries would elect leaders
+// against each other and reject the mixed configuration), the same REST
+// Service, and the operator metrics gauge plus the NetworkPolicy assertions
+// are cluster/namespace scoped. Marking them Serial keeps a `-p` invocation
+// from interleaving them; container-level parallelism is only safe once each
+// container owns an isolated CR, Kafka topic and group ID (plus its own
+// fixtures), which is a separate infrastructure change (§4.2 fix 6).
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Schema Registry Operator E2E Suite")
@@ -85,8 +105,11 @@ var _ = BeforeSuite(func() {
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 	Expect(strimziregistryoperatorv1alpha1.AddToScheme(scheme)).To(Succeed())
 
-	restConfig, err := config.GetConfig()
+	var err error
+	restConfig, err = config.GetConfig()
 	Expect(err).NotTo(HaveOccurred(), "failed to load kubeconfig (is the kind cluster running?)")
+	kubeClient, err = kubernetes.NewForConfig(restConfig)
+	Expect(err).NotTo(HaveOccurred())
 	k8sClient, err = client.New(restConfig, client.Options{Scheme: scheme})
 	Expect(err).NotTo(HaveOccurred())
 })
