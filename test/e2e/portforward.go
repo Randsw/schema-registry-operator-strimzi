@@ -7,23 +7,31 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
-	"os/exec"
+	"net/http"
 	"time"
+
+	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-
-	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/portforward"
+	"k8s.io/client-go/transport/spdy"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// withRegistryClient port-forwards the operator-created Schema Registry
-// service (remote port 443, the TLS REST API port) to a local port and
-// invokes f with a REST client connected to it.
-func withRegistryClient(ca *clusterCA, clientCert *tls.Certificate, f func(*registryClient)) {
-	waitForService(context.Background(), 2*time.Minute)
+// registryServicePort is the operator-created Schema Registry REST API
+// Service port (443 when securehttp is enabled).
+const registryServicePort = 443
 
-	stop, err := startPortForward(scenario.RegistryName, 443, localPort)
+// withRegistryClient port-forwards the operator-created Schema Registry
+// service to an OS-assigned local port and invokes f with a REST client
+// connected to it.
+func withRegistryClient(ca *clusterCA, clientCert *tls.Certificate, f func(*registryClient)) {
+	ctx := context.Background()
+	waitForService(ctx, statusTimeout)
+
+	localPort, stop, err := startPortForward(ctx, scenario.RegistryName, registryServicePort)
 	Expect(err).NotTo(HaveOccurred())
 	defer stop()
 
@@ -43,54 +51,144 @@ func waitForService(ctx context.Context, timeout time.Duration) {
 	}, timeout, 2*time.Second).Should(Succeed())
 }
 
-// startPortForward starts `kubectl port-forward` for the given service in the
-// scenario namespace, mapping the local port to the remote service port, and
-// returns a stop function that must be called when done.
-func startPortForward(serviceName string, remotePort, localPort int) (func(), error) {
-	cmd := exec.Command("kubectl", "port-forward",
-		"-n", scenario.Namespace,
-		fmt.Sprintf("svc/%s", serviceName),
-		fmt.Sprintf("%d:%d", localPort, remotePort),
+// startPortForward forwards a Service port to an OS-assigned local port using
+// the client-go port-forward API (no kubectl shell-out). It resolves the
+// Service to a ready backing pod and forwards to that pod's target container
+// port, mirroring `kubectl port-forward svc/...`. Binding the local side to
+// port 0 makes concurrent e2e runs (and other services on the host) unable to
+// collide. It returns the local port and a stop function that must be called
+// when done.
+func startPortForward(ctx context.Context, serviceName string, servicePort int) (int, func(), error) {
+	var (
+		pod        corev1.Pod
+		targetPort int32
 	)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start kubectl port-forward: %w", err)
+	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, statusTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			p, port, err := serviceEndpoint(ctx, serviceName, servicePort)
+			if err != nil {
+				// The operator creates the Service and its pods
+				// asynchronously, so a missing or not-yet-ready backend is
+				// retried instead of failing the spec on the first poll.
+				return false, nil
+			}
+			pod, targetPort = p, port
+			return true, nil
+		})
+	if err != nil {
+		return 0, nil, fmt.Errorf("service %s/%s has no ready backend pod: %w",
+			scenario.Namespace, serviceName, err)
 	}
 
-	exited := make(chan struct{})
+	req := kubeClient.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Namespace(pod.Namespace).
+		Name(pod.Name).
+		SubResource("portforward")
+
+	transport, upgrader, err := spdy.RoundTripperFor(restConfig)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to build the port-forward transport: %w", err)
+	}
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport},
+		http.MethodPost, req.URL())
+
+	stopChan := make(chan struct{})
+	readyChan := make(chan struct{})
+	forwarder, err := portforward.NewOnAddresses(dialer, []string{"127.0.0.1"},
+		[]string{fmt.Sprintf("0:%d", targetPort)}, stopChan, readyChan, io.Discard, io.Discard)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to create the port-forwarder: %w", err)
+	}
+
+	errChan := make(chan error, 1)
 	go func() {
-		_ = cmd.Wait()
-		close(exited)
+		errChan <- forwarder.ForwardPorts()
 	}()
 
+	select {
+	case <-readyChan:
+	case err := <-errChan:
+		return 0, nil, fmt.Errorf("port-forward to pod %s/%s failed before becoming ready: %w",
+			pod.Namespace, pod.Name, err)
+	case <-time.After(statusTimeout):
+		close(stopChan)
+		return 0, nil, fmt.Errorf("port-forward to pod %s/%s did not become ready within %s",
+			pod.Namespace, pod.Name, statusTimeout)
+	}
+
+	ports, err := forwarder.GetPorts()
+	if err != nil {
+		close(stopChan)
+		return 0, nil, fmt.Errorf("failed to read the forwarded port: %w", err)
+	}
+	if len(ports) != 1 {
+		close(stopChan)
+		return 0, nil, fmt.Errorf("expected 1 forwarded port, got %d", len(ports))
+	}
+	localPort := int(ports[0].Local)
+
 	stop := func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		close(stopChan)
 		select {
-		case <-exited:
+		case <-errChan:
 		case <-time.After(5 * time.Second):
 		}
 	}
+	return localPort, stop, nil
+}
 
-	address := fmt.Sprintf("127.0.0.1:%d", localPort)
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case <-exited:
-			return nil, fmt.Errorf("kubectl port-forward to svc/%s exited before the port became ready",
-				serviceName)
-		default:
-		}
-		if conn, err := net.DialTimeout("tcp", address, time.Second); err == nil {
-			_ = conn.Close()
-			return stop, nil
-		}
-		time.Sleep(500 * time.Millisecond)
+// serviceEndpoint resolves a Service to a ready pod backing it and the target
+// container port the Service port forwards to.
+func serviceEndpoint(ctx context.Context, serviceName string, servicePort int) (corev1.Pod, int32, error) {
+	svc := &corev1.Service{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{
+		Name:      serviceName,
+		Namespace: scenario.Namespace,
+	}, svc); err != nil {
+		return corev1.Pod{}, 0, err
+	}
+	if len(svc.Spec.Selector) == 0 {
+		return corev1.Pod{}, 0, fmt.Errorf("service %s/%s has no pod selector", svc.Namespace, svc.Name)
 	}
 
-	stop()
-	return nil, fmt.Errorf("port-forward to svc/%s did not become ready within 30s",
-		serviceName)
+	targetPort := int32(servicePort)
+	for _, port := range svc.Spec.Ports {
+		if int(port.Port) != servicePort {
+			continue
+		}
+		if port.TargetPort.IntVal != 0 {
+			targetPort = port.TargetPort.IntVal
+		}
+		break
+	}
+	if targetPort <= 0 {
+		return corev1.Pod{}, 0, fmt.Errorf("service %s/%s port %d has no numeric target port",
+			svc.Namespace, svc.Name, servicePort)
+	}
+
+	pods := &corev1.PodList{}
+	if err := k8sClient.List(ctx, pods, client.InNamespace(svc.Namespace),
+		client.MatchingLabels(svc.Spec.Selector)); err != nil {
+		return corev1.Pod{}, 0, err
+	}
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		if len(pod.Status.ContainerStatuses) == 0 {
+			continue
+		}
+		ready := true
+		for _, status := range pod.Status.ContainerStatuses {
+			if !status.Ready {
+				ready = false
+				break
+			}
+		}
+		if ready {
+			return pod, targetPort, nil
+		}
+	}
+	return corev1.Pod{}, 0, fmt.Errorf("service %s/%s has no ready pod", svc.Namespace, svc.Name)
 }

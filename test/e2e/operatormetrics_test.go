@@ -29,7 +29,6 @@ import (
 const (
 	operatorMetricsServiceName = "ssr-operator-metrics-service"
 	operatorMetricsRemotePort  = 8080
-	operatorMetricsLocalPort   = 18080
 )
 
 var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered, func() {
@@ -47,7 +46,7 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		waitForDeploymentRollout(ctx, readyTimeout)
 
 		By("port-forwarding the operator metrics endpoint")
-		stop, err := startPortForward(operatorMetricsServiceName, operatorMetricsRemotePort, operatorMetricsLocalPort)
+		localPort, stop, err := startPortForward(ctx, operatorMetricsServiceName, operatorMetricsRemotePort)
 		Expect(err).NotTo(HaveOccurred())
 		defer stop()
 
@@ -55,7 +54,7 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		var body string
 		Eventually(func(g Gomega) {
 			var scrapeErr error
-			body, scrapeErr = scrapeMetrics(operatorMetricsLocalPort)
+			body, scrapeErr = scrapeMetrics(localPort)
 			g.Expect(scrapeErr).NotTo(HaveOccurred())
 			g.Expect(body).To(ContainSubstring("strimzi_schema_registry_instance_current_count"))
 		}, readyTimeout, 2*time.Second).Should(Succeed())
@@ -79,7 +78,7 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		By("deleting the CR and verifying the gauge drops to zero")
 		deleteRegistryCR(ctx, readyTimeout)
 		Eventually(func(g Gomega) {
-			fresh, scrapeErr := scrapeMetrics(operatorMetricsLocalPort)
+			fresh, scrapeErr := scrapeMetrics(localPort)
 			g.Expect(scrapeErr).NotTo(HaveOccurred())
 			g.Expect(metricValue(fresh, "strimzi_schema_registry_instance_current_count")).To(
 				Equal(0.0), "the instance-count gauge must drop after the CR is deleted")

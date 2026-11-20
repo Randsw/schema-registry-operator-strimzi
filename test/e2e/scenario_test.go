@@ -27,24 +27,27 @@ import (
 )
 
 const (
-	// localPort is the local port used to port-forward the Schema Registry
-	// service (remote port 443, the TLS REST API port).
-	localPort = 18443
-
 	// testSubject is the schema subject used for the REST round-trip.
 	testSubject = "e2e-test-value"
 
 	// testSchema is an Avro schema registered under testSubject.
 	testSchema = `{"type":"record","name":"e2etest","fields":[{"name":"user","type":"string"},{"name":"car","type":"string"},{"name":"color","type":"string"}]}`
 
-	// readyTimeout is the maximum time to wait for the CR or deployment
-	// transitions.
-	readyTimeout = 5 * time.Minute
-
 	// deploymentSuffix is appended to the CR name to form the name of the
 	// operator-created Schema Registry Deployment. It mirrors deploySuffix in
 	// internal/controller/k8s.go.
 	deploymentSuffix = "-deploy"
+
+	// readyTimeout is the maximum time to wait for deployment and CR
+	// readiness transitions. It stays generous because those waits include
+	// pod scheduling and image pulls.
+	readyTimeout = 5 * time.Minute
+
+	// statusTimeout bounds polls of API objects that the operator reconciles
+	// without scheduling a new pod (Service and NetworkPolicy shape, derived
+	// secrets, events, metrics scrapes, port-forward readiness). Using the
+	// deployment timeout there would only delay failure feedback.
+	statusTimeout = 90 * time.Second
 )
 
 // The scenario runs three phases against the same Kafka cluster:

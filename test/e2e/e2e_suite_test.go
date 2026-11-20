@@ -46,7 +46,9 @@ import (
 	. "github.com/onsi/gomega"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
@@ -63,10 +65,28 @@ type scenarioConfig struct {
 }
 
 var (
+	// k8sClient is the controller-runtime client used to create and inspect
+	// the test fixtures.
 	k8sClient client.Client
-	scenario  scenarioConfig
+	// kubeClient exposes the subresource APIs (port-forward, exec) that the
+	// controller-runtime client does not surface.
+	kubeClient kubernetes.Interface
+	// restConfig is the cluster connection used by the client-go port-forward
+	// and exec helpers.
+	restConfig *rest.Config
+	scenario   scenarioConfig
 )
 
+// TestE2E runs the suite. The specs execute serially (no Ginkgo parallel
+// processes) on purpose: every container drives the same StrimziSchemaRegistry
+// CR, the same registry-schemas Kafka topic and the same Schema Registry
+// group.id, so two live registries would elect leaders against each other and
+// reject the mixed configuration; the NetworkPolicy scenario asserts
+// namespace-scoped ingress and the operator-metrics scenario asserts a
+// cluster-wide gauge. Container-level parallelism would require per-container
+// CR names, Kafka topics and group IDs plus isolated Kafka fixtures, which is
+// a separate infrastructure change (§4.2 fix 6 is documented in the Phase 3
+// PR).
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Schema Registry Operator E2E Suite")
@@ -85,8 +105,11 @@ var _ = BeforeSuite(func() {
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 	Expect(strimziregistryoperatorv1alpha1.AddToScheme(scheme)).To(Succeed())
 
-	restConfig, err := config.GetConfig()
+	var err error
+	restConfig, err = config.GetConfig()
 	Expect(err).NotTo(HaveOccurred(), "failed to load kubeconfig (is the kind cluster running?)")
+	kubeClient, err = kubernetes.NewForConfig(restConfig)
+	Expect(err).NotTo(HaveOccurred())
 	k8sClient, err = client.New(restConfig, client.Options{Scheme: scheme})
 	Expect(err).NotTo(HaveOccurred())
 })
