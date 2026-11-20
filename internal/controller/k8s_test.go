@@ -37,6 +37,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -44,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	eventsfake "k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -3249,6 +3251,225 @@ func TestReconcileNetworkPolicyPreservesAnnotations(t *testing.T) {
 	// The spec must still be reconciled to the desired state.
 	if len(updated.Spec.Egress) == 0 {
 		t.Error("expected the spec to be updated with the desired egress rules")
+	}
+}
+
+// TestReconcileNetworkPolicyDisableDeletesExisting covers the disable path of
+// reconcileNetworkPolicy: spec.networkpolicy.enabled=false must delete the
+// operator-managed NetworkPolicy and leave every other policy alone, while a
+// disabled CR with no existing policy is a no-op. Deletion is name-scoped to
+// <cr-name>-network-policy in the CR's namespace, so a same-named policy in
+// another namespace or a differently named policy in the same namespace must
+// survive.
+func TestReconcileNetworkPolicyDisableDeletesExisting(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+	_ = networkingv1.AddToScheme(scheme)
+
+	// A nil spec.networkpolicy is disabled, but the explicit false value is
+	// the case under test.
+	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+		inst := newTestInstance()
+		inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: false}
+		return inst
+	}
+
+	// newOperatorPolicy returns a policy in the shape the operator creates:
+	// the suffixed name, the operator labels, and the CR as controller owner.
+	newOperatorPolicy := func(inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *networkingv1.NetworkPolicy {
+		policy := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      inst.Name + networkPolicySuffix,
+				Namespace: inst.Namespace,
+				Labels:    map[string]string{"app": inst.Name},
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": inst.Name}},
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			},
+		}
+		if err := ctrl.SetControllerReference(inst, policy, scheme); err != nil {
+			t.Fatalf("failed to set the controller reference on the fixture NetworkPolicy: %v", err)
+		}
+		return policy
+	}
+
+	ctx := context.Background()
+
+	t.Run("disabled deletes the operator-owned policy only", func(t *testing.T) {
+		inst := newInstance()
+		owned := newOperatorPolicy(inst)
+		if len(owned.OwnerReferences) == 0 {
+			t.Fatal("fixture NetworkPolicy must be operator-owned")
+		}
+
+		// Same name, different namespace: a namespaced delete must not reach it.
+		otherNamespace := owned.DeepCopy()
+		otherNamespace.Namespace = "other"
+		otherNamespace.OwnerReferences = nil
+		// A differently named policy in the same namespace is not managed by
+		// this operator and must not be deleted.
+		unrelated := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "platform-default-deny",
+				Namespace: inst.Namespace,
+			},
+		}
+
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, owned, otherNamespace, unrelated).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+		if err := r.reconcileNetworkPolicy(ctx, inst, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if err := c.Get(ctx, types.NamespacedName{Name: owned.Name, Namespace: owned.Namespace}, &networkingv1.NetworkPolicy{}); !apierrors.IsNotFound(err) {
+			t.Errorf("expected the operator-owned NetworkPolicy %q to be deleted, got err=%v", owned.Name, err)
+		}
+		if err := c.Get(ctx, types.NamespacedName{Name: unrelated.Name, Namespace: unrelated.Namespace}, &networkingv1.NetworkPolicy{}); err != nil {
+			t.Errorf("expected the unrelated NetworkPolicy %q to survive, got err=%v", unrelated.Name, err)
+		}
+		if err := c.Get(ctx, types.NamespacedName{Name: otherNamespace.Name, Namespace: otherNamespace.Namespace}, &networkingv1.NetworkPolicy{}); err != nil {
+			t.Errorf("expected the same-named policy in namespace %q to survive, got err=%v", otherNamespace.Namespace, err)
+		}
+	})
+
+	t.Run("disabled with no existing policy is a no-op", func(t *testing.T) {
+		inst := newInstance()
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+		if err := r.reconcileNetworkPolicy(ctx, inst, logr.Logger{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		policies := &networkingv1.NetworkPolicyList{}
+		if err := c.List(ctx, policies, client.InNamespace(inst.Namespace)); err != nil {
+			t.Fatalf("failed to list NetworkPolicies: %v", err)
+		}
+		if len(policies.Items) != 0 {
+			t.Errorf("expected no NetworkPolicy in namespace %q, got %d", inst.Namespace, len(policies.Items))
+		}
+	})
+}
+
+// TestNetworkPoliciesEqual pins the drift comparison used by
+// reconcileNetworkPolicy. Spec and labels are operator-managed and must match;
+// annotations are user-managed (the operator never sets them and preserves the
+// existing ones on update, B8), so an annotations-only difference must still
+// report equal. A naive reflect.DeepEqual on the whole object would fail this
+// case and cause an Update on every reconcile, wiping nothing but churning the
+// object (and defeating the B8 preservation test's intent).
+func TestNetworkPoliciesEqual(t *testing.T) {
+	newPolicy := func() *networkingv1.NetworkPolicy {
+		return &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sr-network-policy",
+				Namespace: "default",
+				Labels:    map[string]string{"app": "test-sr", strimziClusterLabel: "kafka-cluster"},
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "test-sr"}},
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(existing, desired *networkingv1.NetworkPolicy)
+		want   bool
+	}{
+		{
+			name:   "identical policies are equal",
+			mutate: func(_, _ *networkingv1.NetworkPolicy) {},
+			want:   true,
+		},
+		{
+			name: "differing spec is not equal",
+			mutate: func(existing, _ *networkingv1.NetworkPolicy) {
+				existing.Spec.PolicyTypes = []networkingv1.PolicyType{
+					networkingv1.PolicyTypeIngress,
+					networkingv1.PolicyTypeEgress,
+				}
+			},
+			want: false,
+		},
+		{
+			name: "differing labels are not equal",
+			mutate: func(existing, _ *networkingv1.NetworkPolicy) {
+				existing.Labels["app"] = "other"
+			},
+			want: false,
+		},
+		{
+			name: "annotations-only difference is equal",
+			mutate: func(existing, _ *networkingv1.NetworkPolicy) {
+				existing.Annotations = map[string]string{"example.com/owner": "platform-team"}
+			},
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			existing := newPolicy()
+			desired := newPolicy()
+			tc.mutate(existing, desired)
+			if got := networkPoliciesEqual(existing, desired); got != tc.want {
+				t.Errorf("networkPoliciesEqual() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReconcileNetworkPolicyGetBootstrapError covers the bootstrap-resolution
+// failure: when the Kafka CR does not expose the listener the CR asks for,
+// reconcileNetworkPolicy returns an actionable error and must not create the
+// NetworkPolicy (the desired object cannot even be built without the Kafka
+// egress port).
+func TestReconcileNetworkPolicyGetBootstrapError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apps.AddToScheme(scheme)
+	_ = kafka.AddToScheme(scheme)
+	_ = networkingv1.AddToScheme(scheme)
+
+	inst := newTestInstance()
+	// PLAINTEXT keeps the test focused on bootstrap resolution: no JKS or
+	// user-secret requirements are involved.
+	inst.Spec.SecurityProtocol = "PLAINTEXT"
+	inst.Spec.Listener = "tls"
+	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
+
+	// The Kafka CR exists but exposes only a "plain" listener.
+	kafkaCR := newTestKafkaCR("kafka-cluster", inst.Namespace)
+	kafkaCR.Status.Listeners[0].Name = "plain"
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst, kafkaCR).Build()
+	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+
+	err := r.reconcileNetworkPolicy(context.Background(), inst, logr.Logger{})
+	if err == nil {
+		t.Fatal("expected an error when the Kafka CR lacks the requested listener")
+	}
+	if !strings.Contains(err.Error(), `"tls"`) {
+		t.Errorf("expected the error to name the requested listener, got: %v", err)
+	}
+
+	policies := &networkingv1.NetworkPolicyList{}
+	if err := c.List(context.Background(), policies, client.InNamespace(inst.Namespace)); err != nil {
+		t.Fatalf("failed to list NetworkPolicies: %v", err)
+	}
+	if len(policies.Items) != 0 {
+		t.Errorf("expected no NetworkPolicy to be created after a bootstrap error, got %d", len(policies.Items))
 	}
 }
 
