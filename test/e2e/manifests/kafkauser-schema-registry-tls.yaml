@@ -16,11 +16,13 @@ spec:
     # https://docs.confluent.io/current/schema-registry/security/index.html#authorizing-access-to-the-schemas-topic
     type: simple
     acls:
-      # Allow all operations on the registry-schemas topic
+      # Allow all operations on the registry-schemas topic. The prefix
+      # pattern also covers the suffixed topic names used by the isolated
+      # Phase 4 e2e scenarios (registry-schemas-<suffix>).
       - resource:
           type: topic
           name: registry-schemas
-          patternType: literal
+          patternType: prefix
         operations:
           - All
         type: allow
