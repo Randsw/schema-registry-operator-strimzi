@@ -129,10 +129,24 @@ vet: ## Run go vet against code.
 #     signal handling) that only runs inside the operator binary. The rest of
 #     cmd/main.go (watchNamespace, managerCacheOptions) stays in the profile
 #     and is covered by cmd/main_test.go.
+#
+# The filtered project coverage is then gated by hack/coverage-gate.sh.
+# COVERAGE_THRESHOLD sits inside the plan's 82-85% target band and leaves
+# ~1.5 points of headroom below the measured post-Phase-2 filtered coverage
+# (85.5%). Coverage variance on a green suite is negligible, so that margin
+# fails genuine regressions without making CI flaky. Override deliberately,
+# e.g. `make test COVERAGE_THRESHOLD=83.0`.
+COVERAGE_THRESHOLD ?= 84.0
+
+.PHONY: coverage-gate
+coverage-gate: ## Check filtered cover.out against COVERAGE_THRESHOLD (default 84.0%).
+	./hack/coverage-gate.sh cover.out $(COVERAGE_THRESHOLD)
+
 .PHONY: test
-test: manifests generate fmt vet envtest ## Run tests.
+test: manifests generate fmt vet envtest ## Run tests and enforce the filtered coverage gate.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 	./hack/coverage-filter.sh cover.out
+	./hack/coverage-gate.sh cover.out $(COVERAGE_THRESHOLD)
 
 # Run the envtest controller suite verbosely (the integration tests against
 # a local Kubernetes API server; NOT the kind-cluster e2e tests, which are
