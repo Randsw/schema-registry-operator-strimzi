@@ -209,13 +209,20 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 	})
 })
 
-// userTLSDNSNames returns the DNS SANs the user REST API certificate must
-// carry: the names REST clients verify against (the registry service DNS
-// name is what the e2e REST client sets as TLS ServerName).
+// userTLSDNSNames returns the DNS SANs the user REST API certificate of the
+// scenario's shared CR must carry.
 func userTLSDNSNames() []string {
-	registry := scenario.RegistryName + "." + scenario.Namespace
+	return userTLSDNSNamesFor(scenario.RegistryName)
+}
+
+// userTLSDNSNamesFor returns the DNS SANs a user REST API certificate for the
+// named registry must carry: the names REST clients verify against (the
+// registry service DNS name is what the e2e REST client sets as TLS
+// ServerName).
+func userTLSDNSNamesFor(registryName string) []string {
+	registry := registryName + "." + scenario.Namespace
 	return []string{
-		scenario.RegistryName,
+		registryName,
 		registry + ".svc",
 		registry + ".svc.cluster.local",
 	}
@@ -298,11 +305,17 @@ func applyUserTLSSecret(ctx context.Context, data map[string][]byte) {
 		"failed to apply the user TLS secret %s/%s", scenario.Namespace, userTLSSecretName)
 }
 
-// restAPITLSMountedSecret returns the secret name the deployment's
+// restAPITLSMountedSecret returns the secret name the shared CR's deployment
 // rest-api-tls volume currently mounts (empty when the volume is absent).
 func restAPITLSMountedSecret(ctx context.Context) string {
+	return restAPITLSMountedSecretFor(ctx, scenario.RegistryName)
+}
+
+// restAPITLSMountedSecretFor returns the secret name the named CR's deployment
+// rest-api-tls volume currently mounts (empty when the volume is absent).
+func restAPITLSMountedSecretFor(ctx context.Context, name string) string {
 	dep := &appsv1.Deployment{}
-	Expect(k8sClient.Get(ctx, registryDeploymentKey(), dep)).To(Succeed())
+	Expect(k8sClient.Get(ctx, deploymentKeyFor(name), dep)).To(Succeed())
 	for _, vol := range dep.Spec.Template.Spec.Volumes {
 		if vol.Name == restAPITLSVolumeName && vol.Secret != nil {
 			return vol.Secret.SecretName

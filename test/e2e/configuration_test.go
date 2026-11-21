@@ -86,14 +86,20 @@ var _ = Describe("StrimziSchemaRegistry e2e configuration passthrough scenario",
 })
 
 // listRegistryEvents returns the reason of every event regarding the
-// scenario's StrimziSchemaRegistry CR (both the events.k8s.io and the core
-// v1 event APIs, which the operator's recorder may use).
+// scenario's shared StrimziSchemaRegistry CR (both the events.k8s.io and the
+// core v1 event APIs, which the operator's recorder may use).
 func listRegistryEvents(ctx context.Context) ([]string, error) {
+	return listRegistryEventsFor(ctx, scenario.RegistryName)
+}
+
+// listRegistryEventsFor returns the reason of every event regarding the named
+// StrimziSchemaRegistry CR.
+func listRegistryEventsFor(ctx context.Context, name string) ([]string, error) {
 	var reasons []string
 
 	coreEvents := &corev1.EventList{}
 	if err := k8sClient.List(ctx, coreEvents, client.InNamespace(scenario.Namespace),
-		client.MatchingFields{"involvedObject.name": scenario.RegistryName}); err == nil {
+		client.MatchingFields{"involvedObject.name": name}); err == nil {
 		for _, ev := range coreEvents.Items {
 			reasons = append(reasons, ev.Reason)
 		}

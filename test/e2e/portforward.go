@@ -24,28 +24,39 @@ import (
 // Service port (443 when securehttp is enabled).
 const registryServicePort = 443
 
-// withRegistryClient port-forwards the operator-created Schema Registry
+// withRegistryClient port-forwards the scenario's shared Schema Registry
 // service to an OS-assigned local port and invokes f with a REST client
 // connected to it.
 func withRegistryClient(ca *clusterCA, clientCert *tls.Certificate, f func(*registryClient)) {
-	ctx := context.Background()
-	waitForService(ctx, statusTimeout)
+	withRegistryClientFor(scenario.RegistryName, ca, clientCert, f)
+}
 
-	localPort, stop, err := startPortForward(ctx, scenario.RegistryName, registryServicePort)
+// withRegistryClientFor is withRegistryClient for the Service of the named CR.
+func withRegistryClientFor(name string, ca *clusterCA, clientCert *tls.Certificate, f func(*registryClient)) {
+	ctx := context.Background()
+	waitForServiceFor(ctx, name, statusTimeout)
+
+	localPort, stop, err := startPortForward(ctx, name, registryServicePort)
 	Expect(err).NotTo(HaveOccurred())
 	defer stop()
 
-	f(newRegistryClient(ca.certPool(), clientCert, localPort))
+	f(newRegistryClientFor(name, ca.certPool(), clientCert, localPort))
 }
 
-// waitForService waits until the operator-created Schema Registry service
-// exists. The service is created after the deployment becomes ready, so this
-// also acts as an additional readiness gate before port-forwarding.
+// waitForService waits until the operator-created Schema Registry service of
+// the scenario's shared CR exists.
 func waitForService(ctx context.Context, timeout time.Duration) {
+	waitForServiceFor(ctx, scenario.RegistryName, timeout)
+}
+
+// waitForServiceFor waits until the Service of the named CR exists. The
+// service is created after the deployment becomes ready, so this also acts as
+// an additional readiness gate before port-forwarding.
+func waitForServiceFor(ctx context.Context, name string, timeout time.Duration) {
 	Eventually(func(g Gomega) {
 		svc := &corev1.Service{}
 		g.Expect(k8sClient.Get(ctx, types.NamespacedName{
-			Name:      scenario.RegistryName,
+			Name:      name,
 			Namespace: scenario.Namespace,
 		}, svc)).To(Succeed())
 	}, timeout, 2*time.Second).Should(Succeed())
@@ -79,7 +90,13 @@ func startPortForward(ctx context.Context, serviceName string, servicePort int) 
 		return 0, nil, fmt.Errorf("service %s/%s has no ready backend pod: %w",
 			scenario.Namespace, serviceName, err)
 	}
+	return startPodPortForward(ctx, pod, targetPort)
+}
 
+// startPodPortForward forwards a pod's container port to an OS-assigned local
+// port. It is the pod-level primitive behind startPortForward, used by
+// scenarios that must target each replica individually.
+func startPodPortForward(ctx context.Context, pod corev1.Pod, targetPort int32) (int, func(), error) {
 	req := kubeClient.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Namespace(pod.Namespace).
