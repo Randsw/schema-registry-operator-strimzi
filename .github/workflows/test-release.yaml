@@ -6,6 +6,7 @@ on:
       - 'feat/**'
       - 'fix/**'
       - 'cicd/**'
+      - 'chore/**'
       - 'test/**'
       - 'main'
       - "[0-9]+-*"
@@ -76,7 +77,12 @@ jobs:
           fetch-depth: 1
       - name: Run build
         run: make build
-      - name: Test
+      - name: Test (filtered coverage gate)
+        # `make test` runs the unit/envtest suite, strips generated code and
+        # main() from cover.out (hack/coverage-filter.sh), then fails when the
+        # filtered project coverage drops below COVERAGE_THRESHOLD (84.0%,
+        # defined in the Makefile). This makes the coverage gate run on every
+        # pull request and push to main.
         run: make test
     Lint:
       # A semantic-release commit ("chore(release): x.y.z") pushed to main or
