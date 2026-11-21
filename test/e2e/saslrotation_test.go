@@ -71,12 +71,15 @@ var _ = Describe("StrimziSchemaRegistry e2e SASL truststore rotation scenario", 
 		Expect(before.Data).NotTo(HaveKey("keystore_password"),
 			"SASL_SSL must never build a client keystore")
 		beforeJKSVersion := before.ResourceVersion
+		beforeCAVersion := before.Annotations[caVersionAnnotationKey]
 
 		By("simulating a cluster CA rotation by bumping the CA cert secret version")
-		newCAVersion := bumpSecretVersion(ctx, scenario.ClusterName+"-cluster-ca-cert",
-			"e2e.randsw.code/sasl-ca-rotation")
+		bumpSecretVersion(ctx, scenario.ClusterName+"-cluster-ca-cert", "e2e.randsw.code/sasl-ca-rotation")
 
 		By("waiting for the truststore-only rebuild")
+		// Compare against the CA cert secret's CURRENT version (see the
+		// cluster CA rotation scenario): Strimzi may rewrite its own CA secret
+		// after the bump, and the operator records whichever version it sees.
 		var rebuilt *corev1.Secret
 		Eventually(func(g Gomega) {
 			current := &corev1.Secret{}
@@ -84,11 +87,20 @@ var _ = Describe("StrimziSchemaRegistry e2e SASL truststore rotation scenario", 
 				Name:      jksSecretName,
 				Namespace: scenario.Namespace,
 			}, current)).To(Succeed())
-			g.Expect(current.Annotations).To(HaveKeyWithValue(caVersionAnnotationKey, newCAVersion))
+
+			caCertSecret := &corev1.Secret{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      scenario.ClusterName + "-cluster-ca-cert",
+				Namespace: scenario.Namespace,
+			}, caCertSecret)).To(Succeed())
+
+			g.Expect(current.Annotations).To(HaveKeyWithValue(caVersionAnnotationKey, caCertSecret.ResourceVersion),
+				"the truststore secret must record the current cluster CA cert secret version")
+			g.Expect(current.Annotations[caVersionAnnotationKey]).NotTo(Equal(beforeCAVersion),
+				"the truststore CA version did not change after the rotation")
 			rebuilt = current
 		}, statusTimeout, 2*time.Second).Should(Succeed(),
-			"timed out after %s waiting for the JKS secret CAVersion to record %s",
-			statusTimeout, newCAVersion)
+			"timed out after %s waiting for the rebuilt truststore", statusTimeout)
 		Expect(rebuilt.Data).To(HaveKey("truststore.jks"))
 		Expect(rebuilt.Data).NotTo(HaveKey("keystore.jks"),
 			"the CA rotation must rebuild the truststore only")

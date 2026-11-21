@@ -62,15 +62,17 @@ var _ = Describe("StrimziSchemaRegistry e2e cluster CA rotation scenario", Order
 		By("recording the operator-managed REST API TLS secret before the rotation")
 		before := waitForSecretWithKey(ctx, tlsSecretName, "tls-keystore.jks")
 		Expect(before.Annotations).To(HaveKey(caVersionAnnotationKey))
-		beforeCAVersion := before.Annotations[caVersionAnnotationKey]
+		beforeTLSVersion := before.Annotations[caVersionAnnotationKey]
 		beforeKeystore := before.Data["tls-keystore.jks"]
 
 		By("simulating a Strimzi cluster CA rotation by bumping the CA cert secret version")
-		newCAVersion := bumpSecretVersion(ctx, scenario.ClusterName+"-cluster-ca-cert",
-			"e2e.randsw.code/ca-rotation")
-		Expect(newCAVersion).NotTo(Equal(beforeCAVersion))
+		bumpSecretVersion(ctx, scenario.ClusterName+"-cluster-ca-cert", "e2e.randsw.code/ca-rotation")
 
 		By("waiting for the operator to renew the REST API TLS secret")
+		// The recorded CA version is compared against the CA cert secret's
+		// CURRENT version rather than the version right after the bump: Strimzi
+		// may rewrite its own CA secret (bumping the version again) before the
+		// operator reconciles, and the operator always records the latest one.
 		var renewed *corev1.Secret
 		Eventually(func(g Gomega) {
 			current := &corev1.Secret{}
@@ -78,11 +80,20 @@ var _ = Describe("StrimziSchemaRegistry e2e cluster CA rotation scenario", Order
 				Name:      tlsSecretName,
 				Namespace: scenario.Namespace,
 			}, current)).To(Succeed())
-			g.Expect(current.Annotations).To(HaveKeyWithValue(caVersionAnnotationKey, newCAVersion))
+
+			caCertSecret := &corev1.Secret{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      scenario.ClusterName + "-cluster-ca-cert",
+				Namespace: scenario.Namespace,
+			}, caCertSecret)).To(Succeed())
+
+			g.Expect(current.Annotations).To(HaveKeyWithValue(caVersionAnnotationKey, caCertSecret.ResourceVersion),
+				"the TLS secret must record the current cluster CA cert secret version")
+			g.Expect(current.Annotations[caVersionAnnotationKey]).NotTo(Equal(beforeTLSVersion),
+				"the TLS secret CA version did not change after the rotation")
 			renewed = current
 		}, statusTimeout, 2*time.Second).Should(Succeed(),
-			"timed out after %s waiting for the TLS secret CAVersion to record %s",
-			statusTimeout, newCAVersion)
+			"timed out after %s waiting for the renewed TLS secret CA version", statusTimeout)
 
 		By("verifying the keystore material was rebuilt")
 		Expect(renewed.Data["tls-keystore.jks"]).NotTo(Equal(beforeKeystore),
