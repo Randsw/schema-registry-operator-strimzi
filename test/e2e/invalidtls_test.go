@@ -45,15 +45,15 @@ var _ = Describe("StrimziSchemaRegistry e2e InvalidTLSSecret recovery scenario",
 		fixture.delete(ctx)
 		By("deleting the user-provided TLS secret")
 		deleteSecretIfExists(ctx, missingSecret)
-		By("deleting the copied KafkaUser secret")
-		deleteSecretIfExists(ctx, fixture.Name)
+		By("deleting the isolated KafkaUser")
+		fixture.deleteKafkaUser(ctx)
 	})
 
 	It("reports InvalidTLSSecret for missing material and converges once the secret is fixed", func() {
 		ctx := context.Background()
 
-		By("creating the KafkaUser secret the isolated CR needs")
-		fixture.ensureUserSecret(ctx)
+		By("creating the KafkaUser the isolated CR needs")
+		fixture.ensureKafkaUser(ctx)
 
 		By("applying the CR pointing at a missing TLS secret")
 		Expect(fixture.apply(ctx, false, true, nil, func(spec *v1alpha1.StrimziSchemaRegistrySpec) {

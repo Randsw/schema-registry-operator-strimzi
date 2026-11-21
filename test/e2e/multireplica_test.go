@@ -15,6 +15,10 @@ import (
 	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 )
 
+// registryHTTPSContainerPort is the Schema Registry HTTPS listener container
+// port (the Service's 443 target port).
+const registryHTTPSContainerPort = 8085
+
 const (
 	// multiReplicaTLSSecretSuffix names the user-provided REST API keystore
 	// secret of the multi-replica HTTPS scenario.
@@ -67,15 +71,15 @@ var _ = Describe("StrimziSchemaRegistry e2e multi-replica HTTPS scenario", Order
 		By("deleting the user-provided TLS and truststore secrets")
 		deleteSecretIfExists(ctx, userTLSSecret)
 		deleteSecretIfExists(ctx, truststoreSecret)
-		By("deleting the copied KafkaUser secret")
-		deleteSecretIfExists(ctx, fixture.Name)
+		By("deleting the isolated KafkaUser")
+		fixture.deleteKafkaUser(ctx)
 	})
 
 	It("runs two replicas over HTTPS with a user TLS secret and passes the REST round-trip", func() {
 		ctx := context.Background()
 
-		By("creating the KafkaUser secret the isolated CR needs")
-		fixture.ensureUserSecret(ctx)
+		By("creating the KafkaUser the isolated CR needs")
+		fixture.ensureKafkaUser(ctx)
 
 		By("creating the user-provided JKS keystore secret")
 		applySecret(ctx, userTLSSecret, corev1.SecretTypeOpaque, material.jksData(ctx))
@@ -142,7 +146,43 @@ var _ = Describe("StrimziSchemaRegistry e2e multi-replica HTTPS scenario", Order
 		fixture.waitReady(ctx)
 		fixture.waitRollout(ctx)
 
-		By("passing the REST round-trip trusting the user CA")
-		fixture.verifyRoundTrip(material.cluster, nil)
+		By("verifying both replicas serve the REST API over HTTPS with the user certificate")
+		// Each replica is probed directly: a load-balanced Service port-forward
+		// could land on the follower, and a write on the follower is forwarded
+		// to the elected master over HTTPS with each pod's IP as host.name.
+		// That inter-instance hop cannot verify a static certificate (no pod
+		// IP SANs) and Jetty rejects the IP-literal SNI, so the write is
+		// asserted against the replica that accepts it (the master), while
+		// reads are asserted against every replica.
+		pods := fixture.pods(ctx)
+		Expect(pods).To(HaveLen(2), "expected two ready replicas")
+
+		wrote := false
+		for _, pod := range pods {
+			pod := pod
+			func() {
+				port, stop, err := startPodPortForward(ctx, pod, registryHTTPSContainerPort)
+				Expect(err).NotTo(HaveOccurred(), "failed to port-forward replica %s", pod.Name)
+				defer stop()
+				client := newRegistryClientFor(fixture.Name, material.cluster.certPool(), nil, port)
+
+				Eventually(func() error {
+					_, err := client.listSubjects()
+					return err
+				}, 60*time.Second, 2*time.Second).Should(Succeed(),
+					"replica %s did not serve the REST API over HTTPS", pod.Name)
+
+				if wrote {
+					return
+				}
+				id, err := client.registerSchema(testSubject, testSchema)
+				if err == nil {
+					Expect(id).To(BeNumerically(">", 0))
+					wrote = true
+				}
+			}()
+		}
+		Expect(wrote).To(BeTrue(),
+			"no replica accepted the schema write (is a master elected among the replicas?)")
 	})
 })

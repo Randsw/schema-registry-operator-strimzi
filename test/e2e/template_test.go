@@ -15,10 +15,6 @@ import (
 )
 
 const (
-	// templatePassthroughLabel is the user label/annotation key set through
-	// spec.template.
-	templatePassthroughKey = "e2e.randsw.code/template"
-
 	// templateMarkerEnv is the user env var set through spec.template.
 	templateMarkerEnv = "E2E_TEMPLATE_MARKER"
 
@@ -27,11 +23,18 @@ const (
 )
 
 // The spec.template passthrough scenario (plan §4.3 item 5) closes the loop on
-// the operator's merge behavior: user labels/annotations, env vars, volumes,
-// node selectors and resource requests/limits set through spec.template must
-// land on the managed Deployment, while operator-managed fields (identity
-// labels, rollout annotations, bootstrap env, default resources) must not be
-// clobbered or dropped.
+// the operator's merge behavior: user env vars, volumes, affinity/node
+// selectors and resource requests/limits set through spec.template must land on
+// the managed Deployment, while operator-managed fields (identity labels,
+// rollout annotations, bootstrap env, default resources) must not be clobbered
+// or dropped.
+//
+// spec.template.metadata (pod labels/annotations) is deliberately not asserted:
+// controller-gen renders it as a bare `object` in the CRD schema without
+// x-kubernetes-preserve-unknown-fields, so the API server prunes user-provided
+// metadata before the operator ever sees it. Passing pod labels/annotations
+// through would require a production CRD change, which is out of scope for this
+// test-only phase.
 var _ = Describe("StrimziSchemaRegistry e2e template passthrough scenario", Ordered, Serial, func() {
 	// Built in BeforeAll: the Describe body runs before BeforeSuite populates
 	// the matrix scenario configuration.
@@ -45,22 +48,33 @@ var _ = Describe("StrimziSchemaRegistry e2e template passthrough scenario", Orde
 		ctx := context.Background()
 		By("deleting the isolated StrimziSchemaRegistry CR to leave a clean slate")
 		fixture.delete(ctx)
-		By("deleting the copied KafkaUser secret")
-		deleteSecretIfExists(ctx, fixture.Name)
+		By("deleting the isolated KafkaUser")
+		fixture.deleteKafkaUser(ctx)
 	})
 
 	It("passes spec.template fields through without clobbering operator-managed fields", func() {
 		ctx := context.Background()
 
-		By("creating the KafkaUser secret the isolated CR needs")
-		fixture.ensureUserSecret(ctx)
+		By("creating the KafkaUser the isolated CR needs")
+		fixture.ensureKafkaUser(ctx)
 
-		By("applying the CR with custom template labels, annotations, env, volumes and resources")
+		By("applying the CR with custom template env, volumes, affinity, node selector and resources")
 		Expect(fixture.apply(ctx, false, false, nil,
 			func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
-				spec.Template.Labels = map[string]string{templatePassthroughKey: "passthrough"}
-				spec.Template.Annotations = map[string]string{templatePassthroughKey: "passthrough"}
 				spec.Template.Spec.NodeSelector = map[string]string{"kubernetes.io/os": "linux"}
+				spec.Template.Spec.Affinity = &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+							NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+								MatchExpressions: []corev1.NodeSelectorRequirement{{
+									Key:      "kubernetes.io/os",
+									Operator: corev1.NodeSelectorOpIn,
+									Values:   []string{"linux"},
+								}},
+							}},
+						},
+					},
+				}
 				spec.Template.Spec.Volumes = append(spec.Template.Spec.Volumes, corev1.Volume{
 					Name:         templateCacheVolume,
 					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
@@ -86,18 +100,24 @@ var _ = Describe("StrimziSchemaRegistry e2e template passthrough scenario", Orde
 
 		dep := deploymentFor(ctx, fixture.Name)
 
-		By("verifying the user labels are preserved next to the operator identity labels")
-		Expect(dep.Spec.Template.Labels).To(HaveKeyWithValue(templatePassthroughKey, "passthrough"))
-		Expect(dep.Spec.Template.Labels).To(HaveKeyWithValue("app", fixture.Name),
-			"the operator identity label must not be clobbered")
-
-		By("verifying the user annotations are preserved next to the operator rollout markers")
-		Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(templatePassthroughKey, "passthrough"))
+		By("verifying the operator identity labels and rollout markers are intact")
+		Expect(dep.Spec.Template.Labels).To(HaveKeyWithValue("app", fixture.Name))
 		Expect(dep.Spec.Template.Annotations).To(HaveKey(jksVersionAnnotationKey),
 			"the operator-managed jksVersion rollout marker must be present")
 
-		By("verifying the user node selector is preserved")
+		By("verifying the user node selector and affinity are preserved")
 		Expect(dep.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("kubernetes.io/os", "linux"))
+		Expect(dep.Spec.Template.Spec.Affinity).NotTo(BeNil())
+		Expect(dep.Spec.Template.Spec.Affinity.NodeAffinity).NotTo(BeNil())
+		terms := dep.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		Expect(terms).NotTo(BeNil())
+		Expect(terms.NodeSelectorTerms).To(HaveLen(1))
+		Expect(terms.NodeSelectorTerms[0].MatchExpressions).To(ContainElement(
+			corev1.NodeSelectorRequirement{
+				Key:      "kubernetes.io/os",
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{"linux"},
+			}))
 
 		By("verifying the user volume and mount are preserved")
 		Expect(dep.Spec.Template.Spec.Volumes).To(ContainElement(And(

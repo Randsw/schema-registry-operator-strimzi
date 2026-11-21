@@ -50,15 +50,15 @@ var _ = Describe("StrimziSchemaRegistry e2e derived JKS garbage collection scena
 		By("deleting the user-provided TLS secrets")
 		deleteSecretIfExists(ctx, secretA)
 		deleteSecretIfExists(ctx, secretB)
-		By("deleting the copied KafkaUser secret")
-		deleteSecretIfExists(ctx, fixture.Name)
+		By("deleting the isolated KafkaUser")
+		fixture.deleteKafkaUser(ctx)
 	})
 
 	It("garbage-collects the stale derived JKS secret when tlssecretname changes", func() {
 		ctx := context.Background()
 
-		By("creating the KafkaUser secret the isolated CR needs")
-		fixture.ensureUserSecret(ctx)
+		By("creating the KafkaUser the isolated CR needs")
+		fixture.ensureKafkaUser(ctx)
 
 		By("creating the first user PEM TLS secret")
 		applySecret(ctx, secretA, corev1.SecretTypeTLS, materialA.pemData())

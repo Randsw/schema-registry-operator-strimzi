@@ -16,8 +16,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
@@ -62,23 +66,123 @@ func (f *registryFixture) apply(ctx context.Context, clientAuth, secureHTTP bool
 	return applyRegistryCRFor(ctx, f.Name, f.Topic, f.GroupID, clientAuth, secureHTTP, replicas, mutators...)
 }
 
-// ensureUserSecret copies the Strimzi-managed KafkaUser secret of the matrix
-// scenario to a secret named after the fixture CR: the operator looks the
-// KafkaUser secret up by instance name. The copied material belongs to the
-// same KafkaUser principal, so the existing ACLs apply. PLAINTEXT modes need
-// no KafkaUser secret.
-func (f *registryFixture) ensureUserSecret(ctx context.Context) {
+// kafkaUserGVK is the Strimzi KafkaUser resource identity. The e2e client
+// interacts with it as an unstructured object so the suite does not need to
+// register the Strimzi API types in its scheme.
+var kafkaUserGVK = schema.GroupVersionKind{
+	Group:   "kafka.strimzi.io",
+	Version: "v1",
+	Kind:    "KafkaUser",
+}
+
+// ensureKafkaUser creates a KafkaUser named after the fixture CR by copying
+// the matrix scenario's KafkaUser spec (authentication type and ACLs): the
+// operator resolves the Kafka auth mode from the KafkaUser CR named after the
+// instance, and Strimzi then provisions the matching credentials secret. The
+// copied ACLs use the same topic/group prefixes as the matrix KafkaUser, so the
+// fixture's suffixed topic and group.id are authorized. PLAINTEXT modes need no
+// KafkaUser.
+func (f *registryFixture) ensureKafkaUser(ctx context.Context) {
 	if scenario.SecurityProtocol == "PLAINTEXT" {
 		return
 	}
-	source := &corev1.Secret{}
+
+	base := &unstructured.Unstructured{}
+	base.SetGroupVersionKind(kafkaUserGVK)
 	Expect(k8sClient.Get(ctx, types.NamespacedName{
 		Name:      scenario.RegistryName,
 		Namespace: scenario.Namespace,
-	}, source)).To(Succeed(),
-		"the Strimzi KafkaUser secret %s/%s must exist for the %s matrix job",
+	}, base)).To(Succeed(),
+		"the Strimzi KafkaUser %s/%s must exist for the %s matrix job",
 		scenario.Namespace, scenario.RegistryName, scenario.SecurityProtocol)
-	applySecret(ctx, f.Name, source.Type, source.DeepCopy().Data)
+
+	desiredSpec := runtime.DeepCopyJSONValue(base.Object["spec"])
+	labels := base.GetLabels()
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing := &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(kafkaUserGVK)
+		getErr := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      f.Name,
+			Namespace: scenario.Namespace,
+		}, existing)
+		if apierrors.IsNotFound(getErr) {
+			user := &unstructured.Unstructured{}
+			user.SetGroupVersionKind(kafkaUserGVK)
+			user.SetName(f.Name)
+			user.SetNamespace(scenario.Namespace)
+			user.SetLabels(labels)
+			user.Object["spec"] = desiredSpec
+			return k8sClient.Create(ctx, user)
+		}
+		if getErr != nil {
+			return getErr
+		}
+		existing.SetLabels(labels)
+		existing.Object["spec"] = runtime.DeepCopyJSONValue(desiredSpec)
+		return k8sClient.Update(ctx, existing)
+	})
+	Expect(err).NotTo(HaveOccurred(), "failed to apply the KafkaUser %s/%s",
+		scenario.Namespace, f.Name)
+
+	// Wait for Strimzi's user operator to provision the credentials secret and
+	// report the KafkaUser Ready, so the secret is not rewritten under a later
+	// rotation assertion.
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      f.Name,
+			Namespace: scenario.Namespace,
+		}, &corev1.Secret{})).To(Succeed(),
+			"the KafkaUser credentials secret %s is not provisioned yet", f.Name)
+
+		current := &unstructured.Unstructured{}
+		current.SetGroupVersionKind(kafkaUserGVK)
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      f.Name,
+			Namespace: scenario.Namespace,
+		}, current)).To(Succeed())
+		conditions, _, _ := unstructured.NestedSlice(current.Object, "status", "conditions")
+		ready := false
+		for _, raw := range conditions {
+			cond, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if cond["type"] == "Ready" && cond["status"] == "True" {
+				ready = true
+			}
+		}
+		g.Expect(ready).To(BeTrue(), "the KafkaUser is not Ready yet")
+	}, readyTimeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for the Ready KafkaUser credentials of %s/%s",
+		readyTimeout, scenario.Namespace, f.Name)
+}
+
+// pods returns the ready pods of the fixture's Deployment.
+func (f *registryFixture) pods(ctx context.Context) []corev1.Pod {
+	list := &corev1.PodList{}
+	Expect(k8sClient.List(ctx, list,
+		client.InNamespace(scenario.Namespace),
+		client.MatchingLabels{"app": f.Name})).To(Succeed())
+	var ready []corev1.Pod
+	for i := range list.Items {
+		if podReady(&list.Items[i]) {
+			ready = append(ready, list.Items[i])
+		}
+	}
+	return ready
+}
+
+// deleteKafkaUser deletes the fixture's KafkaUser and its generated
+// credentials secret.
+func (f *registryFixture) deleteKafkaUser(ctx context.Context) {
+	user := &unstructured.Unstructured{}
+	user.SetGroupVersionKind(kafkaUserGVK)
+	user.SetName(f.Name)
+	user.SetNamespace(scenario.Namespace)
+	Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, user))).To(Succeed(),
+		"failed to delete the KafkaUser %s/%s", scenario.Namespace, f.Name)
+	deleteSecretIfExists(ctx, f.Name)
 }
 
 // delete removes the fixture CR and waits until its Deployment is gone.

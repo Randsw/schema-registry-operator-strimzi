@@ -90,7 +90,13 @@ func startPortForward(ctx context.Context, serviceName string, servicePort int) 
 		return 0, nil, fmt.Errorf("service %s/%s has no ready backend pod: %w",
 			scenario.Namespace, serviceName, err)
 	}
+	return startPodPortForward(ctx, pod, targetPort)
+}
 
+// startPodPortForward forwards a pod's container port to an OS-assigned local
+// port. It is the pod-level primitive behind startPortForward, used by
+// scenarios that must target each replica individually.
+func startPodPortForward(ctx context.Context, pod corev1.Pod, targetPort int32) (int, func(), error) {
 	req := kubeClient.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Namespace(pod.Namespace).

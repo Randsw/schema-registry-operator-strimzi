@@ -39,15 +39,18 @@ var _ = Describe("StrimziSchemaRegistry e2e cluster CA rotation scenario", Order
 	})
 
 	AfterAll(func() {
+		ctx := context.Background()
 		By("deleting the isolated StrimziSchemaRegistry CR to leave a clean slate")
-		fixture.delete(context.Background())
+		fixture.delete(ctx)
+		By("deleting the isolated KafkaUser")
+		fixture.deleteKafkaUser(ctx)
 	})
 
 	It("renews the REST API TLS certificate and rolls without downtime after the cluster CA rotates", func() {
 		ctx := context.Background()
 
-		By("creating the KafkaUser secret the isolated CR needs")
-		fixture.ensureUserSecret(ctx)
+		By("creating the KafkaUser the isolated CR needs")
+		fixture.ensureKafkaUser(ctx)
 
 		By("applying the CR with securehttp enabled and an operator-managed TLS secret")
 		Expect(fixture.apply(ctx, false, true, nil)).To(Succeed())

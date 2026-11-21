@@ -41,10 +41,11 @@ var _ = Describe("StrimziSchemaRegistry e2e SASL truststore rotation scenario", 
 	})
 
 	AfterAll(func() {
+		ctx := context.Background()
 		By("deleting the isolated StrimziSchemaRegistry CR to leave a clean slate")
-		fixture.delete(context.Background())
-		By("deleting the copied KafkaUser secret")
-		deleteSecretIfExists(context.Background(), fixture.Name)
+		fixture.delete(ctx)
+		By("deleting the isolated KafkaUser")
+		fixture.deleteKafkaUser(ctx)
 	})
 
 	It("rebuilds only the truststore on a CA rotation and rolls on a SCRAM credential rotation", func() {
@@ -53,8 +54,8 @@ var _ = Describe("StrimziSchemaRegistry e2e SASL truststore rotation scenario", 
 		}
 		ctx := context.Background()
 
-		By("creating the KafkaUser secret the isolated CR needs")
-		fixture.ensureUserSecret(ctx)
+		By("creating the KafkaUser the isolated CR needs")
+		fixture.ensureKafkaUser(ctx)
 
 		By("applying the CR with securehttp enabled")
 		Expect(fixture.apply(ctx, false, true, nil)).To(Succeed())
@@ -104,12 +105,27 @@ var _ = Describe("StrimziSchemaRegistry e2e SASL truststore rotation scenario", 
 		afterCA := waitForSecretWithKey(ctx, jksSecretName, "truststore.jks")
 		afterCAResourceVersion := afterCA.ResourceVersion
 
-		By("simulating a SCRAM credential rotation by bumping the KafkaUser secret version")
-		newUserVersion := bumpSecretVersion(ctx, fixture.Name, "e2e.randsw.code/sasl-credential-rotation")
+		By("recording the deployment's SASL credential marker before the rotation")
+		beforeUserVersion := deploymentFor(ctx, fixture.Name).Spec.Template.Annotations[saslUserVersionAnnotationKey]
+		Expect(beforeUserVersion).NotTo(BeEmpty(),
+			"the deployment must record the KafkaUser secret version from creation")
 
-		By("waiting for the deployment to record the rotated SASL secret version")
-		waitForDeploymentAnnotationFor(ctx, fixture.Name, statusTimeout,
-			saslUserVersionAnnotationKey, newUserVersion)
+		By("simulating a SCRAM credential rotation by bumping the KafkaUser secret version")
+		bumpSecretVersion(ctx, fixture.Name, "e2e.randsw.code/sasl-credential-rotation")
+
+		By("waiting for the deployment to record a rotated SASL secret version")
+		// The annotation is not pinned to one resourceVersion: Strimzi's user
+		// operator may rewrite its credentials secret around the same time,
+		// so only the transition away from the pre-rotation value matters.
+		Eventually(func(g Gomega) {
+			dep := deploymentFor(ctx, fixture.Name)
+			g.Expect(dep.Spec.Template.Annotations).To(HaveKey(saslUserVersionAnnotationKey))
+			g.Expect(dep.Spec.Template.Annotations[saslUserVersionAnnotationKey]).NotTo(
+				BeEmpty(), "the rotated SASL secret version must be recorded")
+			g.Expect(dep.Spec.Template.Annotations[saslUserVersionAnnotationKey]).NotTo(
+				Equal(beforeUserVersion), "the SASL secret version marker did not change")
+		}, statusTimeout, 2*time.Second).Should(Succeed(),
+			"timed out after %s waiting for the SASL credential rollout marker", statusTimeout)
 		fixture.waitRollout(ctx)
 		fixture.waitReady(ctx)
 
