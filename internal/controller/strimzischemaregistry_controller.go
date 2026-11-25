@@ -17,12 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
@@ -32,6 +34,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"software.sslmate.com/src/go-pkcs12"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -56,6 +59,12 @@ type StrimziSchemaRegistryReconciler struct {
 	Recorder recorder.EventRecorder
 }
 
+// finalizer and legacyFinalizer are only ever removed, never added. The
+// operator used to add a no-op finalizer, but owner references already
+// garbage-collect the managed resources, so it provided no cleanup while
+// coupling CR deletion to operator availability (H-2). The constants are
+// retained so CRs created by older releases can be migrated and deleted
+// cleanly during the upgrade window.
 const finalizer = "strimziregistryoperator.randsw.code/finalizer"
 const legacyFinalizer = "metrics.strimziregistryoperator.randsw.code/finalizer"
 const keyPrefix = "strimziregistryoperator.randsw.code"
@@ -146,6 +155,12 @@ func serviceValidationError(instance *strimziregistryoperatorv1alpha1.StrimziSch
 // the Schema Registry container references these exact keys. The required
 // keystore key follows the keystore type: tls-keystore.jks for JKS (the
 // default) and tls-keystore.p12 for PKCS12.
+//
+// The keystore material is decoded here, not just checked for presence (H-1):
+// pre-built material that cannot be opened with the supplied passwords would
+// otherwise surface only as a container crash loop with no status signal. A
+// failure is routed to Ready=False/InvalidTLSSecret (with a Warning event) by
+// the Reconcile caller, exactly like a broken PEM secret.
 func userTLSSecretValidationError(secretName string, secret *v1.Secret, keystoreType string) string {
 	if secret == nil {
 		return fmt.Sprintf("user-provided TLS secret %q not found", secretName)
@@ -163,6 +178,49 @@ func userTLSSecretValidationError(secretName string, secret *v1.Secret, keystore
 	if len(missing) > 0 {
 		return fmt.Sprintf("user-provided TLS secret %q is missing required key(s) or has empty values: %s",
 			secretName, strings.Join(missing, ", "))
+	}
+	return preBuiltKeystoreMaterialError(secretName, secret, keystoreType)
+}
+
+// preBuiltKeystoreMaterialError returns a non-empty message when a pre-built
+// keystore cannot be decoded with the passwords carried in the same secret.
+// JKS: the store integrity is verified with keystore_password and every
+// private key entry must decrypt with key_password (the container would fail
+// on either mismatch); at least one private key entry is required because the
+// REST API is a TLS server. PKCS12: the single store password decrypts the
+// key, so it is validated with keystore_password.
+func preBuiltKeystoreMaterialError(secretName string, secret *v1.Secret, keystoreType string) string {
+	storePassword := secret.Data["keystore_password"]
+	if keystoreType == keystoreTypePKCS12 {
+		key, _, _, err := pkcs12.DecodeChain(secret.Data["tls-keystore.p12"], string(storePassword))
+		if err != nil {
+			return fmt.Sprintf("user-provided TLS secret %q has an unparseable tls-keystore.p12 (wrong keystore_password or corrupt PKCS12): %v",
+				secretName, err)
+		}
+		if key == nil {
+			return fmt.Sprintf("user-provided TLS secret %q has no private key in tls-keystore.p12", secretName)
+		}
+		return ""
+	}
+
+	store := keystore.New(keystore.WithOrderedAliases())
+	if err := store.Load(bytes.NewReader(secret.Data["tls-keystore.jks"]), storePassword); err != nil {
+		return fmt.Sprintf("user-provided TLS secret %q has an unparseable tls-keystore.jks (wrong keystore_password or corrupt JKS): %v",
+			secretName, err)
+	}
+	privateKeys := 0
+	for _, alias := range store.Aliases() {
+		if !store.IsPrivateKeyEntry(alias) {
+			continue
+		}
+		privateKeys++
+		if _, err := store.GetPrivateKeyEntry(alias, secret.Data["key_password"]); err != nil {
+			return fmt.Sprintf("user-provided TLS secret %q: the private key entry in tls-keystore.jks cannot be decrypted with key_password: %v",
+				secretName, err)
+		}
+	}
+	if privateKeys == 0 {
+		return fmt.Sprintf("user-provided TLS secret %q has no private key entry in tls-keystore.jks", secretName)
 	}
 	return ""
 }
@@ -207,10 +265,10 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 	// re-triggers this reconcile forever because the controller watches its
 	// own CR via For().
 	origStatus := instance.Status.DeepCopy()
-	// Handle deletion BEFORE any finalizer migration: the API server rejects
-	// adding a finalizer to an object that already has a deletion timestamp,
-	// so migrating first would make CRs that still carry the legacy finalizer
-	// impossible to delete.
+	// Handle deletion first: the operator no longer adds a finalizer (H-2),
+	// but CRs created by older releases may still carry one. Removing it here
+	// is what lets those CRs complete deletion instead of staying stuck in
+	// Terminating.
 	isApplicationMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
 	if isApplicationMarkedToBeDeleted {
 		// Remove both the current and the legacy finalizer so CRs created
@@ -226,11 +284,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 		r.updateInstanceCountMetric(ctx)
 		return ctrl.Result{}, nil
 	}
-	// Migrate the finalizer from the legacy value to the current value, adding
-	// or removing finalizers in a single update so existing objects do not end
-	// up with a dangling legacy finalizer.
-	if err = r.migrateFinalizer(ctx, instance, logger); err != nil {
-		logger.Error(err, "Failed to migrate finalizer")
+	// Strip the no-op finalizers from live CRs upgraded from an older release.
+	// On a CR that never carried one this performs no write, so it never
+	// hot-loops.
+	if err = r.removeManagedFinalizers(ctx, instance, logger); err != nil {
+		logger.Error(err, "Failed to remove no-op finalizers")
 		monitoring.StrimziSchemaRegistryReconcileErrorsTotal.Inc()
 		r.setReconcileErrorStatus(ctx, instance, origStatus, logger, err)
 		return ctrl.Result{}, err
@@ -372,9 +430,11 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 			if r.Recorder != nil {
 				r.Recorder.Eventf(instance, nil, v1.EventTypeWarning, "InvalidTLSSecret", "Validate", "%s", msg)
 			}
-			// The Secret watch re-enqueues when the user fixes the secret;
-			// the requeue is only a safety net.
-			return ctrl.Result{RequeueAfter: time.Minute}, nil
+			// The Secret watch re-enqueues reconciliation when the user fixes
+			// the secret, so no self-requeue is needed. The former fixed 60s
+			// requeue hammered the API server for permanently broken secrets
+			// (H-3).
+			return ctrl.Result{}, nil
 		}
 	}
 
@@ -1440,27 +1500,29 @@ func (r *StrimziSchemaRegistryReconciler) updateInstanceCountMetric(ctx context.
 	monitoring.StrimziSchemaRegistryCurrentInstanceCount.Set(float64(len(list.Items)))
 }
 
-// migrateFinalizer ensures the object carries the current finalizer and drops
-// the legacy finalizer. When nothing changes it performs no write, avoiding a
-// reconcile hot loop. The legacy->current swap happens in a single update.
-func (r *StrimziSchemaRegistryReconciler) migrateFinalizer(
+// removeManagedFinalizers drops the no-op finalizers (current and legacy) left
+// on CRs created by older releases. The operator no longer adds a finalizer:
+// owner references already garbage-collect the managed resources, so the
+// finalizer provided no cleanup while coupling CR deletion to operator
+// availability (H-2). When no managed finalizer is present the helper performs
+// no write, avoiding a reconcile hot loop; both are removed in a single update
+// so a live upgraded CR never keeps a dangling finalizer.
+func (r *StrimziSchemaRegistryReconciler) removeManagedFinalizers(
 	ctx context.Context,
 	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
 	logger logr.Logger,
 ) error {
 	changed := false
-	if controllerutil.ContainsFinalizer(instance, legacyFinalizer) {
-		controllerutil.RemoveFinalizer(instance, legacyFinalizer)
-		changed = true
-	}
-	if !controllerutil.ContainsFinalizer(instance, finalizer) {
-		controllerutil.AddFinalizer(instance, finalizer)
-		changed = true
+	for _, f := range []string{finalizer, legacyFinalizer} {
+		if controllerutil.ContainsFinalizer(instance, f) {
+			controllerutil.RemoveFinalizer(instance, f)
+			changed = true
+		}
 	}
 	if !changed {
 		return nil
 	}
-	logger.V(1).Info("Migrating finalizers", "Finalizers", instance.Finalizers)
+	logger.V(1).Info("Removing no-op finalizers", "Finalizers", instance.Finalizers)
 	return r.Update(ctx, instance)
 }
 

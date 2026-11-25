@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-logr/logr"
 	//kafka "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -42,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -799,14 +801,17 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			By("Creating kafka user secret")
 			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(testCA.CACertPEM), "user.crt": []byte(userCert.UserCertPEM), "user.key": []byte(userCert.UserKeyPEM), "user.p12": userCert.PKCS12Data, "user.password": []byte(userCert.Password)}})).To(Succeed())
 
-			By("Creating custom TLS secret")
+			By("Creating custom TLS secret with decodable JKS material")
+			keystoreBytes, _, err := certprocessor.NewCertProcessor(logr.Logger{}).ConvertPEMToJKS(
+				ctx, string(userCert.UserCertPEM), string(userCert.UserKeyPEM), string(testCA.CACertPEM), "keystorepass")
+			Expect(err).NotTo(HaveOccurred())
 			customTLSSecret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: "my-custom-tls-secret", Namespace: namespace.Name},
 				Type:       corev1.SecretTypeOpaque,
 				Data: map[string][]byte{
-					"tls-keystore.jks":  []byte("fake-keystore-data"),
+					"tls-keystore.jks":  keystoreBytes,
 					"keystore_password": []byte("keystorepass"),
-					"key_password":      []byte("keypass"),
+					"key_password":      []byte("keystorepass"),
 				},
 			}
 			Expect(k8sClient.Create(ctx, customTLSSecret)).To(Succeed())
@@ -1123,8 +1128,8 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
 		})
 
-		It("should add finalizer on first reconcile and remove it on deletion", func() {
-			By("Creating StrimziSchemaRegistry without full dependencies (to test finalizer before deployment)")
+		It("should not add a finalizer and delete without operator involvement", func() {
+			By("Creating StrimziSchemaRegistry without full dependencies")
 			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
 				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
@@ -1134,27 +1139,23 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 
-			By("Reconciling to add finalizer (will fail later due to missing deps, but finalizer should be added)")
+			By("Reconciling (later steps fail on missing deps, but no finalizer may be added)")
 			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 
-			By("Checking that finalizer was added")
+			By("Checking that no finalizer was added (H-2)")
 			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
-			Expect(instance.Finalizers).To(ContainElement(finalizer), "Finalizer should be present after first reconcile")
+			Expect(instance.Finalizers).To(BeEmpty(), "owner references already handle GC; no finalizer should be added")
 
-			By("Deleting the resource to trigger finalizer removal")
+			By("Deleting the resource")
 			Expect(k8sClient.Delete(ctx, instance)).To(Succeed())
 
-			By("Reconciling to trigger finalizer removal")
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			By("Checking that resource is deleted after finalizer removal")
+			By("Checking that the resource is deleted without a reconcile")
 			Eventually(func() error {
 				updatedInstance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
 				return k8sClient.Get(ctx, typeNamespacedName, updatedInstance)
-			}, time.Minute, time.Second).ShouldNot(Succeed(), "Resource should be deleted after finalizer is removed")
+			}, time.Minute, time.Second).ShouldNot(Succeed(), "Resource without a finalizer should be deleted immediately")
 		})
 	})
 
@@ -4083,13 +4084,20 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Creating a valid user TLS secret")
+			By("Creating a valid user TLS secret with decodable JKS material")
+			ca, err := testutil.GenerateTestCA()
+			Expect(err).NotTo(HaveOccurred())
+			userCert, err := testutil.GenerateTestUserCert(ca, "store-password")
+			Expect(err).NotTo(HaveOccurred())
+			keystoreBytes, _, err := certprocessor.NewCertProcessor(logr.Logger{}).ConvertPEMToJKS(
+				ctx, string(userCert.UserCertPEM), string(userCert.UserKeyPEM), string(ca.CACertPEM), "store-password")
+			Expect(err).NotTo(HaveOccurred())
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: UserTLSSecretName, Namespace: specNamespace},
 				Data: map[string][]byte{
-					"tls-keystore.jks":  []byte("keystore-bytes"),
+					"tls-keystore.jks":  keystoreBytes,
 					"keystore_password": []byte("store-password"),
-					"key_password":      []byte("key-password"),
+					"key_password":      []byte("store-password"),
 				},
 			}
 			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
@@ -4115,6 +4123,68 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).NotTo(Equal("InvalidTLSSecret"))
+			Expect(instance.Status.Status).NotTo(Equal("InvalidTLSSecret"))
+		})
+
+		// T-5 (H-1): pre-built keystore material must be decoded at validation
+		// time. Garbage bytes used to pass validation (keys present) and only
+		// surfaced as a container crash loop with no status signal; now they
+		// produce InvalidTLSSecret + a Warning event and no Deployment, and
+		// fixing the secret converges without an operator restart.
+		It("should reject garbage pre-built keystore material and converge once it is fixed (T-5)", func() {
+			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("Creating a user TLS secret whose JKS bytes are garbage")
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: UserTLSSecretName, Namespace: specNamespace},
+				Data: map[string][]byte{
+					"tls-keystore.jks":  []byte("not-a-keystore"),
+					"keystore_password": []byte("store-password"),
+					"key_password":      []byte("store-password"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+
+			By("Reconciling: the garbage keystore must route to InvalidTLSSecret")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("InvalidTLSSecret"))
+			Expect(cond.Message).To(ContainSubstring("tls-keystore.jks"))
+			Expect(instance.Status.Status).To(Equal("InvalidTLSSecret"))
+
+			By("Verifying no Deployment was created")
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deploymentNamespacedName, deployment)).NotTo(Succeed())
+
+			By("Fixing the secret with decodable JKS material")
+			ca, err := testutil.GenerateTestCA()
+			Expect(err).NotTo(HaveOccurred())
+			userCert, err := testutil.GenerateTestUserCert(ca, "store-password")
+			Expect(err).NotTo(HaveOccurred())
+			keystoreBytes, _, err := certprocessor.NewCertProcessor(logr.Logger{}).ConvertPEMToJKS(
+				ctx, string(userCert.UserCertPEM), string(userCert.UserKeyPEM), string(ca.CACertPEM), "store-password")
+			Expect(err).NotTo(HaveOccurred())
+			secret.Data["tls-keystore.jks"] = keystoreBytes
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+
+			By("Reconciling: the Deployment must now be created")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, deploymentNamespacedName, deployment)).To(Succeed())
+
+			By("Reconciling again so the Ready condition leaves InvalidTLSSecret")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
+			cond = meta.FindStatusCondition(instance.Status.Conditions, "Ready")
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Reason).NotTo(Equal("InvalidTLSSecret"))
 			Expect(instance.Status.Status).NotTo(Equal("InvalidTLSSecret"))
@@ -4564,10 +4634,10 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 	})
 
-	// The deletion-timestamp check must run BEFORE finalizer migration: the
-	// API server rejects adding a finalizer to an object that is already
-	// being deleted, which would leave CRs that still carry the legacy
-	// finalizer stuck in Terminating forever.
+	// The operator no longer adds a finalizer (H-2), but CRs created by older
+	// releases still carry one. Reconciling them must remove it — live or
+	// deleting — without ever adding it back, otherwise upgraded CRs would stay
+	// stuck in Terminating forever.
 	Context("When deleting CRs that carry legacy or current finalizers", func() {
 		ctx := context.Background()
 		specCounter := 0
@@ -4661,33 +4731,32 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			}, time.Minute, time.Second).ShouldNot(Succeed(), "CR with the current finalizer should be deleted")
 		})
 
-		It("should migrate the legacy finalizer to the current one on a live CR", func() {
+		It("should remove the legacy finalizer from a live CR without adding a new one", func() {
 			By("Creating a live CR that carries only the legacy finalizer")
 			Expect(k8sClient.Create(ctx, newFinalizerResource([]string{legacyFinalizer}))).To(Succeed())
 
-			By("Reconciling (later steps may fail on missing dependencies; migration runs first)")
+			By("Reconciling (later steps may fail on missing dependencies; cleanup runs first)")
 			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 
-			By("Checking that the legacy finalizer was swapped for the current one")
+			By("Checking that the legacy finalizer was removed and no new one was added")
 			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
-			Expect(instance.Finalizers).To(ContainElement(finalizer), "current finalizer should be added")
-			Expect(instance.Finalizers).NotTo(ContainElement(legacyFinalizer), "legacy finalizer should be removed")
+			Expect(instance.Finalizers).To(BeEmpty(), "the no-op finalizer must not be replaced")
 		})
 
-		It("should not churn finalizers on a live CR that already has the current one", func() {
-			By("Creating a live CR that carries the current finalizer")
+		It("should remove the no-op current finalizer from a live CR", func() {
+			By("Creating a live CR that carries the current no-op finalizer")
 			Expect(k8sClient.Create(ctx, newFinalizerResource([]string{finalizer}))).To(Succeed())
 
 			By("Reconciling")
 			controllerReconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 
-			By("Checking that the finalizer list is unchanged")
+			By("Checking that the no-op finalizer was removed")
 			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
-			Expect(instance.Finalizers).To(Equal([]string{finalizer}), "no finalizer churn expected")
+			Expect(instance.Finalizers).To(BeEmpty(), "upgraded live CRs must drop the no-op finalizer")
 		})
 	})
 })
