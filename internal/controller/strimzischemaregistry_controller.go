@@ -1185,13 +1185,41 @@ func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSecretVersion(
 	return true, nil
 }
 
+// mapKafkaToRequests enqueues reconcile requests for the StrimziSchemaRegistry
+// CRs attached to the Kafka cluster represented by the watched Kafka CR.
+//
+// Strimzi never sets the strimzi.io/cluster label on the Kafka CR itself — it
+// only labels resources it manages and requires the label on KafkaUser CRs.
+// The Kafka CR's identity is its name, which is the value the
+// StrimziSchemaRegistry CRs carry under strimzi.io/cluster. Matching on the
+// name keeps Kafka events (including status.listeners/bootstrap changes)
+// flowing to reconciliation without any artificial label on the watched CR.
+func (r *StrimziSchemaRegistryReconciler) mapKafkaToRequests(ctx context.Context, obj client.Object) []reconcile.Request {
+	list := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+	if err := r.List(ctx, list,
+		client.InNamespace(obj.GetNamespace()),
+		client.MatchingLabels{strimziClusterLabel: obj.GetName()},
+	); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      list.Items[i].Name,
+				Namespace: list.Items[i].Namespace,
+			},
+		})
+	}
+	return requests
+}
+
 // mapStrimziResourceToRequests enqueues reconcile requests for the
 // StrimziSchemaRegistry CRs attached to the same Kafka cluster as the watched
-// object, matched via the strimzi.io/cluster label. It backs the Kafka and
-// KafkaUser watches so listener/bootstrap changes on the Kafka CR and
-// authentication changes on the KafkaUser CR trigger reconciliation.
-// When requireNameMatch is true (KafkaUser), only the CR whose name equals
-// the watched object's name is enqueued, mirroring getKafkaUser.
+// object, matched via the strimzi.io/cluster label. It backs the KafkaUser
+// watch: Strimzi requires that label on KafkaUser CRs and getKafkaUser
+// resolves the user by name, so with requireNameMatch=true only the CR whose
+// name equals the watched object's name is enqueued, mirroring getKafkaUser.
 func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx context.Context, obj client.Object, requireNameMatch bool) []reconcile.Request {
 	clusterName := obj.GetLabels()[strimziClusterLabel]
 	if clusterName == "" {
@@ -1381,9 +1409,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		).
 		Watches(
 			&kafka.Kafka{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				return r.mapStrimziResourceToRequests(ctx, obj, false)
-			}),
+			handler.EnqueueRequestsFromMapFunc(r.mapKafkaToRequests),
 		).
 		Watches(
 			&kafka.KafkaUser{},
