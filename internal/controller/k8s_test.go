@@ -3623,17 +3623,20 @@ func TestPortFromBootstrapServer(t *testing.T) {
 	})
 }
 
-func TestMigrateFinalizer(t *testing.T) {
+func TestRemoveManagedFinalizers(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
 
-	t.Run("legacy removed and current added in one pass", func(t *testing.T) {
+	// H-2: the operator no longer adds a finalizer (owner references already
+	// garbage-collect the managed resources), but it must strip the no-op
+	// finalizers left by older releases so upgraded CRs can be deleted.
+	t.Run("legacy finalizer is removed without adding the current one", func(t *testing.T) {
 		inst := newTestInstance()
 		inst.Finalizers = []string{legacyFinalizer}
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		if err := reconciler.migrateFinalizer(context.Background(), inst, logr.Logger{}); err != nil {
+		if err := reconciler.removeManagedFinalizers(context.Background(), inst, logr.Logger{}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
@@ -3641,21 +3644,18 @@ func TestMigrateFinalizer(t *testing.T) {
 		if err := client.Get(context.Background(), types.NamespacedName{Name: "test-sr", Namespace: "default"}, got); err != nil {
 			t.Fatalf("unexpected get error: %v", err)
 		}
-		if containsFinalizer(got.Finalizers, legacyFinalizer) {
-			t.Errorf("legacy finalizer should be removed, got %v", got.Finalizers)
-		}
-		if !containsFinalizer(got.Finalizers, finalizer) {
-			t.Errorf("current finalizer should be added, got %v", got.Finalizers)
+		if len(got.Finalizers) != 0 {
+			t.Errorf("expected no finalizers after cleanup, got %v", got.Finalizers)
 		}
 	})
 
-	t.Run("already migrated is a no-op", func(t *testing.T) {
+	t.Run("current no-op finalizer is removed", func(t *testing.T) {
 		inst := newTestInstance()
 		inst.Finalizers = []string{finalizer}
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 
-		if err := reconciler.migrateFinalizer(context.Background(), inst, logr.Logger{}); err != nil {
+		if err := reconciler.removeManagedFinalizers(context.Background(), inst, logr.Logger{}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
@@ -3663,14 +3663,13 @@ func TestMigrateFinalizer(t *testing.T) {
 		if err := client.Get(context.Background(), types.NamespacedName{Name: "test-sr", Namespace: "default"}, got); err != nil {
 			t.Fatalf("unexpected get error: %v", err)
 		}
-		if len(got.Finalizers) != 1 || got.Finalizers[0] != finalizer {
-			t.Errorf("finalizers should be unchanged after idempotent migration, got %v", got.Finalizers)
+		if len(got.Finalizers) != 0 {
+			t.Errorf("expected the no-op finalizer to be removed, got %v", got.Finalizers)
 		}
 	})
 
-	t.Run("already migrated issues no update", func(t *testing.T) {
+	t.Run("no managed finalizer issues no update", func(t *testing.T) {
 		inst := newTestInstance()
-		inst.Finalizers = []string{finalizer}
 		updates := 0
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
@@ -3682,41 +3681,14 @@ func TestMigrateFinalizer(t *testing.T) {
 		}).Build()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: fakeClient, Scheme: scheme}
 
-		if err := reconciler.migrateFinalizer(context.Background(), inst, logr.Logger{}); err != nil {
+		if err := reconciler.removeManagedFinalizers(context.Background(), inst, logr.Logger{}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
 		if updates != 0 {
-			t.Errorf("expected no Update calls for an already migrated object, got %d", updates)
+			t.Errorf("expected no Update calls for a CR without managed finalizers, got %d", updates)
 		}
 	})
-
-	t.Run("fresh object gets current finalizer", func(t *testing.T) {
-		inst := newTestInstance()
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
-		reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
-
-		if err := reconciler.migrateFinalizer(context.Background(), inst, logr.Logger{}); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		got := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
-		if err := client.Get(context.Background(), types.NamespacedName{Name: "test-sr", Namespace: "default"}, got); err != nil {
-			t.Fatalf("unexpected get error: %v", err)
-		}
-		if !containsFinalizer(got.Finalizers, finalizer) {
-			t.Errorf("expected current finalizer to be added, got %v", got.Finalizers)
-		}
-	})
-}
-
-func containsFinalizer(finalizers []string, target string) bool {
-	for _, f := range finalizers {
-		if f == target {
-			return true
-		}
-	}
-	return false
 }
 
 func TestClientAuthValidationError(t *testing.T) {

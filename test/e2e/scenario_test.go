@@ -194,11 +194,10 @@ func applyRegistryCRFor(ctx context.Context, name, topic, groupID string,
 	}
 	desiredSpec := cr.Spec
 
-	// The operator mutates the CR while reconciling it (it adds its finalizer
-	// and writes the status subresource), so a plain Get followed by Update
-	// races the reconcile and fails with a 409 Conflict. Retry on conflict,
-	// re-reading the object inside the closure so every attempt carries the
-	// latest resourceVersion.
+	// The operator writes the CR status subresource while reconciling it, so a
+	// plain Get followed by Update races the reconcile and fails with a 409
+	// Conflict. Retry on conflict, re-reading the object inside the closure so
+	// every attempt carries the latest resourceVersion.
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		existing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}, existing)

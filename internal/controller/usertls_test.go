@@ -31,6 +31,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -45,13 +46,58 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// validUserTLSSecretData returns secret data satisfying the user-provided TLS
-// secret contract: a JKS keystore plus both passwords.
+// validUserTLSSecretData returns secret data satisfying the PRESENCE part of
+// the user-provided TLS secret contract: a JKS keystore plus both passwords.
+// The keystore bytes are deliberately not decodable; tests that exercise the
+// material validation (H-1) must use validPrebuiltJKSSecretData instead.
 func validUserTLSSecretData() map[string][]byte {
 	return map[string][]byte{
 		"tls-keystore.jks":  []byte("keystore-bytes"),
 		"keystore_password": []byte("store-password"),
 		"key_password":      []byte("key-password"),
+	}
+}
+
+// validPrebuiltJKSSecretData builds a real, decodable JKS keystore secret. The
+// store and key passwords are the same, matching what the conversion pipeline
+// produces and what the Schema Registry container expects.
+func validPrebuiltJKSSecretData(t *testing.T) map[string][]byte {
+	t.Helper()
+	pemData, _ := realPEMSecretDataWithCA(t)
+	password := "store-password"
+	keystoreBytes, _, err := certprocessor.NewCertProcessor(logr.Logger{}).ConvertPEMToJKS(
+		context.Background(),
+		string(pemData["tls.crt"]),
+		string(pemData["tls.key"]),
+		string(pemData["ca.crt"]),
+		password,
+	)
+	if err != nil {
+		t.Fatalf("failed to build a test JKS keystore: %v", err)
+	}
+	return map[string][]byte{
+		"tls-keystore.jks":  keystoreBytes,
+		"keystore_password": []byte(password),
+		"key_password":      []byte(password),
+	}
+}
+
+// validPrebuiltPKCS12SecretData builds a real, decodable PKCS12 keystore
+// secret using the shared test-certificate generator.
+func validPrebuiltPKCS12SecretData(t *testing.T) map[string][]byte {
+	t.Helper()
+	ca, err := testutil.GenerateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate a test CA: %v", err)
+	}
+	userCert, err := testutil.GenerateTestUserCert(ca, "p12-password")
+	if err != nil {
+		t.Fatalf("failed to generate a test user certificate: %v", err)
+	}
+	return map[string][]byte{
+		"tls-keystore.p12":  userCert.PKCS12Data,
+		"keystore_password": []byte(userCert.Password),
+		"key_password":      []byte(userCert.Password),
 	}
 }
 
@@ -119,9 +165,27 @@ func TestUserTLSSecretValidationError(t *testing.T) {
 			wantMentions: []string{"tls-keystore.jks", "keystore_password", "key_password"},
 		},
 		{
-			name:       "valid secret passes",
+			name:       "valid JKS secret passes",
 			secretName: "user-tls",
-			secret:     &corev1.Secret{Data: validUserTLSSecretData()},
+			secret:     &corev1.Secret{Data: validPrebuiltJKSSecretData(t)},
+		},
+		{
+			name:         "garbage JKS material with the right password is invalid (T-4)",
+			secretName:   "user-tls",
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls-keystore.jks": []byte("not-a-keystore"), "keystore_password": []byte("store-password"), "key_password": []byte("store-password")}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls-keystore.jks"},
+		},
+		{
+			name:       "JKS with a wrong key_password is invalid (T-4)",
+			secretName: "user-tls",
+			secret: func() *corev1.Secret {
+				data := validPrebuiltJKSSecretData(t)
+				data["key_password"] = []byte("wrong-key-password")
+				return &corev1.Secret{Data: data}
+			}(),
+			wantInvalid:  true,
+			wantMentions: []string{"key_password"},
 		},
 		// PKCS12 keystore contract (spec.keystoretype: PKCS12).
 		{
@@ -160,11 +224,15 @@ func TestUserTLSSecretValidationError(t *testing.T) {
 			name:         "PKCS12: valid p12 secret passes",
 			secretName:   "user-tls",
 			keystoreType: keystoreTypePKCS12,
-			secret: &corev1.Secret{Data: map[string][]byte{
-				"tls-keystore.p12":  []byte("p12-bytes"),
-				"keystore_password": []byte("store-password"),
-				"key_password":      []byte("key-password"),
-			}},
+			secret:       &corev1.Secret{Data: validPrebuiltPKCS12SecretData(t)},
+		},
+		{
+			name:         "PKCS12: garbage p12 material is invalid (T-4)",
+			secretName:   "user-tls",
+			keystoreType: keystoreTypePKCS12,
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls-keystore.p12": []byte("not-a-p12"), "keystore_password": []byte("store-password"), "key_password": []byte("store-password")}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls-keystore.p12"},
 		},
 		{
 			name:         "PKCS12: nil secret is invalid",
@@ -1229,12 +1297,19 @@ func TestValidateUserTLSSecret(t *testing.T) {
 		{
 			name:     "JKS keystore contract still passes",
 			instance: newInstance("user-tls"),
-			secret:   &corev1.Secret{Data: validUserTLSSecretData()},
+			secret:   &corev1.Secret{Data: validPrebuiltJKSSecretData(t)},
+		},
+		{
+			name:         "garbage JKS keystore material is invalid (T-4)",
+			instance:     newInstance("user-tls"),
+			secret:       &corev1.Secret{Data: map[string][]byte{"tls-keystore.jks": []byte("not-a-keystore"), "keystore_password": []byte("store-password"), "key_password": []byte("store-password")}},
+			wantInvalid:  true,
+			wantMentions: []string{"tls-keystore.jks"},
 		},
 		{
 			name:         "PKCS12 keystore contract is validated per keystoretype",
 			instance:     newInstance("user-tls"),
-			secret:       &corev1.Secret{Data: validUserTLSSecretData()},
+			secret:       &corev1.Secret{Data: validPrebuiltJKSSecretData(t)},
 			wantInvalid:  true,
 			wantMentions: []string{"tls-keystore.p12"},
 		},
