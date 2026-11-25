@@ -486,4 +486,38 @@ func TestRecordedEventsCarryNonEmptyAction(t *testing.T) {
 		}
 		assertEventAction(t, recorder.drain(), corev1.EventTypeNormal, "DeploymentRecreated", "RecreateDeployment")
 	})
+
+	t.Run("SASLCredentialsRolled", func(t *testing.T) {
+		scheme := annotationRolloutScheme(t)
+		recorder := &capturingEventRecorder{}
+		inst := newTestInstance()
+		inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
+		auth := kafkaAuth{Protocol: "SASL_PLAINTEXT", Mode: authSASLPlaintext, NeedsSASL: true}
+		depName := types.NamespacedName{Name: inst.Name + deploySuffix, Namespace: inst.Namespace}
+
+		// The KafkaUser SCRAM secret exists; the Deployment records an older
+		// secret version, so the handler must roll the pods onto the new
+		// credentials and announce it with an event.
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            inst.Name,
+				Namespace:       inst.Namespace,
+				ResourceVersion: "2000",
+			},
+			Data: map[string][]byte{"sasl.jaas.config": []byte("jaas")},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, userSecret,
+				newAnnotationRolloutDeployment(depName.Name, depName.Namespace, map[string]string{saslUserVersionKey: "1000"})).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme, Recorder: recorder}
+
+		if _, err := r.handleSASLSecretRotation(ctx, inst, logger, "kafka-cluster", auth); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertEventAction(t, recorder.drain(), corev1.EventTypeNormal, "SASLCredentialsRolled", "RollCredentials")
+		if got := deploymentAnnotation(t, client, depName, saslUserVersionKey); got != "2000" {
+			t.Errorf("expected the rolled Deployment to record the new KafkaUser secret version %q, got %q", "2000", got)
+		}
+	})
 }

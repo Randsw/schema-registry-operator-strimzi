@@ -132,7 +132,7 @@ cluster they reference) must live in the release namespace.
 | `image.repository` | `ghcr.io/randsw/strimzi-schema-registry-operator` | Operator image. |
 | `image.tag` | *(unset)* | Operator image tag. Defaults to the chart `appVersion` (the operator version the chart was released with); override only to pin a different build, and avoid mutable tags such as `latest`. |
 | `metrics.enabled` | `true` | Create a `Service` for the operator metrics endpoint. |
-| `metrics.secure` | `false` | Serve metrics over HTTPS with authn/authz. |
+| `metrics.secure` | `true` | Serve metrics over HTTPS with authn/authz. controller-runtime generates an in-memory self-signed serving certificate, so no cert-manager or Secret is required; scrapers must present a bearer token allowed to `get` the non-resource URL `/metrics` (bind the release's metrics-reader `ClusterRole`). Opt out with `--set metrics.secure=false` to serve plain HTTP with **no** authn/authz. |
 | `metrics.port` | `8080` | Port the metrics endpoint binds to. |
 | `rbac.namespaceScoped` | `false` | `false`: cluster-wide `ClusterRole`/`ClusterRoleBinding`, watch all namespaces. `true`: namespaced `Role`/`RoleBinding` in the release namespace, watch only that namespace. |
 | `nameOverride` / `fullnameOverride` | `""` / `""` | Keep empty so resource names derive from the release name (see [Resource naming](#resource-naming)); overrides pin a shared name across releases. |

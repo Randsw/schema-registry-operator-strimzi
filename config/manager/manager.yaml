@@ -50,13 +50,10 @@ spec:
       #               - linux
       securityContext:
         runAsNonRoot: true
-        # TODO(user): For common cases that do not require escalating privileges
-        # it is recommended to ensure that all your Pods/Containers are restrictive.
-        # More info: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
-        # Please uncomment the following code if your project does NOT have to work on old Kubernetes
-        # versions < 1.19 or on vendors versions which do NOT support this field by default (i.e. Openshift < 4.11 ).
-        # seccompProfile:
-        #   type: RuntimeDefault
+        # RuntimeDefault seccomp profile: required by the PSS restricted
+        # standard and mirrored by the Helm chart's podSecurityContext.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - command:
         - /manager
@@ -67,9 +64,17 @@ spec:
         name: manager
         securityContext:
           allowPrivilegeEscalation: false
+          # The manager binary writes nothing outside /tmp (controller-runtime's
+          # in-memory metrics certificate needs no files), so the root
+          # filesystem stays read-only.
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
           capabilities:
             drop:
             - "ALL"
+        volumeMounts:
+        - mountPath: /tmp
+          name: temp-volume
         livenessProbe:
           httpGet:
             path: /healthz
@@ -92,4 +97,9 @@ spec:
             cpu: 10m
             memory: 64Mi
       serviceAccountName: controller-manager
+      volumes:
+      - name: temp-volume
+        emptyDir:
+          sizeLimit: 500Mi
+          medium: Memory
       terminationGracePeriodSeconds: 10

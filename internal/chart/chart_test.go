@@ -351,6 +351,55 @@ func anyListContains(list []any, want string) bool {
 	return false
 }
 
+// containerArgs returns the first container's args from a rendered Deployment.
+func containerArgs(t *testing.T, dep map[string]any) []string {
+	t.Helper()
+	spec, _ := dep["spec"].(map[string]any)
+	template, _ := spec["template"].(map[string]any)
+	podSpec, _ := template["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	if len(containers) == 0 {
+		t.Fatal("rendered Deployment has no containers")
+	}
+	container, _ := containers[0].(map[string]any)
+	raw, _ := container["args"].([]any)
+	args := make([]string, 0, len(raw))
+	for _, a := range raw {
+		s, _ := a.(string)
+		args = append(args, s)
+	}
+	return args
+}
+
+// hasTmpEmptyDir reports whether the rendered pod spec backs /tmp with an
+// emptyDir volume mounted into one of its containers. With
+// readOnlyRootFilesystem the container has no other writable path.
+func hasTmpEmptyDir(podSpec map[string]any) bool {
+	volumes, _ := podSpec["volumes"].([]any)
+	containers, _ := podSpec["containers"].([]any)
+	for _, v := range volumes {
+		vol, _ := v.(map[string]any)
+		if _, ok := vol["emptyDir"]; !ok {
+			continue
+		}
+		name, _ := vol["name"].(string)
+		if name == "" {
+			continue
+		}
+		for _, c := range containers {
+			container, _ := c.(map[string]any)
+			mounts, _ := container["volumeMounts"].([]any)
+			for _, m := range mounts {
+				mount, _ := m.(map[string]any)
+				if mount["name"] == name && mount["mountPath"] == "/tmp" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // TestValuesManagerRoleGrantsEvents guards the events RBAC contract at the
 // values level: the manager role must grant create/patch on events for both
 // the core and the events.k8s.io API groups. The operator emits events
@@ -521,6 +570,8 @@ func TestValuesPodSecurityStandardsRestricted(t *testing.T) {
 		Image struct {
 			SecurityContext struct {
 				AllowPrivilegeEscalation *bool `json:"allowPrivilegeEscalation"`
+				ReadOnlyRootFilesystem   *bool `json:"readOnlyRootFilesystem"`
+				RunAsNonRoot             *bool `json:"runAsNonRoot"`
 				Capabilities             struct {
 					Drop []string `json:"drop"`
 				} `json:"capabilities"`
@@ -532,6 +583,9 @@ func TestValuesPodSecurityStandardsRestricted(t *testing.T) {
 				Type string `json:"type"`
 			} `json:"seccompProfile"`
 		} `json:"podSecurityContext"`
+		Metrics struct {
+			Secure *bool `json:"secure"`
+		} `json:"metrics"`
 	}
 	if err := sigsyaml.Unmarshal(data, &values); err != nil {
 		t.Fatalf("failed to parse values.yaml: %v", err)
@@ -542,6 +596,15 @@ func TestValuesPodSecurityStandardsRestricted(t *testing.T) {
 	}
 	if !slices.Contains(values.Image.SecurityContext.Capabilities.Drop, "ALL") {
 		t.Errorf("image.securityContext.capabilities.drop = %v, want it to include ALL for the PSS restricted standard; the operator needs no Linux capabilities", values.Image.SecurityContext.Capabilities.Drop)
+	}
+	if values.Image.SecurityContext.ReadOnlyRootFilesystem == nil || !*values.Image.SecurityContext.ReadOnlyRootFilesystem {
+		t.Error("image.securityContext.readOnlyRootFilesystem must be true for the PSS restricted standard; the operator writes only to the /tmp emptyDir")
+	}
+	if values.Image.SecurityContext.RunAsNonRoot == nil || !*values.Image.SecurityContext.RunAsNonRoot {
+		t.Error("image.securityContext.runAsNonRoot must be true so the container stays non-root even if the pod-level setting is overridden")
+	}
+	if values.Metrics.Secure == nil || !*values.Metrics.Secure {
+		t.Error("metrics.secure must default to true so the operator metrics endpoint requires authentication and authorization; plain HTTP requires an explicit metrics.secure=false opt-out")
 	}
 	if values.PodSecurityContext.RunAsNonRoot == nil || !*values.PodSecurityContext.RunAsNonRoot {
 		t.Error("podSecurityContext.runAsNonRoot must be true for the PSS restricted standard")
@@ -589,6 +652,42 @@ func TestRenderedDeploymentPodSecurityRestricted(t *testing.T) {
 			drop, _ := caps["drop"].([]any)
 			if !anyListContains(drop, "ALL") {
 				t.Errorf("rendered container securityContext.capabilities.drop = %v, want it to include ALL", drop)
+			}
+			if ro, ok := containerSC["readOnlyRootFilesystem"].(bool); !ok || !ro {
+				t.Errorf("rendered container readOnlyRootFilesystem = %v, want true", containerSC["readOnlyRootFilesystem"])
+			}
+			if nonRoot, ok := containerSC["runAsNonRoot"].(bool); !ok || !nonRoot {
+				t.Errorf("rendered container runAsNonRoot = %v, want true", containerSC["runAsNonRoot"])
+			}
+			if !hasTmpEmptyDir(podSpec) {
+				t.Error("rendered pod must mount a writable emptyDir at /tmp; with readOnlyRootFilesystem the container has no other writable path")
+			}
+		})
+	}
+}
+
+// TestRenderedDeploymentMetricsSecureDefaultAndOptOut locks the
+// secure-by-default metrics contract: the chart passes --metrics-secure=true
+// unless the operator explicitly opts out, and the documented opt-out renders
+// plain HTTP metrics.
+func TestRenderedDeploymentMetricsSecureDefaultAndOptOut(t *testing.T) {
+	if !helmAvailable(t) {
+		t.Skip("helm not installed; skipping helm template rendering test")
+	}
+	for _, tc := range []struct {
+		name string
+		sets []string
+		want string
+	}{
+		{name: "secure by default", sets: nil, want: "--metrics-secure=true"},
+		{name: "documented opt-out", sets: []string{"--set", "metrics.secure=false"}, want: "--metrics-secure=false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docs := renderedDocs(t, renderChart(t, tc.sets...))
+			dep := findRendered(t, docs, "Deployment", "")
+			args := containerArgs(t, dep)
+			if !slices.Contains(args, tc.want) {
+				t.Errorf("rendered container args = %v, want them to contain %q", args, tc.want)
 			}
 		})
 	}
@@ -791,6 +890,46 @@ func TestChartManagerRoleMatchesGeneratedRBAC(t *testing.T) {
 	for key := range chartRules {
 		if !genRules[key] {
 			t.Errorf("chart manager role grants a rule config/rbac/role.yaml does not (keep the chart in sync with the generated role, or document the intentional difference here): %s", key)
+		}
+	}
+}
+
+// TestGeneratedRBACOmitsUnusedPatchVerbs guards the least-privilege contract
+// (audit M-1): the controller never patches Deployments, Services, Secrets or
+// NetworkPolicies (it creates, updates or deletes them), so the generated
+// manager role must not grant the patch verb on those resources. An unused
+// patch grant would let a compromised operator mutate pod specs or credentials
+// field-by-field instead of only replacing whole objects it already owns.
+func TestGeneratedRBACOmitsUnusedPatchVerbs(t *testing.T) {
+	genData, err := os.ReadFile(filepath.Join(repoRoot(t), "config", "rbac", "role.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read config/rbac/role.yaml: %v", err)
+	}
+	var generated struct {
+		Rules []struct {
+			APIGroups []string `yaml:"apiGroups"`
+			Resources []string `yaml:"resources"`
+			Verbs     []string `yaml:"verbs"`
+		} `yaml:"rules"`
+	}
+	if err := sigsyaml.Unmarshal(genData, &generated); err != nil {
+		t.Fatalf("failed to parse config/rbac/role.yaml: %v", err)
+	}
+
+	guarded := map[string]bool{
+		"deployments":     true,
+		"services":        true,
+		"secrets":         true,
+		"networkpolicies": true,
+	}
+	for _, rule := range generated.Rules {
+		for _, resource := range rule.Resources {
+			if !guarded[resource] {
+				continue
+			}
+			if slices.Contains(rule.Verbs, "patch") {
+				t.Errorf("generated manager role grants patch on %s (apiGroups %v), but the controller only creates/updates/deletes it; drop the verb from the kubebuilder marker", resource, rule.APIGroups)
+			}
 		}
 	}
 }

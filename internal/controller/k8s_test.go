@@ -4644,12 +4644,13 @@ func TestGCOrphanedSecrets(t *testing.T) {
 
 	// controlledSecret returns a secret carrying a controller owner
 	// reference to the named StrimziSchemaRegistry, as the operator's own
-	// output secrets do.
+	// output secrets do (including the app label the GC List selects on).
 	controlledSecret := func(name, ownerName string) *corev1.Secret {
 		return &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
 				Namespace: "default",
+				Labels:    map[string]string{operatorAppLabelKey: operatorAppLabelValue},
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
 					Kind:       "StrimziSchemaRegistry",
@@ -4757,6 +4758,23 @@ func TestGCOrphanedSecrets(t *testing.T) {
 		}
 	})
 
+	t.Run("controller-owned secrets without the operator app label are not listed", func(t *testing.T) {
+		// The GC List is label-scoped to the operator's app label. A
+		// controller-owned secret that lacks the label (for example a
+		// hand-crafted or pre-upgrade object) is outside the operator's
+		// label set, so the GC must never fetch or delete it.
+		unlabeled := controlledSecret("gone-sr-jks", "gone-sr")
+		unlabeled.Labels = nil
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(inst, unlabeled).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
+		r.gcOrphanedSecrets(context.Background(), inst, logr.Logger{})
+		if !exists(t, c, "gone-sr-jks") {
+			t.Error("expected a controller-owned secret without the operator app label to be kept; the GC List must be label-scoped")
+		}
+	})
+
 	t.Run("no error loop after a GC deletion", func(t *testing.T) {
 		// Deleting an orphan emits a Secret Delete event that maps back to
 		// the CR named in the owner reference. For a deleted owner the
@@ -4809,6 +4827,7 @@ func TestGCOrphanedSecretsOwnerGetError(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "other-sr-jks",
 			Namespace: "default",
+			Labels:    map[string]string{operatorAppLabelKey: operatorAppLabelValue},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
 				Kind:       "StrimziSchemaRegistry",
