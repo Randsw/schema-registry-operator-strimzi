@@ -1,3 +1,44 @@
+## [1.20.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.20.0...1.20.1) (2026-11-25)
+
+### :scissors: Refactor
+
+* drop the dead error branches in computeSpecHash ([#328](https://github.com/Randsw/schema-registry-operator-strimzi/issues/328)) ([e5f0db5](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e5f0db50c55da824f166443bd912d49e97846639))
+
+### 🦊 CI/CD
+
+* **deps:** bump github.com/prometheus/common from 0.72.0 to 0.74.0 ([#336](https://github.com/Randsw/schema-registry-operator-strimzi/issues/336)) ([b42cd02](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b42cd022bdcc0d1bef0cc725ad11d64ad8d31f71))
+* **deps:** bump sigs.k8s.io/controller-runtime from 0.25.2 to 0.25.3 ([#327](https://github.com/Randsw/schema-registry-operator-strimzi/issues/327)) ([d7e903f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d7e903f65b69db341fb0f6b6046d397a80a0c880))
+
+### 🧪 Tests
+
+* cover SetupWithManager watch wiring against a real envtest manager ([#315](https://github.com/Randsw/schema-registry-operator-strimzi/issues/315)) ([517b468](https://github.com/Randsw/schema-registry-operator-strimzi/commit/517b468c6b08401b7097ff3d6bb33b6546184bc1))
+* cover the certProcessor p12/expiry error paths and the controller skip path ([#319](https://github.com/Randsw/schema-registry-operator-strimzi/issues/319)) ([3cfdccf](https://github.com/Randsw/schema-registry-operator-strimzi/commit/3cfdccf1248c59df1edc7c119784806c979fcf61))
+* cover the Reconcile API-error paths with fake-client interceptors ([#317](https://github.com/Randsw/schema-registry-operator-strimzi/issues/317)) ([2ea8b8e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/2ea8b8e5f29a3818088caf0c7feeb4dd58706e68))
+* cover the rotation and drift error paths and the legacy-mount migration ([#320](https://github.com/Randsw/schema-registry-operator-strimzi/issues/320)) ([fb267e6](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fb267e6cc43912d7094dd23f5b18f2ef0721f0f0))
+* cover the watch pipeline and the Service transition in envtest ([#329](https://github.com/Randsw/schema-registry-operator-strimzi/issues/329)) ([e335154](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e335154955ae21a3a81c71bf754a2189814ff465))
+* fail the controller suite cleanly when Strimzi CRD download fails ([#314](https://github.com/Randsw/schema-registry-operator-strimzi/issues/314)) ([1da8cdb](https://github.com/Randsw/schema-registry-operator-strimzi/commit/1da8cdb0bc7495f71d29ea01760b1fe34a59d7b4))
+* phase 1 — NetworkPolicy and drift-normalization coverage ([#331](https://github.com/Randsw/schema-registry-operator-strimzi/issues/331)) ([7c1db1c](https://github.com/Randsw/schema-registry-operator-strimzi/commit/7c1db1c3348fd061d021322c3a382bcdce568955))
+* phase 2 — rotation, TLS-expiry, GC and certProcessor error branches ([#332](https://github.com/Randsw/schema-registry-operator-strimzi/issues/332)) ([30e903d](https://github.com/Randsw/schema-registry-operator-strimzi/commit/30e903d852e6bb44185ff3537f7aa198f4abf4f6)), closes [#1](https://github.com/Randsw/schema-registry-operator-strimzi/issues/1)
+* phase 3 — e2e anti-pattern fixes ([#333](https://github.com/Randsw/schema-registry-operator-strimzi/issues/333)) ([ff208e9](https://github.com/Randsw/schema-registry-operator-strimzi/commit/ff208e9839e3b4f64d0c9ff1fda50cea549d717d))
+* phase 4 — e2e scenario expansion ([#334](https://github.com/Randsw/schema-registry-operator-strimzi/issues/334)) ([000e15a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/000e15a9622cd6e7b5309f0ea7df83e85af90705))
+* pin the certificate renewal and recheck boundary conditions ([#321](https://github.com/Randsw/schema-registry-operator-strimzi/issues/321)) ([8a3b279](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8a3b27966f862d1ec1c1ee1c77a1b8bfc02e9b0c))
+* trim the four low-value tests flagged by the audit ([#322](https://github.com/Randsw/schema-registry-operator-strimzi/issues/322)) ([bbf8d68](https://github.com/Randsw/schema-registry-operator-strimzi/commit/bbf8d68c58ac3ffd2e3d553b298f493b1c3457b6))
+* **e2e:** cover NetworkPolicy enforcement and the NodePort Service ([#325](https://github.com/Randsw/schema-registry-operator-strimzi/issues/325)) ([0716a41](https://github.com/Randsw/schema-registry-operator-strimzi/commit/0716a416d4a275a04e608de7c4778f672069739d))
+* **e2e:** cover the PKCS12 keystore type and the configuration passthrough ([#324](https://github.com/Randsw/schema-registry-operator-strimzi/issues/324)) ([b9eae7e](https://github.com/Randsw/schema-registry-operator-strimzi/commit/b9eae7eb288cef098d790c7a36226cfea409cb7a))
+* **e2e:** cover the user-provided TLS secret feature (JKS and PEM shapes) ([#318](https://github.com/Randsw/schema-registry-operator-strimzi/issues/318)) ([a02d999](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a02d999a2693961edf1848f687adf633f752310e))
+* **e2e:** retry the first REST calls through the Kafka leader-election warm-up ([#316](https://github.com/Randsw/schema-registry-operator-strimzi/issues/316)) ([f27414b](https://github.com/Randsw/schema-registry-operator-strimzi/commit/f27414b7d74b6cb99cd4b773c766e410bf9cc82b))
+* **e2e:** verify the operator metrics endpoint end to end ([#326](https://github.com/Randsw/schema-registry-operator-strimzi/issues/326)) ([fc4cba8](https://github.com/Randsw/schema-registry-operator-strimzi/commit/fc4cba8c1e2fcc9cd85541725a8f4fac531f9c30))
+* **phase-0:** drop dead-weight tests and exclude generated code from coverage ([#330](https://github.com/Randsw/schema-registry-operator-strimzi/issues/330)) ([c4fae3f](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c4fae3f1fce73932cc61006a0dd7a609e10ced9e))
+
+### 🛠 Fixes
+
+* **controller:** map Kafka CR events via strimzi.io/cluster label value ([#337](https://github.com/Randsw/schema-registry-operator-strimzi/issues/337)) ([66029b7](https://github.com/Randsw/schema-registry-operator-strimzi/commit/66029b749b49c649e56bc61e19b4ded0c7bff0a9))
+
+### Other
+
+* rename the misleading test-e2e target and align the envtest default ([#323](https://github.com/Randsw/schema-registry-operator-strimzi/issues/323)) ([962fccd](https://github.com/Randsw/schema-registry-operator-strimzi/commit/962fccd1a068c93bf6fad2b912ced0cf4d7a7b49))
+* **ci:** enforce filtered coverage gate ([#335](https://github.com/Randsw/schema-registry-operator-strimzi/issues/335)) ([e8d9f50](https://github.com/Randsw/schema-registry-operator-strimzi/commit/e8d9f5036e1ddc5203200c9db3664f953601eaa5))
+
 ## [1.20.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.19.1...1.20.0) (2026-11-17)
 
 ### :scissors: Refactor
