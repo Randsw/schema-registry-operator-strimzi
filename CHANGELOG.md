@@ -1,3 +1,9 @@
+## [1.20.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.20.1...1.20.2) (2026-11-25)
+
+### 🛠 Fixes
+
+* validate keystores, drop no-op finalizer and fixed TLS requeue, prove watch convergence ([#338](https://github.com/Randsw/schema-registry-operator-strimzi/issues/338)) ([a7e78dd](https://github.com/Randsw/schema-registry-operator-strimzi/commit/a7e78dd46ccc04654870fa310cd4d888cf7b008d))
+
 ## [1.20.1](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.20.0...1.20.1) (2026-11-25)
 
 ### :scissors: Refactor
