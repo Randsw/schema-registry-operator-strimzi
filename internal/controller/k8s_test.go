@@ -3974,9 +3974,12 @@ func TestComputeSpecHashClientAuth(t *testing.T) {
 	})
 }
 
-// TestMapStrimziResourceToRequests covers the Kafka/KafkaUser watch mapping:
-// CRs attached to the same Kafka cluster (strimzi.io/cluster label) are
-// enqueued; KafkaUser events additionally require the name to match the CR.
+// TestMapStrimziResourceToRequests covers the KafkaUser watch mapping: a
+// KafkaUser carries the strimzi.io/cluster label (Strimzi requires it on
+// KafkaUser CRs) and the mapper enqueues only the StrimziSchemaRegistry CR of
+// the same name in the same namespace. The Kafka CR watch does not use this
+// mapper because Strimzi never labels the Kafka CR itself — see
+// TestMapKafkaToRequests.
 func TestMapStrimziResourceToRequests(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
@@ -3996,23 +3999,6 @@ func TestMapStrimziResourceToRequests(t *testing.T) {
 	reconciler := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
 	ctx := context.Background()
 
-	t.Run("Kafka event enqueues same-cluster CRs in the same namespace", func(t *testing.T) {
-		kafkaObj := &kafka.Kafka{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "kafka-cluster",
-				Namespace: "default",
-				Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
-			},
-		}
-		requests := reconciler.mapStrimziResourceToRequests(ctx, kafkaObj, false)
-		if len(requests) != 1 {
-			t.Fatalf("expected 1 request, got %v", requests)
-		}
-		if requests[0].Name != "sr-a" || requests[0].Namespace != "default" {
-			t.Errorf("expected request for sr-a in default, got %v", requests[0])
-		}
-	})
-
 	t.Run("KafkaUser event requires name match", func(t *testing.T) {
 		matching := &kafka.KafkaUser{
 			ObjectMeta: metav1.ObjectMeta{
@@ -4022,8 +4008,8 @@ func TestMapStrimziResourceToRequests(t *testing.T) {
 			},
 		}
 		requests := reconciler.mapStrimziResourceToRequests(ctx, matching, true)
-		if len(requests) != 1 || requests[0].Name != "sr-a" {
-			t.Fatalf("expected 1 request for sr-a, got %v", requests)
+		if len(requests) != 1 || requests[0].Name != "sr-a" || requests[0].Namespace != "default" {
+			t.Fatalf("expected 1 request for sr-a in default, got %v", requests)
 		}
 
 		nonMatching := &kafka.KafkaUser{
@@ -4038,11 +4024,25 @@ func TestMapStrimziResourceToRequests(t *testing.T) {
 		}
 	})
 
-	t.Run("object without the cluster label enqueues nothing", func(t *testing.T) {
-		unlabeled := &kafka.Kafka{
-			ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster", Namespace: "default"},
+	t.Run("KafkaUser in another namespace is not matched", func(t *testing.T) {
+		namespaceScoped := &kafka.KafkaUser{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sr-c",
+				Namespace: "other-ns",
+				Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
+			},
 		}
-		if requests := reconciler.mapStrimziResourceToRequests(ctx, unlabeled, false); len(requests) != 0 {
+		requests := reconciler.mapStrimziResourceToRequests(ctx, namespaceScoped, true)
+		if len(requests) != 1 || requests[0].Name != "sr-c" || requests[0].Namespace != "other-ns" {
+			t.Fatalf("expected 1 request for sr-c in other-ns, got %v", requests)
+		}
+	})
+
+	t.Run("KafkaUser without the cluster label enqueues nothing", func(t *testing.T) {
+		unlabeled := &kafka.KafkaUser{
+			ObjectMeta: metav1.ObjectMeta{Name: "sr-a", Namespace: "default"},
+		}
+		if requests := reconciler.mapStrimziResourceToRequests(ctx, unlabeled, true); len(requests) != 0 {
 			t.Errorf("expected no requests without the cluster label, got %v", requests)
 		}
 	})

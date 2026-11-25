@@ -70,13 +70,12 @@ var _ = Describe("KafkaUser secret watch pipeline", func() {
 		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 
 		By("Creating the Strimzi Kafka cluster with a SASL PLAINTEXT listener and status")
+		// Real Strimzi CRs carry no strimzi.io/cluster label on the Kafka
+		// object itself; the Kafka watch maps by the CR name.
 		cluster := &kafka.Kafka{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "kafka-cluster",
 				Namespace: SchemaRegistryName,
-				Labels: map[string]string{
-					"strimzi.io/cluster": "kafka-cluster",
-				},
 			},
 			Spec: &kafka.KafkaSpec{
 				Kafka: &kafka.KafkaClusterSpec{
@@ -266,13 +265,11 @@ var _ = Describe("Service ClusterIP to NodePort transition", func() {
 		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 
 		By("Creating the Strimzi Kafka cluster with a plain listener and status")
+		// Unlabeled on purpose: real Strimzi never labels the Kafka CR itself.
 		cluster := &kafka.Kafka{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "kafka-cluster",
 				Namespace: SchemaRegistryName,
-				Labels: map[string]string{
-					"strimzi.io/cluster": "kafka-cluster",
-				},
 			},
 			Spec: &kafka.KafkaSpec{
 				Kafka: &kafka.KafkaClusterSpec{

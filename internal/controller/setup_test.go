@@ -87,13 +87,12 @@ var _ = Describe("SetupWithManager wiring", func() {
 		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 
 		By("Creating the Strimzi Kafka cluster with TLS listener and status")
+		// Strimzi never labels the Kafka CR itself: the cluster identity is
+		// the CR name, which the CR below carries under strimzi.io/cluster.
 		cluster := &kafka.Kafka{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "kafka-cluster",
 				Namespace: SchemaRegistryName,
-				Labels: map[string]string{
-					"strimzi.io/cluster": "kafka-cluster",
-				},
 			},
 			Spec: &kafka.KafkaSpec{
 				Kafka: &kafka.KafkaClusterSpec{
