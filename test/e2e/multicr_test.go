@@ -81,9 +81,10 @@ var _ = Describe("StrimziSchemaRegistry e2e multiple CRs scenario", Ordered, Ser
 		Expect(subjectsB).NotTo(ContainElement(subjectA),
 			"registry B must not see a subject persisted to registry A's topic")
 
-		By("snapshotting registry B's Deployment before mutating registry A")
-		beforeB := deploymentFor(ctx, registryB.Name)
-		beforeBResourceVersion := beforeB.ResourceVersion
+		By("recording registry B's operator-computed spec hash before mutating registry A")
+		beforeBSpecHash := deploymentSpecHash(ctx, registryB.Name)
+		Expect(beforeBSpecHash).NotTo(BeEmpty(),
+			"registry B's Deployment must carry the operator-computed spec hash")
 
 		By("mutating only registry A's configuration")
 		Expect(registryA.apply(ctx, false, true, nil,
@@ -95,13 +96,24 @@ var _ = Describe("StrimziSchemaRegistry e2e multiple CRs scenario", Ordered, Ser
 		waitForDeploymentRolloutFor(ctx, registryA.Name, readyTimeout)
 		registryA.waitReady(ctx)
 
-		By("asserting registry B was not touched by registry A's change")
+		By("asserting registry B's desired state was not changed by registry A's spec change")
+		// The spec hash is computed from one CR's spec alone, so it cannot move
+		// when a different CR changes. The Deployment's resourceVersion is not a
+		// safe independence signal: an independent Strimzi CA-secret rewrite (or
+		// a delayed KafkaUser credential update) can legitimately roll registry
+		// B during the observation window without registry A being involved.
 		Consistently(func(g Gomega) {
 			current := deploymentFor(ctx, registryB.Name)
-			g.Expect(current.ResourceVersion).To(Equal(beforeBResourceVersion),
-				"registry B's Deployment was rewritten while only registry A changed")
-			g.Expect(current.Spec.Template).To(Equal(beforeB.Spec.Template),
-				"registry B's pod template drifted while only registry A changed")
+			g.Expect(current.Annotations).To(HaveKeyWithValue(specHashAnnotationKey, beforeBSpecHash),
+				"registry B's Deployment spec hash changed while only registry A changed")
+			g.Expect(current.Spec.Template.Annotations).To(HaveKeyWithValue(specHashAnnotationKey, beforeBSpecHash),
+				"registry B's pod-template spec hash changed while only registry A changed")
+			for _, container := range current.Spec.Template.Spec.Containers {
+				for _, env := range container.Env {
+					g.Expect(env.Name).NotTo(Equal("SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS"),
+						"registry B inherited registry A's configuration env var")
+				}
+			}
 		}, 10*time.Second, 2*time.Second).Should(Succeed())
 
 		By("deleting registry A and asserting its owned resources are garbage-collected")
@@ -121,6 +133,13 @@ var _ = Describe("StrimziSchemaRegistry e2e multiple CRs scenario", Ordered, Ser
 		registryB.waitReady(ctx)
 	})
 })
+
+// deploymentSpecHash returns the operator-computed spec hash from the named
+// CR's Deployment metadata (the operator writes the same hash on the metadata
+// and on the pod template).
+func deploymentSpecHash(ctx context.Context, name string) string {
+	return deploymentFor(ctx, name).Annotations[specHashAnnotationKey]
+}
 
 // listSubjectsForRegistry port-forwards the named registry's Service and
 // returns its subject list. Unlike withRegistryClientFor it surfaces every

@@ -191,7 +191,11 @@ jobs:
           env:
             E2E_SECURITY_PROTOCOL: ${{ matrix.security-protocol }}
             E2E_LISTENER: ${{ matrix.listener }}
-          run: go test -tags=e2e ./test/e2e/... -v -ginkgo.v
+          # The suite runs every scenario serially against one cluster and now
+          # includes a real CA key rotation that rolls the Kafka brokers, so the
+          # Go default 10m test binary timeout is too short. The job-level
+          # timeout-minutes remains the real guard.
+          run: go test -tags=e2e ./test/e2e/... -v -ginkgo.v -timeout=30m
         - name: Collect diagnostics
           if: failure()
           run: |
