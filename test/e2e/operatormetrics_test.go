@@ -28,8 +28,9 @@ import (
 
 // The operator-metrics scenario (E2-8) verifies the operator's own metrics
 // endpoint end to end: the instance-count gauge tracks the live
-// StrimziSchemaRegistry CR count (up on creation, down after deletion) and
-// the reconcile counters are exposed.
+// StrimziSchemaRegistry CR count (up on creation, down after deletion). The
+// counter families are registered at process start (unit-covered), so this
+// scenario focuses on the non-unit-testable part: the secure scrape path.
 //
 // The chart installs the operator with metrics.enabled=true and the secure
 // default (metrics.secure=true: HTTPS with authentication/authorization) on
@@ -57,7 +58,7 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		deleteRegistryCR(context.Background(), readyTimeout)
 	})
 
-	It("tracks the CR count in the gauge and exposes the counters", func() {
+	It("tracks the CR count in the gauge", func() {
 		ctx := context.Background()
 
 		By("creating a CR so the gauge has a non-zero value")
@@ -90,15 +91,6 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		Expect(err).NotTo(HaveOccurred())
 		Expect(gauge).To(Equal(float64(len(crList.Items))),
 			"the instance-count gauge must track the live CR count")
-
-		By("verifying the reconcile counters are exposed")
-		for _, name := range []string{
-			"strimzi_schema_registry_reconcile_errors_total",
-			"strimzi_schema_registry_secret_rotation_total",
-			"strimzi_schema_registry_deployment_update_total",
-		} {
-			Expect(body).To(ContainSubstring(name), "expected metric %s to be exposed", name)
-		}
 
 		By("deleting the CR and verifying the gauge drops to zero")
 		deleteRegistryCR(ctx, readyTimeout)
