@@ -1,3 +1,9 @@
+## [1.20.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.20.2...1.20.3) (2026-11-26)
+
+### 🛠 Fixes
+
+* **security:** complete phase 2 audit hardening ([#339](https://github.com/Randsw/schema-registry-operator-strimzi/issues/339)) ([c999ac4](https://github.com/Randsw/schema-registry-operator-strimzi/commit/c999ac47828f6a47dbb6110ca0572477acefd3d5))
+
 ## [1.20.2](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.20.1...1.20.2) (2026-11-25)
 
 ### 🛠 Fixes
