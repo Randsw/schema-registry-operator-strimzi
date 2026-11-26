@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -85,15 +86,31 @@ var _ = Describe("Managed object ownership (T-7)", func() {
 		return name
 	}
 
-	reconcileUntilSettled := func() {
+	// expectedObject builds a typed client.Object for a named object so the
+	// settle loop can poll for its existence.
+	expectedObject := func(nsName, name string, obj client.Object) client.Object {
+		obj.SetName(name)
+		obj.SetNamespace(nsName)
+		return obj
+	}
+
+	// reconcileUntilSettled drives Reconcile until every object the operator
+	// is expected to manage exists. Each create requeues, so the number of
+	// passes depends on the reconcile ordering; polling on the observed state
+	// keeps the specs independent of that ordering and bounds the loop by a
+	// timeout instead of a magic pass count.
+	reconcileUntilSettled := func(want ...client.Object) {
 		GinkgoHelper()
 		reconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-		// Deployment, then Service, then NetworkPolicy are each created on a
-		// separate pass (every create requeues), so run a few passes.
-		for i := 0; i < 4; i++ {
+		Eventually(func(g Gomega) {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: registryKey})
-			Expect(err).NotTo(HaveOccurred())
-		}
+			g.Expect(err).NotTo(HaveOccurred())
+			for _, obj := range want {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj),
+					obj.DeepCopyObject().(client.Object))).To(Succeed())
+			}
+		}, 30*time.Second, 250*time.Millisecond).Should(Succeed(),
+			"timed out waiting for the operator-managed objects to be created")
 		// Fetch the live CR for its server-assigned UID.
 		cr = &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, registryKey, cr)).To(Succeed())
@@ -197,7 +214,13 @@ var _ = Describe("Managed object ownership (T-7)", func() {
 			},
 		})).To(Succeed())
 
-		reconcileUntilSettled()
+		reconcileUntilSettled(
+			expectedObject(nsName, registryName+deploySuffix, &appsv1.Deployment{}),
+			expectedObject(nsName, registryName, &corev1.Service{}),
+			expectedObject(nsName, registryName+networkPolicySuffix, &networkingv1.NetworkPolicy{}),
+			expectedObject(nsName, registryName+jksSecretSuffix, &corev1.Secret{}),
+			expectedObject(nsName, registryName+tlsSecretSuffix, &corev1.Secret{}),
+		)
 
 		By("Asserting the Deployment is controlled by the CR")
 		dep := &appsv1.Deployment{}
@@ -263,14 +286,18 @@ var _ = Describe("Managed object ownership (T-7)", func() {
 			},
 		})).To(Succeed())
 
-		reconcileUntilSettled()
-
-		By("Asserting the derived JKS secret is controlled by the CR")
-		derived := &corev1.Secret{}
 		derivedKey := types.NamespacedName{
 			Name:      registryName + "-user-tls" + jksSecretSuffix,
 			Namespace: nsName,
 		}
+		reconcileUntilSettled(
+			expectedObject(nsName, registryName+deploySuffix, &appsv1.Deployment{}),
+			expectedObject(nsName, registryName, &corev1.Service{}),
+			expectedObject(nsName, derivedKey.Name, &corev1.Secret{}),
+		)
+
+		By("Asserting the derived JKS secret is controlled by the CR")
+		derived := &corev1.Secret{}
 		Expect(k8sClient.Get(ctx, derivedKey, derived)).To(Succeed())
 		expectControllerOwner(derived, cr)
 		Expect(derived.Data).To(HaveKey("tls-keystore.jks"))

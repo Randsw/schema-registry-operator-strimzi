@@ -116,6 +116,10 @@ var _ = Describe("StrimziSchemaRegistry e2e SASL truststore rotation scenario", 
 		By("recording the truststore secret after the CA rotation")
 		afterCA := waitForSecretWithKey(ctx, jksSecretName, "truststore.jks")
 		afterCAResourceVersion := afterCA.ResourceVersion
+		// The CA version the truststore was built from: a later rebuild is only
+		// legitimate when the cluster CA secret version moves past this value,
+		// because Strimzi may rewrite its own CA secrets on its schedule.
+		caVersionBeforeSCRAM := afterCA.Annotations[caVersionAnnotationKey]
 
 		By("recording the deployment's SASL credential marker before the rotation")
 		beforeUserVersion := deploymentFor(ctx, fixture.Name).Spec.Template.Annotations[saslUserVersionAnnotationKey]
@@ -142,9 +146,32 @@ var _ = Describe("StrimziSchemaRegistry e2e SASL truststore rotation scenario", 
 		fixture.waitReady(ctx)
 
 		By("verifying the SCRAM rotation did not rebuild the truststore")
-		current := waitForSecretWithKey(ctx, jksSecretName, "truststore.jks")
-		Expect(current.ResourceVersion).To(Equal(afterCAResourceVersion),
-			"a SCRAM credential rotation must not rebuild the truststore")
+		// A rebuild is only a failure when the cluster CA version did not move:
+		// Strimzi can rewrite its own CA secrets at any time, and the operator
+		// then legitimately rebuilds the truststore. Comparing the truststore
+		// version against a hard snapshot raced exactly that rewrite.
+		var current *corev1.Secret
+		Eventually(func(g Gomega) {
+			caCertSecret := &corev1.Secret{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      scenario.ClusterName + "-cluster-ca-cert",
+				Namespace: scenario.Namespace,
+			}, caCertSecret)).To(Succeed())
+
+			current = &corev1.Secret{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      jksSecretName,
+				Namespace: scenario.Namespace,
+			}, current)).To(Succeed())
+			g.Expect(current.Data).To(HaveKey("truststore.jks"))
+			g.Expect(current.Annotations).To(HaveKeyWithValue(caVersionAnnotationKey, caCertSecret.ResourceVersion),
+				"the truststore must track the current cluster CA version")
+
+			if caCertSecret.ResourceVersion == caVersionBeforeSCRAM {
+				g.Expect(current.ResourceVersion).To(Equal(afterCAResourceVersion),
+					"a SCRAM credential rotation must not rebuild the truststore")
+			}
+		}, statusTimeout, 2*time.Second).Should(Succeed())
 		Expect(current.Data).NotTo(HaveKey("keystore.jks"))
 
 		By("passing the REST round-trip after the credential rotation")
