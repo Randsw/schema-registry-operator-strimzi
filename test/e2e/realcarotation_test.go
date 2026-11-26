@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"reflect"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -20,12 +21,20 @@ import (
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 )
 
-// clusterCAForceRenewalAnnotation is the Strimzi annotation that makes the
-// Cluster Operator generate a new CA key and certificate. The old CA stays in
-// the ca.crt bundle (and the old key under a timestamped key in the CA key
-// secret) for a grace period, so a naive CA swap never happens and a running
-// Kafka cluster keeps trusting the material it already serves.
-const clusterCAForceRenewalAnnotation = "strimzi.io/force-renewal"
+// clusterCAForceReplaceAnnotation is the Strimzi annotation that makes the
+// Cluster Operator generate a new CA private key and a matching new CA
+// certificate for the annotated CA key secret. Unlike strimzi.io/force-renew,
+// which renews a CA certificate reusing its existing private key, force-replace
+// changes the actual signing key. The old CA stays in the ca.crt bundle (the
+// old key is kept under a timestamped key) for a grace period, so a naive CA
+// swap never happens and a running Kafka cluster keeps trusting the material it
+// already serves.
+const clusterCAForceReplaceAnnotation = "strimzi.io/force-replace"
+
+// caRotationSettleTimeout bounds the CA key replacement: Strimzi renews every
+// component certificate signed by the CA and rolls the Kafka brokers, which
+// takes longer than a plain operator reconcile.
+const caRotationSettleTimeout = 10 * time.Minute
 
 // The real cluster-CA rotation scenario (plan §6.1 item 3) is the counterpart
 // of the simulated rotation in carotation_test.go: instead of bumping the CA
@@ -90,14 +99,26 @@ var _ = Describe("StrimziSchemaRegistry e2e real cluster CA rotation scenario", 
 		Expect(leafSignedBy(beforeLeaf, beforeCACerts)).To(BeTrue(),
 			"the initial REST API certificate must be signed by the cluster CA")
 
-		By("forcing a genuine Strimzi cluster CA renewal on the CA cert secret")
-		annotateClusterCAForRenewal(ctx, scenario.ClusterName+"-cluster-ca-cert")
+		By("forcing a genuine Strimzi cluster CA key renewal on the CA key secret")
+		annotateClusterCAKeyForReplacement(ctx, scenario.ClusterName+"-cluster-ca")
 
 		By("waiting until Strimzi publishes the renewed CA certificate")
 		renewedCACerts := waitForRenewedClusterCA(ctx, beforeCACerts)
 
+		By("waiting until the renewed CA private key is the active signing key")
+		waitForRotatedCAKey(ctx, renewedCACerts)
+
+		// Strimzi persists the rotated CA certificate bundle and the rotated CA
+		// private key in two separate secrets, and their write order is not part
+		// of Strimzi's contract. Bumping the CA cert secret version once after
+		// both carry the rotated material guarantees a reconcile that observes
+		// the final CA state, so the renewal assertion below is deterministic
+		// instead of racing Strimzi's internal write order. The certificate the
+		// operator signs is still the genuinely rotated CA.
+		By("triggering a reconcile against the final rotated CA material")
+		bumpSecretVersion(ctx, scenario.ClusterName+"-cluster-ca-cert", "e2e.randsw.code/real-ca-rotation")
+
 		By("waiting for the operator to renew the REST API TLS secret from the new CA")
-		var renewed *corev1.Secret
 		Eventually(func(g Gomega) {
 			caCertSecret, err := getSecret(ctx, scenario.ClusterName+"-cluster-ca-cert")
 			g.Expect(err).NotTo(HaveOccurred())
@@ -112,13 +133,23 @@ var _ = Describe("StrimziSchemaRegistry e2e real cluster CA rotation scenario", 
 			leaf := jksLeafCertificate(current.Data["tls-keystore.jks"], current.Data["keystore_password"])
 			g.Expect(leafSignedBy(leaf, renewedCACerts)).To(BeTrue(),
 				"the renewed REST API certificate is not signed by the rotated CA")
-			renewed = current
-		}, readyTimeout, 2*time.Second).Should(Succeed(),
-			"timed out after %s waiting for the REST API certificate renewed from the rotated CA", readyTimeout)
+		}, caRotationSettleTimeout, 2*time.Second).Should(Succeed(),
+			"timed out after %s waiting for the REST API certificate renewed from the rotated CA", caRotationSettleTimeout)
 
 		By("waiting for the deployment pod template to record the renewed TLS secret version")
-		waitForDeploymentAnnotationFor(ctx, fixture.Name, statusTimeout,
-			tlsVersionAnnotationKey, renewed.ResourceVersion)
+		// Compare against the TLS secret's CURRENT version: Strimzi may keep
+		// updating the CA cert secret (and therefore trigger further renewals)
+		// while the brokers roll onto the rotated CA, so pinning a snapshot
+		// would race the operator's next renewal.
+		Eventually(func(g Gomega) {
+			current, err := getSecret(ctx, tlsSecretName)
+			g.Expect(err).NotTo(HaveOccurred())
+			dep := deploymentFor(ctx, fixture.Name)
+			g.Expect(dep.Spec.Template.Annotations).To(
+				HaveKeyWithValue(tlsVersionAnnotationKey, current.ResourceVersion),
+				"the tlsVersion pod-template annotation must track the renewed secret")
+		}, caRotationSettleTimeout, 2*time.Second).Should(Succeed(),
+			"timed out after %s waiting for the tlsVersion rollout marker", caRotationSettleTimeout)
 
 		By("waiting for the operator to rebuild the Kafka TLS keystore for the rotated CA")
 		jksSecretName := fixture.Name + "-jks"
@@ -130,8 +161,8 @@ var _ = Describe("StrimziSchemaRegistry e2e real cluster CA rotation scenario", 
 			g.Expect(jks.Annotations).To(HaveKeyWithValue(caVersionAnnotationKey, caCertSecret.ResourceVersion),
 				"the Kafka JKS secret must be rebuilt for the rotated cluster CA")
 			g.Expect(jks.Data).To(HaveKey("keystore.jks"))
-		}, readyTimeout, 2*time.Second).Should(Succeed(),
-			"timed out after %s waiting for the Kafka keystore rebuild", readyTimeout)
+		}, caRotationSettleTimeout, 2*time.Second).Should(Succeed(),
+			"timed out after %s waiting for the Kafka keystore rebuild", caRotationSettleTimeout)
 
 		By("waiting for the Kafka cluster and the registry to settle")
 		waitForKafkaReady(ctx)
@@ -155,10 +186,10 @@ func getSecret(ctx context.Context, name string) (*corev1.Secret, error) {
 	return secret, nil
 }
 
-// annotateClusterCAForRenewal adds the Strimzi force-renewal annotation to the
-// cluster CA cert secret, retrying on conflict so it never races Strimzi's own
-// writes to the secret.
-func annotateClusterCAForRenewal(ctx context.Context, name string) {
+// annotateClusterCAKeyForReplacement adds the Strimzi force-replace annotation
+// to the cluster CA key secret, retrying on conflict so it never races
+// Strimzi's own writes to the secret.
+func annotateClusterCAKeyForReplacement(ctx context.Context, name string) {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		secret, err := getSecret(ctx, name)
 		if err != nil {
@@ -167,11 +198,11 @@ func annotateClusterCAForRenewal(ctx context.Context, name string) {
 		if secret.Annotations == nil {
 			secret.Annotations = map[string]string{}
 		}
-		secret.Annotations[clusterCAForceRenewalAnnotation] = "true"
+		secret.Annotations[clusterCAForceReplaceAnnotation] = "true"
 		return k8sClient.Update(ctx, secret)
 	})
 	Expect(err).NotTo(HaveOccurred(),
-		"failed to annotate the cluster CA cert secret %s/%s for renewal", scenario.Namespace, name)
+		"failed to annotate the cluster CA key secret %s/%s for key replacement", scenario.Namespace, name)
 }
 
 // clusterCACertificates returns every certificate of the cluster CA cert
@@ -215,10 +246,33 @@ func waitForRenewedClusterCA(ctx context.Context, before []*x509.Certificate) []
 		g.Expect(fresh).NotTo(BeEmpty(),
 			"the cluster CA cert secret still holds only the original CA certificate")
 		renewed = fresh
-	}, readyTimeout, 2*time.Second).Should(Succeed(),
-		"timed out after %s waiting for Strimzi to publish the renewed cluster CA certificate", readyTimeout)
+	}, caRotationSettleTimeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for Strimzi to publish the renewed cluster CA certificate", caRotationSettleTimeout)
 
 	return renewed
+}
+
+// waitForRotatedCAKey waits until the ca.key in the cluster CA key secret
+// matches one of the CA certificates that appeared in the rotated ca.crt
+// bundle. The public-key comparison makes the renewal assertion independent of
+// the order Strimzi persists the two secrets in.
+func waitForRotatedCAKey(ctx context.Context, renewedCACerts []*x509.Certificate) {
+	Eventually(func(g Gomega) {
+		secret, err := getSecret(ctx, scenario.ClusterName+"-cluster-ca")
+		g.Expect(err).NotTo(HaveOccurred())
+		key, err := certprocessor.StringToPrivateKey(string(secret.Data["ca.key"]))
+		g.Expect(err).NotTo(HaveOccurred(), "failed to parse the cluster CA private key")
+
+		matched := false
+		for _, cert := range renewedCACerts {
+			if reflect.DeepEqual(cert.PublicKey, key.Public()) {
+				matched = true
+			}
+		}
+		g.Expect(matched).To(BeTrue(),
+			"the cluster CA key secret still holds the retired CA private key")
+	}, caRotationSettleTimeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for the rotated cluster CA private key", caRotationSettleTimeout)
 }
 
 // jksLeafCertificate decodes a JKS keystore and returns the leaf certificate of
@@ -300,6 +354,6 @@ func waitForKafkaReady(ctx context.Context) {
 		}
 		g.Expect(ready).To(BeTrue(), "the Kafka cluster %s/%s is not Ready yet",
 			scenario.Namespace, scenario.ClusterName)
-	}, readyTimeout, 5*time.Second).Should(Succeed(),
-		"timed out after %s waiting for the Kafka cluster to become Ready again", readyTimeout)
+	}, caRotationSettleTimeout, 5*time.Second).Should(Succeed(),
+		"timed out after %s waiting for the Kafka cluster to become Ready again", caRotationSettleTimeout)
 }
