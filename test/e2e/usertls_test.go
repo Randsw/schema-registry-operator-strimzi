@@ -195,6 +195,8 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 		By("waiting for the stale derived JKS secret to be garbage-collected")
 		waitForSecretDeletion(ctx, derivedName)
 
+		By("waiting for the deployment to track the second user secret")
+		waitForDeploymentTLSVersion(ctx, scenario.RegistryName, userTLSSecretNameAlt)
 		waitForReadyCondition(ctx, readyTimeout)
 		waitForDeploymentRollout(ctx, readyTimeout)
 
@@ -237,10 +239,37 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 		By("verifying the deployment mounts the user secret")
 		Expect(restAPITLSMountedSecret(ctx)).To(Equal(userTLSSecretName))
 
+		By("waiting for the deployment to track the rotated user secret")
+		waitForDeploymentTLSVersion(ctx, scenario.RegistryName, userTLSSecretName)
+		waitForReadyCondition(ctx, readyTimeout)
+		waitForDeploymentRollout(ctx, readyTimeout)
+
 		By("passing the REST round-trip trusting the user CA")
 		verifyRoundTrip(userCA, nil)
 	})
 })
+
+// waitForDeploymentTLSVersion waits until the named CR's Deployment carries
+// the given user TLS secret's resourceVersion in its tlsVersion rollout
+// annotation. The operator bumps the annotation on its own reconcile pass, so
+// a spec change and a secret rotation can land as two successive rollouts;
+// settling the annotation first prevents a REST round-trip from racing the
+// rotation-triggered pod replacement.
+func waitForDeploymentTLSVersion(ctx context.Context, name, secretName string) {
+	Eventually(func(g Gomega) {
+		dep := &appsv1.Deployment{}
+		g.Expect(k8sClient.Get(ctx, deploymentKeyFor(name), dep)).To(Succeed())
+		secret := &corev1.Secret{}
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      secretName,
+			Namespace: scenario.Namespace,
+		}, secret)).To(Succeed())
+		g.Expect(dep.Spec.Template.Annotations).To(
+			HaveKeyWithValue(tlsVersionAnnotationKey, secret.ResourceVersion),
+			"the tlsVersion marker must track %s", secretName)
+	}, statusTimeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for the deployment to track secret %s", statusTimeout, secretName)
+}
 
 // userTLSDNSNames returns the DNS SANs the user REST API certificate of the
 // scenario's shared CR must carry.
