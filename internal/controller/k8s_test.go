@@ -1250,6 +1250,80 @@ func TestComputeSpecHash(t *testing.T) {
 			t.Errorf("expected different hashes for different ClientAuth: both %q", hash1)
 		}
 	})
+
+	// Service passthrough annotations/labels and NetworkPolicy enablement must
+	// NOT participate in the spec hash: they change the Service or
+	// NetworkPolicy objects but never the Schema Registry pods, and both are
+	// reconciled independently, so hashing them would cause full pod restarts
+	// on unrelated metadata edits.
+	t.Run("different service annotations produce the same hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+			Annotations: map[string]string{"prometheus.io/scrape": "true"},
+		}
+		inst2 := newTestInstance()
+		inst2.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+			Annotations: map[string]string{"prometheus.io/scrape": "false"},
+		}
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 != hash2 {
+			t.Errorf("expected the same hash for different service annotations: got %q and %q", hash1, hash2)
+		}
+	})
+
+	t.Run("different service labels produce the same hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "a"}}
+		inst2 := newTestInstance()
+		inst2.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "b"}}
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 != hash2 {
+			t.Errorf("expected the same hash for different service labels: got %q and %q", hash1, hash2)
+		}
+	})
+
+	t.Run("networkpolicy toggle produces the same hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 != hash2 {
+			t.Errorf("expected the same hash when networkpolicy is toggled: got %q and %q", hash1, hash2)
+		}
+	})
+
+	t.Run("pod-affecting fields still change the hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.Template.Spec.Containers = []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for a changed pod template: both %q", hash1)
+		}
+	})
+
+	// Known-answer test pinning the FNV-64a algorithm: the digest of the
+	// default test instance must not change unless the hashing scheme is
+	// deliberately changed. The value exceeds math.MaxUint32, which also
+	// proves the former FNV-32 digest is gone. The digest changed when
+	// spec.replicas joined the hashed inputs (B20) and again when Service
+	// metadata and NetworkPolicy enablement left the hashed inputs — a
+	// one-time rewrite of every stored hash that triggers a single rollout on
+	// operator upgrade.
+	t.Run("known FNV-64a digest for the default test instance", func(t *testing.T) {
+		hash := computeSpecHash(newTestInstance())
+		if hash != "10680275065260784506" {
+			t.Errorf("expected the FNV-64a digest 10680275065260784506, got %q", hash)
+		}
+	})
 }
 
 // TestGetStrimziClusterName covers T3: verify that getStrimziClusterName
@@ -3042,83 +3116,6 @@ func TestBuildNetworkPolicyCrossNamespaceIngress(t *testing.T) {
 	if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].From) != 0 {
 		t.Fatalf("expected a single ingress rule with an empty From list, got %v", np.Spec.Ingress)
 	}
-}
-
-// TestComputeSpecHashIgnoresServiceMetadataAndNetworkPolicy verifies that
-// Service passthrough annotations/labels and NetworkPolicy enablement do NOT
-// participate in the spec hash: they change the Service or NetworkPolicy
-// objects but never the Schema Registry pods, and both are reconciled
-// independently, so hashing them would cause full pod restarts on unrelated
-// metadata edits.
-func TestComputeSpecHashIgnoresServiceMetadataAndNetworkPolicy(t *testing.T) {
-	t.Run("different service annotations produce the same hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
-			Annotations: map[string]string{"prometheus.io/scrape": "true"},
-		}
-		inst2 := newTestInstance()
-		inst2.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
-			Annotations: map[string]string{"prometheus.io/scrape": "false"},
-		}
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 != hash2 {
-			t.Errorf("expected the same hash for different service annotations: got %q and %q", hash1, hash2)
-		}
-	})
-
-	t.Run("different service labels produce the same hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "a"}}
-		inst2 := newTestInstance()
-		inst2.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "b"}}
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 != hash2 {
-			t.Errorf("expected the same hash for different service labels: got %q and %q", hash1, hash2)
-		}
-	})
-
-	t.Run("networkpolicy toggle produces the same hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst2 := newTestInstance()
-		inst2.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 != hash2 {
-			t.Errorf("expected the same hash when networkpolicy is toggled: got %q and %q", hash1, hash2)
-		}
-	})
-
-	t.Run("pod-affecting fields still change the hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst2 := newTestInstance()
-		inst2.Spec.Template.Spec.Containers = []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for a changed pod template: both %q", hash1)
-		}
-	})
-
-	// Known-answer test pinning the FNV-64a algorithm: the digest of the
-	// default test instance must not change unless the hashing scheme is
-	// deliberately changed. The value exceeds math.MaxUint32, which also
-	// proves the former FNV-32 digest is gone. The digest changed when
-	// spec.replicas joined the hashed inputs (B20) and again when Service
-	// metadata and NetworkPolicy enablement left the hashed inputs — a
-	// one-time rewrite of every stored hash that triggers a single rollout on
-	// operator upgrade.
-	t.Run("known FNV-64a digest for the default test instance", func(t *testing.T) {
-		hash := computeSpecHash(newTestInstance())
-		if hash != "10680275065260784506" {
-			t.Errorf("expected the FNV-64a digest 10680275065260784506, got %q", hash)
-		}
-	})
 }
 
 func TestBuildNetworkPolicy(t *testing.T) {
