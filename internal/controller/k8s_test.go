@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -802,12 +801,17 @@ func TestUpdateExistingDeploymentRecreatesLegacySelector(t *testing.T) {
 	})
 }
 
-// TestCRDManifestReplicasValidation guards the B20 CRD contract: the
-// generated CRD must expose spec.replicas with the kubebuilder validation
-// (optional, default 1, minimum 1). Reading the generated manifest keeps the
-// regeneration step honest — dropping the markers from the type would fail
-// here.
-func TestCRDManifestReplicasValidation(t *testing.T) {
+// TestCRDManifestSchemaContracts guards the CRD contracts the operator relies
+// on: the generated CRD must expose spec.replicas with the kubebuilder
+// validation (optional, default 1, minimum 1 — B20) and the spec.heapopts
+// pattern marker (F7). Reading the generated manifest keeps the regeneration
+// step honest — dropping the markers from the type would fail here.
+//
+// The manifest is parsed once and the two contracts are asserted as subtests.
+// The heap-opts pattern is only checked for presence: controller-gen compiles
+// it at `make manifests` time, so re-compiling it here would verify the build
+// step rather than the operator.
+func TestCRDManifestSchemaContracts(t *testing.T) {
 	crdPath := filepath.Join("..", "..", "config", "crd", "bases",
 		"strimziregistryoperator.randsw.code_strimzischemaregistries.yaml")
 	data, err := os.ReadFile(crdPath)
@@ -820,53 +824,34 @@ func TestCRDManifestReplicasValidation(t *testing.T) {
 		t.Fatalf("failed to parse the generated CRD: %v", err)
 	}
 
-	replicas, err := crdSpecProperty(crd, "replicas")
-	if err != nil {
-		t.Fatalf("spec.replicas missing from the generated CRD: %v", err)
-	}
+	t.Run("spec.replicas defaults to one and rejects zero", func(t *testing.T) {
+		replicas, err := crdSpecProperty(crd, "replicas")
+		if err != nil {
+			t.Fatalf("spec.replicas missing from the generated CRD: %v", err)
+		}
 
-	if got := replicas["type"]; got != "integer" {
-		t.Errorf("expected spec.replicas type integer, got %v", got)
-	}
-	if got := replicas["default"]; got != float64(1) {
-		t.Errorf("expected spec.replicas default 1, got %v", got)
-	}
-	minimum, ok := replicas["minimum"].(float64)
-	if !ok || minimum != 1 {
-		t.Errorf("expected spec.replicas minimum 1, got %v", replicas["minimum"])
-	}
-}
+		if got := replicas["type"]; got != "integer" {
+			t.Errorf("expected spec.replicas type integer, got %v", got)
+		}
+		if got := replicas["default"]; got != float64(1) {
+			t.Errorf("expected spec.replicas default 1, got %v", got)
+		}
+		minimum, ok := replicas["minimum"].(float64)
+		if !ok || minimum != 1 {
+			t.Errorf("expected spec.replicas minimum 1, got %v", replicas["minimum"])
+		}
+	})
 
-// TestCRDManifestHeapOptsValidation guards the F7 CRD contract: the
-// generated CRD's spec.heapopts pattern must compile. The accepted/rejected
-// form lists were removed: the same pattern is exercised through real
-// admission in the envtest spec "When validating the HeapOpts pattern at the
-// API server", and controller-gen compiles the pattern at make manifests
-// time — this test only needs to catch a dropped or mistyped marker.
-func TestCRDManifestHeapOptsValidation(t *testing.T) {
-	crdPath := filepath.Join("..", "..", "config", "crd", "bases",
-		"strimziregistryoperator.randsw.code_strimzischemaregistries.yaml")
-	data, err := os.ReadFile(crdPath)
-	if err != nil {
-		t.Fatalf("failed to read the generated CRD: %v", err)
-	}
-
-	var crd map[string]any
-	if err := sigsyaml.Unmarshal(data, &crd); err != nil {
-		t.Fatalf("failed to parse the generated CRD: %v", err)
-	}
-
-	heapopts, err := crdSpecProperty(crd, "heapopts")
-	if err != nil {
-		t.Fatalf("spec.heapopts missing from the generated CRD: %v", err)
-	}
-	pattern, ok := heapopts["pattern"].(string)
-	if !ok || pattern == "" {
-		t.Fatalf("expected spec.heapopts to carry a pattern, got %v", heapopts["pattern"])
-	}
-	if _, err := regexp.Compile(pattern); err != nil {
-		t.Fatalf("spec.heapopts pattern does not compile: %v", err)
-	}
+	t.Run("spec.heapopts carries the pattern marker", func(t *testing.T) {
+		heapopts, err := crdSpecProperty(crd, "heapopts")
+		if err != nil {
+			t.Fatalf("spec.heapopts missing from the generated CRD: %v", err)
+		}
+		pattern, ok := heapopts["pattern"].(string)
+		if !ok || pattern == "" {
+			t.Fatalf("expected spec.heapopts to carry a pattern, got %v", heapopts["pattern"])
+		}
+	})
 }
 
 // crdSpecProperty navigates a parsed CRD manifest down to
