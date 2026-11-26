@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,12 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
 )
 
@@ -24,13 +31,20 @@ import (
 // StrimziSchemaRegistry CR count (up on creation, down after deletion) and
 // the reconcile counters are exposed.
 //
-// The chart installs the operator with metrics.enabled=true served over
-// plain HTTP (metrics.secure=false) on port 8080 behind the
-// <fullname>-metrics-service Service, so the endpoint is reachable through a
-// plain client-go port-forward.
+// The chart installs the operator with metrics.enabled=true and the secure
+// default (metrics.secure=true: HTTPS with authentication/authorization) on
+// port 8080 behind the <fullname>-metrics-service Service. The scenario binds
+// the chart's metrics-reader ClusterRole to a scraper ServiceAccount, mints a
+// token for it and scrapes HTTPS through a client-go port-forward, proving the
+// secure endpoint actually serves metrics. The plain-HTTP opt-out is covered
+// by the chart rendering tests.
 const (
 	operatorMetricsServiceName = "ssr-operator-metrics-service"
 	operatorMetricsRemotePort  = 8080
+
+	// metricsScraperServiceAccount is the ServiceAccount the scenario binds to
+	// the chart's metrics-reader ClusterRole to obtain a scrape token.
+	metricsScraperServiceAccount = "ssr-operator-metrics-scraper"
 
 	// instanceCountMetric is the operator gauge tracking the live
 	// StrimziSchemaRegistry CR count.
@@ -56,11 +70,14 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		Expect(err).NotTo(HaveOccurred())
 		defer stop()
 
-		By("scraping the metrics endpoint")
+		By("minting a bearer token allowed to get the non-resource /metrics URL")
+		metricsToken := metricsScraperToken(ctx)
+
+		By("scraping the secure metrics endpoint")
 		var body string
 		Eventually(func(g Gomega) {
 			var scrapeErr error
-			body, scrapeErr = scrapeMetrics(localPort)
+			body, scrapeErr = scrapeMetrics(localPort, metricsToken)
 			g.Expect(scrapeErr).NotTo(HaveOccurred())
 			g.Expect(body).To(ContainSubstring(instanceCountMetric))
 		}, statusTimeout, 2*time.Second).Should(Succeed(),
@@ -86,7 +103,7 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 		By("deleting the CR and verifying the gauge drops to zero")
 		deleteRegistryCR(ctx, readyTimeout)
 		Eventually(func(g Gomega) {
-			fresh, scrapeErr := scrapeMetrics(localPort)
+			fresh, scrapeErr := scrapeMetrics(localPort, metricsToken)
 			g.Expect(scrapeErr).NotTo(HaveOccurred())
 			value, metricErr := metricValue(fresh, instanceCountMetric)
 			g.Expect(metricErr).NotTo(HaveOccurred())
@@ -96,19 +113,81 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 	})
 })
 
-// scrapeMetrics fetches the operator metrics endpoint through the
-// port-forward and returns the Prometheus text body.
-func scrapeMetrics(port int) (string, error) {
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/metrics", port))
+// metricsHTTPClient skips TLS verification: the port-forward targets the
+// operator pod directly and controller-runtime's in-memory self-signed serving
+// certificate is not signed by the cluster CA. Authentication is bearer-token
+// based, so skipping verification here does not weaken the authn/authz coverage.
+var metricsHTTPClient = &http.Client{ //nolint:gosec // self-signed serving cert; authn is token-based
+	Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+}
+
+// scrapeMetrics fetches the secure operator metrics endpoint through the
+// port-forward using the scraper token and returns the Prometheus text body.
+func scrapeMetrics(port int, token string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://127.0.0.1:%d/metrics", port), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := metricsHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("metrics endpoint returned %s", resp.Status)
+	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// metricsScraperToken provisions a ServiceAccount bound to the chart's
+// metrics-reader ClusterRole and returns a token for it. The secure metrics
+// endpoint authenticates the bearer token with the API server (TokenReview)
+// and authorizes non-resource GET /metrics through SubjectAccessReview, so the
+// scrape must present a token whose RBAC grants that access.
+func metricsScraperToken(ctx context.Context) string {
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+		Name:      metricsScraperServiceAccount,
+		Namespace: scenario.Namespace,
+	}}
+	if err := k8sClient.Create(ctx, sa); err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	// Cluster-scoped RBAC names embed the release namespace (the chart's
+	// rbacName helper), and the e2e release is "ssr-operator" in the scenario
+	// namespace.
+	readerRole := fmt.Sprintf("%s-ssr-operator-metrics-reader", scenario.Namespace)
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: metricsScraperServiceAccount},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     readerRole,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      "ServiceAccount",
+			Name:      metricsScraperServiceAccount,
+			Namespace: scenario.Namespace,
+		}},
+	}
+	if err := k8sClient.Create(ctx, binding); err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	var token string
+	Eventually(func(g Gomega) {
+		tr, err := kubeClient.CoreV1().ServiceAccounts(scenario.Namespace).
+			CreateToken(ctx, metricsScraperServiceAccount, &authenticationv1.TokenRequest{}, metav1.CreateOptions{})
+		g.Expect(err).NotTo(HaveOccurred())
+		token = tr.Status.Token
+		g.Expect(token).NotTo(BeEmpty())
+	}, statusTimeout, 2*time.Second).Should(Succeed())
+	return token
 }
 
 // metricValue returns the value of the given unlabeled metric in a

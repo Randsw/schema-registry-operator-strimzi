@@ -39,6 +39,13 @@ const (
 	clusterCAKeySuffix  = "-cluster-ca"
 	networkPolicySuffix = "-network-policy"
 
+	// operatorAppLabelKey/operatorAppLabelValue label every secret the
+	// operator creates. The orphaned-secret GC selects on this label so it
+	// never lists (and never has to reason about) the far larger set of
+	// unrelated secrets in the namespace.
+	operatorAppLabelKey   = "app"
+	operatorAppLabelValue = "strimzi-schema-registry"
+
 	// REST API TLS volume and env names, shared by the deployment builders
 	// and the user TLS secret mount fixup.
 	restAPITLSVolumeName   = "rest-api-tls"
@@ -1041,13 +1048,15 @@ func (r *StrimziSchemaRegistryReconciler) persistJKSSecret(ctx context.Context, 
 //   - a derived <name>-<old>-jks secret of a live CR whose middle segment no
 //     longer matches spec.tlssecretname (the user TLS secret was renamed).
 //
-// The collection is deliberately conservative. Only secrets carrying a
-// controller owner reference to a StrimziSchemaRegistry are ever considered —
-// user-provided TLS secrets, Strimzi CA/user secrets and every uncontrolled
-// secret are never touched. A live CR's <name>-jks and <name>-tls outputs are
-// never deleted either: they are recreated on demand and deleting them would
-// leave pods mounting a missing secret. Errors are logged and skipped so
-// secret hygiene can never fail reconciliation.
+// The collection is deliberately conservative. The List is scoped to secrets
+// carrying the operator's app label, so unrelated secrets in the namespace are
+// never even fetched. Within that set, only secrets carrying a controller owner
+// reference to a StrimziSchemaRegistry are ever considered — user-provided TLS
+// secrets, Strimzi CA/user secrets and every uncontrolled secret are never
+// touched. A live CR's <name>-jks and <name>-tls outputs are never deleted
+// either: they are recreated on demand and deleting them would leave pods
+// mounting a missing secret. Errors are logged and skipped so secret hygiene
+// can never fail reconciliation.
 //
 // Deleting an orphan emits a Secret Delete event; mapSecretToRequests maps it
 // back to the CR named in the owner reference. For a deleted owner the
@@ -1055,7 +1064,10 @@ func (r *StrimziSchemaRegistryReconciler) persistJKSSecret(ctx context.Context, 
 // owner the extra reconcile observes the secret is gone and converges.
 func (r *StrimziSchemaRegistryReconciler) gcOrphanedSecrets(ctx context.Context, instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger logr.Logger) {
 	secretList := &v1.SecretList{}
-	if err := r.List(ctx, secretList, client.InNamespace(instance.Namespace)); err != nil {
+	if err := r.List(ctx, secretList,
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels{operatorAppLabelKey: operatorAppLabelValue},
+	); err != nil {
 		logger.Error(err, "Failed to list secrets for orphaned-secret garbage collection")
 		return
 	}

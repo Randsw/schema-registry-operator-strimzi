@@ -31,15 +31,21 @@ image:
       memory: 256Mi
   securityContext:
     allowPrivilegeEscalation: false
+    # The operator needs no writable root filesystem: the Go binary only reads
+    # secrets and writes Kubernetes objects, and the chart mounts a writable
+    # emptyDir at /tmp for controller-runtime's temporary files. The read-only
+    # root FS satisfies the PSS restricted standard.
+    readOnlyRootFilesystem: true
+    # Also enforced at pod level (podSecurityContext); repeated here so the
+    # container itself is non-root even if a future override drops the pod
+    # setting.
+    runAsNonRoot: true
     # The operator needs no Linux capabilities (it is a static Go binary that
     # only reads secrets and writes Kubernetes objects); dropping ALL
     # satisfies the PSS restricted standard.
     capabilities:
       drop:
       - ALL
-    # readOnlyRootFilesystem: true
-    # runAsNonRoot: true
-    # runAsUser: 1000
 
 imagePullSecrets: []
 # Keep nameOverride empty: resource names must derive from the fullname
@@ -75,11 +81,19 @@ service:
 metrics:
   # When enabled, a Service exposing the operator metrics endpoint is created.
   enabled: true
-  # When true the metrics endpoint is served via HTTPS with authn/authz
-  # (requires a Prometheus setup that can authenticate). When false it is
-  # served via plain HTTP, which is the practical default for in-cluster
-  # Prometheus scraping.
-  secure: false
+  # When true (the default) the metrics endpoint is served via HTTPS with
+  # authentication/authorization. controller-runtime generates an in-memory
+  # self-signed serving certificate when no certificate directory is
+  # configured, so this needs no cert-manager and no secret. Scrapers must
+  # present a bearer token that can `get` the non-resource URL `/metrics`
+  # (bind the release's metrics-reader ClusterRole to the scraper's service
+  # account; see the chart README).
+  #
+  # Opt out with `--set metrics.secure=false` or `metrics.secure: false` in
+  # values: the endpoint is then served over plain HTTP with no authn/authz,
+  # which is simpler for in-cluster Prometheus but exposes the operator's
+  # metrics to anything that can reach the Service.
+  secure: true
   # Port the metrics endpoint binds to inside the operator container.
   port: 8080
 
@@ -136,7 +150,6 @@ cluster_roles:
         - delete
         - get
         - list
-        - patch
         - update
         - watch
       - apiGroups:
@@ -148,7 +161,6 @@ cluster_roles:
         - delete
         - get
         - list
-        - patch
         - update
         - watch
       - apiGroups:
@@ -196,7 +208,6 @@ cluster_roles:
         - delete
         - get
         - list
-        - patch
         - update
         - watch
   - enabled: true

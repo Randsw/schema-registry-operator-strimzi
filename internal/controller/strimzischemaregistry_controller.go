@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -83,8 +84,30 @@ var tlsCertRenewalThreshold = 30 * 24 * time.Hour
 // uses while an operator-managed REST API TLS secret is in use: without it,
 // certificate expiry would only ever be checked when a watch event happens to
 // fire, and a certificate could expire silently on a quiet cluster. It is a
-// variable so tests can pin the expected interval.
+// variable so tests can pin the expected interval. The interval is jittered by
+// ±tlsCertRecheckJitterFraction so CRs whose certificates were created together
+// do not re-check (and renew) on the same tick.
 var tlsCertRecheckInterval = 12 * time.Hour
+
+// tlsCertRecheckJitterFraction is the maximum relative jitter applied to the
+// standing TLS certificate recheck interval (10%).
+const tlsCertRecheckJitterFraction = 0.1
+
+// recheckJitterSource returns a random value in [0,1). It is a variable so
+// tests can make the jitter deterministic (0.5 means no jitter).
+var recheckJitterSource = rand.Float64 //nolint:gosec // jitter only; not security-sensitive
+
+// jitteredRecheckInterval applies ±tlsCertRecheckJitterFraction to d so CRs
+// whose certificates were created together do not all recheck (and renew) on
+// the same reconcile tick, which would stampede the API server and the
+// certificate-generation path.
+func jitteredRecheckInterval(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	factor := 1 + tlsCertRecheckJitterFraction*(2*recheckJitterSource()-1)
+	return time.Duration(float64(d) * factor)
+}
 
 // strimziClusterLabel is the label key used by Strimzi to identify the Kafka cluster name.
 const strimziClusterLabel = "strimzi.io/cluster"
@@ -228,12 +251,12 @@ func preBuiltKeystoreMaterialError(secretName string, secret *v1.Secret, keystor
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=strimziregistryoperator.randsw.code,resources=strimzischemaregistries/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=kafka.strimzi.io,resources=kafkas,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kafka.strimzi.io,resources=kafkausers,verbs=get;list;watch
 
@@ -1111,6 +1134,10 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 			return ctrl.Result{}, err
 		}
 		logger.Info("Deployment updated after KafkaUser secret changed", "Deployment.Name", instance.Name+deploySuffix, "Deployment.Namespace", instance.Namespace)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(instance, nil, v1.EventTypeNormal, "SASLCredentialsRolled", "RollCredentials",
+				"KafkaUser SCRAM credential secret %s changed; updated Deployment %s to roll pods onto the new credentials", userSecret.Name, dep.Name)
+		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
@@ -1601,7 +1628,7 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 		password, ok := tlsSecret.Data["keystore_password"]
 		if len(keystore) == 0 || !ok {
 			logger.Info("REST API TLS secret has no keystore material; skipping expiry check")
-			return ctrl.Result{}, tlsCertRecheckInterval, nil
+			return ctrl.Result{}, jitteredRecheckInterval(tlsCertRecheckInterval), nil
 		}
 
 		cp := certprocessor.NewCertProcessor(logger)
@@ -1611,7 +1638,7 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 			// skip, but keep the periodic recheck so the cert is inspected
 			// again even without watch events.
 			logger.Error(err, "Failed to read REST API TLS certificate expiry; skipping renewal check")
-			return ctrl.Result{}, tlsCertRecheckInterval, nil
+			return ctrl.Result{}, jitteredRecheckInterval(tlsCertRecheckInterval), nil
 		}
 		if time.Until(notAfter) > tlsCertRenewalThreshold {
 			// Valid outside the renewal window: schedule the next check so the
@@ -1676,11 +1703,13 @@ func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 }
 
 // certRecheckInterval returns how soon the REST API TLS certificate expiry
-// must be checked again, given its NotAfter: standing interval normally, but
-// shortened to (remaining lifetime - renewal threshold) when the certificate
-// would enter the renewal window sooner, so renewal still happens on time.
+// must be checked again, given its NotAfter: jittered standing interval
+// normally, but shortened to (remaining lifetime - renewal threshold) when the
+// certificate would enter the renewal window sooner, so renewal still happens
+// on time. The shortened value is deliberately not jittered: it is derived
+// from the certificate lifetime, and delaying it could miss the window.
 func certRecheckInterval(notAfter time.Time) time.Duration {
-	interval := tlsCertRecheckInterval
+	interval := jitteredRecheckInterval(tlsCertRecheckInterval)
 	// How long until the certificate enters the renewal window. Checking
 	// sooner than the standing interval guarantees the renewal is observed
 	// before the window opens even without any watch event.

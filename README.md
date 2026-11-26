@@ -784,6 +784,30 @@ spec:
   listener: plain
 ```
 
+### Readiness probe semantics
+
+There is no probe toggle in the CRD: the operator always generates the
+liveness and readiness probes on the Schema Registry Deployment from the
+listener and TLS settings, so a hand-edited Deployment cannot disable them.
+
+- With `spec.securehttp: true` (or `spec.clientauth: true`) the REST API
+  serves HTTPS, so the probes use a **TCP socket** check on the listener
+  port. A TCP connect succeeds as soon as the container listens, so a pod is
+  marked Ready once the process has bound the port.
+- With plain HTTP the readiness probe is an **HTTP GET** on `/`, which
+  succeeds once the REST API answers requests.
+
+In both cases "Ready" means *the Schema Registry process is serving its
+listener*, not *the Kafka connection and the internal `registry-schemas` topic
+have been verified end to end*. A pod can therefore be Ready while the store
+is still catching up or while Kafka is temporarily unavailable: clients see
+request failures and retry, while the operator keeps reconciling the
+Deployment. This is deliberate — a Kafka round-trip on every probe would make
+the Service endpoints flap on transient broker issues and can amplify load on
+a recovering cluster. Use an external synthetic check against
+`GET /subjects` (or a client-level health check) when you need
+store-verified readiness.
+
 ## 7. End-to-end tests
 
 The operator has end-to-end tests that run in GitHub Actions on kind clusters
