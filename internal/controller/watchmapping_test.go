@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -150,6 +151,54 @@ func TestMapKafkaToRequests(t *testing.T) {
 		}
 		if got := reconciler.mapStrimziResourceToRequests(ctx, unlabeled, true); len(got) != 0 {
 			t.Errorf("expected no requests for an unlabelled KafkaUser, got %v", got)
+		}
+	})
+}
+
+// P3.7: SetupWithManager installs the Kafka watch mapper through
+// kafkaWatchMapper(), whose value can be supplied as a constructor argument
+// (KafkaWatchMapper). A nil field must select the production name-based mapper
+// so the C-1 behavior is unchanged; a set field must be used verbatim so the
+// watch pipeline can be exercised without reaching into package internals.
+func TestKafkaWatchMapperInjection(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+
+	matching := newTestInstance()
+	matching.Name = "sr-injected"
+	matching.Namespace = "default"
+	matching.Labels = map[string]string{strimziClusterLabel: "kafka"}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching).Build()
+	ctx := context.Background()
+	obj := &kafka.Kafka{ObjectMeta: metav1.ObjectMeta{Name: "kafka", Namespace: "default"}}
+
+	t.Run("nil mapper falls back to the production mapper", func(t *testing.T) {
+		reconciler := &StrimziSchemaRegistryReconciler{Client: fakeClient, Scheme: scheme}
+		got := sortedRequestNames(reconciler.kafkaWatchMapper()(ctx, obj))
+		if len(got) != 1 || got[0].Name != "sr-injected" || got[0].Namespace != "default" {
+			t.Errorf("expected the default mapper to enqueue sr-injected/default, got %v", got)
+		}
+	})
+
+	t.Run("injected mapper is used verbatim", func(t *testing.T) {
+		calls := 0
+		want := reconcile.Request{NamespacedName: types.NamespacedName{Name: "stub", Namespace: "stub-ns"}}
+		reconciler := &StrimziSchemaRegistryReconciler{
+			Client: fakeClient,
+			Scheme: scheme,
+			KafkaWatchMapper: func(context.Context, client.Object) []reconcile.Request {
+				calls++
+				return []reconcile.Request{want}
+			},
+		}
+
+		got := reconciler.kafkaWatchMapper()(ctx, obj)
+		if calls != 1 {
+			t.Errorf("expected the injected mapper to be called once, got %d", calls)
+		}
+		if len(got) != 1 || got[0].NamespacedName != want.NamespacedName {
+			t.Errorf("expected the injected mapper result %v, got %v", want, got)
 		}
 	})
 }
