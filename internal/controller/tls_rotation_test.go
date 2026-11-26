@@ -19,16 +19,26 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
-	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
-	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
+	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 )
 
 // TestHandleTLSCertExpiryAnnotationRollout verifies that the TLS expiry
@@ -441,3 +451,180 @@ func TestHandleTLSCertExpiryCASecretNotFound(t *testing.T) {
 		}
 	})
 }
+
+// F2: the expiry-based renewal must also work through the full Reconcile entry
+// point, not only when handleTLSCertExpiry is called directly. This spec pins
+// the renewal threshold, reconciles a SecureHTTP CR with an operator-managed
+// certificate, and asserts the secret is renewed, the Deployment rolls, and a
+// restored (default) threshold makes the next pass a no-op that schedules the
+// standing recheck interval.
+var _ = Describe("Operator-managed REST API TLS expiry renewal (F2)", func() {
+	const (
+		registryName = "tls-expiry-sr"
+		kafkaName    = "kafka-cluster"
+	)
+
+	ctx := context.Background()
+	specCounter := 0
+
+	var (
+		namespace         *corev1.Namespace
+		registryKey       types.NamespacedName
+		originalThreshold time.Duration
+	)
+
+	BeforeEach(func() {
+		specCounter++
+		namespace = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("test-tls-expiry-%d", specCounter),
+		}}
+		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+		registryKey = types.NamespacedName{Name: registryName, Namespace: namespace.Name}
+		originalThreshold = tlsCertRenewalThreshold
+		Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
+	})
+
+	AfterEach(func() {
+		tlsCertRenewalThreshold = originalThreshold
+		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		if err := k8sClient.Get(ctx, registryKey, found); err == nil {
+			if len(found.Finalizers) > 0 {
+				found.Finalizers = []string{}
+				_ = k8sClient.Update(ctx, found)
+			}
+			_ = k8sClient.Delete(ctx, found)
+		}
+		_ = k8sClient.Delete(ctx, namespace)
+		_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
+	})
+
+	It("renews an expiring certificate and rolls the deployment through Reconcile", func() {
+		clusterCA, err := testutil.GenerateClusterCACert("TLS-EXPIRY-ENVTEST")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: kafkaName + clusterCASuffix, Namespace: namespace.Name},
+			Data:       map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)},
+		})).To(Succeed())
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: kafkaName + clusterCAKeySuffix, Namespace: namespace.Name},
+			Data:       map[string][]byte{"ca.key": []byte(clusterCA.CAKeyPEM)},
+		})).To(Succeed())
+
+		By("creating the Kafka CR with a plaintext listener and its status")
+		Expect(k8sClient.Create(ctx, &kafka.Kafka{
+			ObjectMeta: metav1.ObjectMeta{Name: kafkaName, Namespace: namespace.Name},
+			Spec: &kafka.KafkaSpec{Kafka: &kafka.KafkaClusterSpec{
+				Listeners: []kafka.GenericKafkaListener{{
+					Name: "plaintext",
+					Port: 9092,
+					Tls:  false,
+					Type: kafka.INTERNAL_KAFKALISTENERTYPE,
+				}},
+				Version: "4.1.0",
+			}},
+		})).To(Succeed())
+		currentKafka := &kafka.Kafka{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: kafkaName, Namespace: namespace.Name}, currentKafka)).To(Succeed())
+		currentKafka.Status = &kafka.KafkaStatus{
+			ClusterId: "tls-expiry-cluster",
+			Listeners: []kafka.ListenerStatus{{
+				Name:             "plaintext",
+				BootstrapServers: fmt.Sprintf("%s-kafka-bootstrap.%s.svc:9092", kafkaName, namespace.Name),
+			}},
+		}
+		Expect(k8sClient.Status().Update(ctx, currentKafka)).To(Succeed())
+
+		By("creating the SecureHTTP CR with an operator-managed TLS secret")
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      registryName,
+				Namespace: namespace.Name,
+				Labels:    map[string]string{strimziClusterLabel: kafkaName},
+			},
+			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				SecureHTTP:         true,
+				Listener:           "plaintext",
+				CompatibilityLevel: "forward",
+				SecurityProtocol:   "PLAINTEXT",
+				Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+				}},
+			},
+		})).To(Succeed())
+
+		reconciler := &StrimziSchemaRegistryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		tlsSecretKey := types.NamespacedName{Name: registryName + tlsSecretSuffix, Namespace: namespace.Name}
+		deploymentKey := types.NamespacedName{Name: registryName + deploySuffix, Namespace: namespace.Name}
+
+		By("reconciling until the CR is fully settled")
+		// Each create (Deployment, then Service) requeues, so keep driving
+		// Reconcile until a pass performs no action and returns the standing
+		// TLS recheck interval.
+		Eventually(func(g Gomega) time.Duration {
+			res, reconcileErr := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: registryKey})
+			g.Expect(reconcileErr).NotTo(HaveOccurred())
+			svc := &corev1.Service{}
+			g.Expect(k8sClient.Get(ctx,
+				types.NamespacedName{Name: registryName, Namespace: namespace.Name}, svc)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, tlsSecretKey, &corev1.Secret{})).To(Succeed())
+			return res.RequeueAfter
+		}, 30*time.Second, 250*time.Millisecond).Should(
+			Equal(jitteredRecheckInterval(tlsCertRecheckInterval)))
+
+		beforeSecret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, tlsSecretKey, beforeSecret)).To(Succeed())
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, deploymentKey, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Annotations).To(
+			HaveKeyWithValue(tlsVersionKey, beforeSecret.ResourceVersion),
+			"the tlsVersion rollout marker must be recorded at creation")
+
+		cp := certprocessor.NewCertProcessor(logr.Logger{})
+		notAfterBefore, err := cp.KeystoreCertExpiry(ctx, beforeSecret.Data["tls-keystore.jks"],
+			string(beforeSecret.Data["keystore_password"]))
+		Expect(err).NotTo(HaveOccurred())
+		beforeVersion := beforeSecret.ResourceVersion
+
+		By("pinning the renewal threshold so the fresh certificate counts as expiring soon")
+		// The certificate timestamps have second precision: let the clock move
+		// on so the renewed certificate carries a strictly later NotAfter.
+		time.Sleep(1100 * time.Millisecond)
+		tlsCertRenewalThreshold = time.Until(notAfterBefore) + time.Hour
+
+		By("reconciling: the full entry point must renew and roll the deployment")
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: registryKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(time.Second),
+			"the renewal pass must requeue so the expiry check re-runs")
+
+		afterSecret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, tlsSecretKey, afterSecret)).To(Succeed())
+		Expect(afterSecret.ResourceVersion).NotTo(Equal(beforeVersion),
+			"the TLS secret must be renewed")
+		notAfterAfter, err := cp.KeystoreCertExpiry(ctx, afterSecret.Data["tls-keystore.jks"],
+			string(afterSecret.Data["keystore_password"]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(notAfterAfter.After(notAfterBefore)).To(BeTrue(),
+			"the renewed certificate must expire later than the original")
+
+		Expect(k8sClient.Get(ctx, deploymentKey, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Annotations).To(
+			HaveKeyWithValue(tlsVersionKey, afterSecret.ResourceVersion),
+			"the tlsVersion rollout marker must track the renewed secret")
+
+		By("restoring the default threshold: the same Reconcile must not renew again")
+		tlsCertRenewalThreshold = originalThreshold
+		renewedVersion := afterSecret.ResourceVersion
+		result, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: registryKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(jitteredRecheckInterval(tlsCertRecheckInterval)),
+			"a fresh certificate must schedule the standing recheck interval")
+
+		stable := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, tlsSecretKey, stable)).To(Succeed())
+		Expect(stable.ResourceVersion).To(Equal(renewedVersion),
+			"the certificate must not be renewed again outside the renewal window")
+		Expect(k8sClient.Get(ctx, deploymentKey, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(tlsVersionKey, renewedVersion))
+	})
+})

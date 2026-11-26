@@ -899,7 +899,14 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	if kafkaListener == "" {
 		kafkaListener = "tls"
 	}
-	for _, listener := range kafkaCluster.Status.Listeners {
+	// A Kafka CR that Strimzi has not reconciled yet has a nil status. Treat
+	// it exactly like an empty listener set instead of dereferencing it: the
+	// operator must wait gracefully for the cluster, not panic.
+	var listeners []kafka.ListenerStatus
+	if kafkaCluster.Status != nil {
+		listeners = kafkaCluster.Status.Listeners
+	}
+	for _, listener := range listeners {
 		logger.V(1).Info("Found kafka listeners.", "Listener", listener.Name)
 		if strings.EqualFold(listener.Name, kafkaListener) {
 			kafkaBootstrapServer = listener.BootstrapServers
@@ -912,8 +919,8 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 	// Actionable error (B10): name the requested listener, the Kafka cluster
 	// and the CR that requested it, and the listeners the Kafka CR actually
 	// exposes, so the operator log and the CR status (B7) say what to fix.
-	available := make([]string, 0, len(kafkaCluster.Status.Listeners))
-	for _, listener := range kafkaCluster.Status.Listeners {
+	available := make([]string, 0, len(listeners))
+	for _, listener := range listeners {
 		available = append(available, listener.Name)
 	}
 	if len(available) == 0 {
