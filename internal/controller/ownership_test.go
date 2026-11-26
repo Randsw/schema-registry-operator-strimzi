@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 )
 
@@ -45,12 +45,12 @@ import (
 // resource depends on this contract: a missing or wrong UID silently leaks the
 // object after the CR is deleted, and a missing controller flag means the first
 // owner wins instead of the CR.
-func expectControllerOwner(obj client.Object, cr *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) {
+func expectControllerOwner(obj client.Object, cr *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) {
 	GinkgoHelper()
 	ref := metav1.GetControllerOf(obj)
 	Expect(ref).NotTo(BeNil(), "expected %T %s/%s to carry a controller owner reference",
 		obj, obj.GetNamespace(), obj.GetName())
-	Expect(ref.APIVersion).To(Equal(strimziregistryoperatorv1alpha1.GroupVersion.String()))
+	Expect(ref.APIVersion).To(Equal(strimziregistryoperatorv1beta1.GroupVersion.String()))
 	Expect(ref.Kind).To(Equal("StrimziSchemaRegistry"))
 	Expect(ref.Name).To(Equal(cr.Name))
 	Expect(ref.UID).To(Equal(cr.UID), "the owner UID must be the live CR UID, not a stale one")
@@ -74,7 +74,7 @@ var _ = Describe("Managed object ownership (T-7)", func() {
 	var (
 		namespace   *corev1.Namespace
 		registryKey types.NamespacedName
-		cr          *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
+		cr          *strimziregistryoperatorv1beta1.StrimziSchemaRegistry
 	)
 
 	newNamespace := func(prefix string) string {
@@ -112,7 +112,7 @@ var _ = Describe("Managed object ownership (T-7)", func() {
 		}, 30*time.Second, 250*time.Millisecond).Should(Succeed(),
 			"timed out waiting for the operator-managed objects to be created")
 		// Fetch the live CR for its server-assigned UID.
-		cr = &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		cr = &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, registryKey, cr)).To(Succeed())
 	}
 
@@ -151,7 +151,7 @@ var _ = Describe("Managed object ownership (T-7)", func() {
 	}
 
 	AfterEach(func() {
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, registryKey, found); err == nil {
 			_ = k8sClient.Delete(ctx, found)
 		}
@@ -195,19 +195,19 @@ var _ = Describe("Managed object ownership (T-7)", func() {
 			Data:       map[string][]byte{"sasl.jaas.config": []byte("jaas")},
 		})).To(Succeed())
 
-		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      registryName,
 				Namespace: nsName,
 				Labels:    map[string]string{strimziClusterLabel: "kafka-cluster"},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         true,
 				Listener:           "tls",
 				CompatibilityLevel: "forward",
 				SecurityProtocol:   "SASL_SSL",
 				// Enable the optional NetworkPolicy so its ownership is asserted.
-				NetworkPolicy: &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true},
+				NetworkPolicy: &strimziregistryoperatorv1beta1.NetworkPolicy{Enabled: true},
 				Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}},
 				}},
@@ -268,13 +268,13 @@ var _ = Describe("Managed object ownership (T-7)", func() {
 			},
 		})).To(Succeed())
 
-		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      registryName,
 				Namespace: nsName,
 				Labels:    map[string]string{strimziClusterLabel: "kafka-cluster"},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         true,
 				TLSSecretName:      "user-tls",
 				Listener:           "plain",

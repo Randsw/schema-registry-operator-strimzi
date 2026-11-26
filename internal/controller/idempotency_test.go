@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // C-4: Reconcile must be idempotent in steady state — running it again on a
@@ -62,7 +62,7 @@ var _ = Describe("Reconcile idempotency in steady state (C-4)", func() {
 	})
 
 	AfterEach(func() {
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, registryKey, found); err == nil {
 			if len(found.Finalizers) > 0 {
 				found.Finalizers = []string{}
@@ -100,13 +100,13 @@ var _ = Describe("Reconcile idempotency in steady state (C-4)", func() {
 		Expect(k8sClient.Status().Update(ctx, currentKafka)).To(Succeed())
 
 		By("creating the PLAINTEXT registry CR")
-		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      registryName,
 				Namespace: namespace.Name,
 				Labels:    map[string]string{strimziClusterLabel: "kafka-cluster"},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         false,
 				Listener:           "plain",
 				CompatibilityLevel: "forward",
@@ -131,14 +131,14 @@ var _ = Describe("Reconcile idempotency in steady state (C-4)", func() {
 				Name:      registryName,
 				Namespace: namespace.Name,
 			}, &corev1.Service{})).To(Succeed())
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			g.Expect(k8sClient.Get(ctx, registryKey, instance)).To(Succeed())
 			g.Expect(instance.Status.Status).NotTo(BeEmpty())
 			return result.RequeueAfter
 		}, 30*time.Second, 250*time.Millisecond).Should(BeZero())
 
 		By("snapshotting the resourceVersion of the CR and every owned object")
-		instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, registryKey, instance)).To(Succeed())
 		deployment := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{

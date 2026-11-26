@@ -52,7 +52,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // scenarioConfig describes the e2e scenario under test.
@@ -103,7 +103,7 @@ var _ = BeforeSuite(func() {
 
 	scheme := runtime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
-	Expect(strimziregistryoperatorv1alpha1.AddToScheme(scheme)).To(Succeed())
+	Expect(strimziregistryoperatorv1beta1.AddToScheme(scheme)).To(Succeed())
 
 	var err error
 	restConfig, err = config.GetConfig()

@@ -18,6 +18,6 @@ resources:
   domain: randsw.code
   group: strimziregistryoperator
   kind: StrimziSchemaRegistry
-  path: github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1
-  version: v1alpha1
+  path: github.com/randsw/schema-registry-operator-strimzi/api/v1beta1
+  version: v1beta1
 version: "3"

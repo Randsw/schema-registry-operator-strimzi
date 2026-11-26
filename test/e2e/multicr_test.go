@@ -13,7 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // The multiple-CR scenario (plan §6.2 item 6) proves that two
@@ -88,7 +88,7 @@ var _ = Describe("StrimziSchemaRegistry e2e multiple CRs scenario", Ordered, Ser
 
 		By("mutating only registry A's configuration")
 		Expect(registryA.apply(ctx, false, true, nil,
-			func(spec *strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec) {
+			func(spec *strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec) {
 				spec.Configuration = map[string]string{"kafkastore.timeout.ms": "2000"}
 			})).To(Succeed())
 		waitForDeploymentEnvFor(ctx, registryA.Name, readyTimeout,

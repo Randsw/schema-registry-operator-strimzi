@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -378,7 +378,7 @@ func TestBuildPodVolumesAuthModes(t *testing.T) {
 
 func TestCreateSecretAuthBranching(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	t.Run("PLAINTEXT produces no secret", func(t *testing.T) {
@@ -464,7 +464,7 @@ func TestCreateSecretAuthBranching(t *testing.T) {
 
 func TestHandleSecretRotation(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -573,7 +573,7 @@ func TestHandleSecretRotation(t *testing.T) {
 // names are not matched.
 func TestGetKafkaUser(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
 
 	t.Run("existing KafkaUser is found", func(t *testing.T) {

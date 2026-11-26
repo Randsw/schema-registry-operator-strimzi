@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 )
@@ -486,7 +486,7 @@ var _ = Describe("Operator-managed REST API TLS expiry renewal (F2)", func() {
 
 	AfterEach(func() {
 		tlsCertRenewalThreshold = originalThreshold
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, registryKey, found); err == nil {
 			if len(found.Finalizers) > 0 {
 				found.Finalizers = []string{}
@@ -535,13 +535,13 @@ var _ = Describe("Operator-managed REST API TLS expiry renewal (F2)", func() {
 		Expect(k8sClient.Status().Update(ctx, currentKafka)).To(Succeed())
 
 		By("creating the SecureHTTP CR with an operator-managed TLS secret")
-		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      registryName,
 				Namespace: namespace.Name,
 				Labels:    map[string]string{strimziClusterLabel: kafkaName},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         true,
 				Listener:           "plaintext",
 				CompatibilityLevel: "forward",

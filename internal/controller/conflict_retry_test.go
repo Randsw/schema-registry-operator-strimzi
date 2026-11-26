@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 )
 
@@ -150,13 +150,13 @@ var _ = Describe("Mid-reconcile conflict retry (T-3)", func() {
 		Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 		By("Creating the StrimziSchemaRegistry CR")
-		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      registryName,
 				Namespace: nsName,
 				Labels:    map[string]string{strimziClusterLabel: "kafka-cluster"},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         true,
 				Listener:           "plain",
 				CompatibilityLevel: "forward",
@@ -169,7 +169,7 @@ var _ = Describe("Mid-reconcile conflict retry (T-3)", func() {
 	})
 
 	AfterEach(func() {
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, registryKey, found); err == nil {
 			_ = k8sClient.Delete(ctx, found)
 		}
@@ -190,7 +190,7 @@ var _ = Describe("Mid-reconcile conflict retry (T-3)", func() {
 		Expect(stableTLSVersion).NotTo(BeEmpty(), "the operator-managed -tls secret must seed the tlsVersion rollout marker")
 
 		By("Changing the CR spec so the next reconcile must update the Deployment")
-		current := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		current := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, registryKey, current)).To(Succeed())
 		current.Spec.CompatibilityLevel = "full"
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
@@ -213,7 +213,7 @@ var _ = Describe("Mid-reconcile conflict retry (T-3)", func() {
 		Expect(env.Value).To(Equal("forward"), "the failed update must not partially apply the spec change")
 
 		By("Asserting the CR records the conflict as a ReconcileError")
-		failed := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		failed := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, registryKey, failed)).To(Succeed())
 		Expect(failed.Status.Status).To(Equal("ReconcileError"))
 

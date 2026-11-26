@@ -42,7 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -148,9 +148,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 			By("Creating StrimziSchemaRegistry with custom TLSSecretName")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:    true,
 					TLSSecretName: "my-custom-tls-secret",
 					Listener:      "TLS",
@@ -161,7 +161,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				_ = k8sClient.Delete(ctx, found)
@@ -228,7 +228,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			By("Creating the Namespace")
 			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 			DeferCleanup(func() {
-				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 					if len(found.Finalizers) > 0 {
 						found.Finalizers = []string{}
@@ -251,9 +251,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(testCA.CACertPEM), "user.crt": []byte(userCert.UserCertPEM), "user.key": []byte(userCert.UserKeyPEM), "user.p12": userCert.PKCS12Data, "user.password": []byte(userCert.Password)}})).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true, Listener: "TLS",
 					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
@@ -282,7 +282,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			By("Creating the Namespace")
 			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 			DeferCleanup(func() {
-				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 					if len(found.Finalizers) > 0 {
 						found.Finalizers = []string{}
@@ -326,9 +326,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca", Namespace: namespace.Name}, Data: map[string][]byte{"ca.key": []byte(clusterCA.CAKeyPEM)}})).To(Succeed())
 			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kafka-cluster-cluster-ca-cert", Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(clusterCA.CACertPEM)}})).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true, Listener: "TLS",
 					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
@@ -357,7 +357,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			By("Creating the Namespace")
 			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 			DeferCleanup(func() {
-				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 					if len(found.Finalizers) > 0 {
 						found.Finalizers = []string{}
@@ -400,9 +400,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name}, Data: map[string][]byte{"ca.crt": []byte(testCA.CACertPEM), "user.crt": []byte(userCert.UserCertPEM), "user.key": []byte(userCert.UserKeyPEM), "user.p12": userCert.PKCS12Data, "user.password": []byte(userCert.Password)}})).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true, Listener: "TLS",
 					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
@@ -445,7 +445,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				found.Finalizers = []string{} // Remove finalizers to allow deletion
@@ -458,9 +458,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 		It("should not add a finalizer and delete without operator involvement", func() {
 			By("Creating StrimziSchemaRegistry without full dependencies")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true, Listener: "TLS",
 					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
@@ -472,7 +472,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 
 			By("Checking that no finalizer was added (H-2)")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			Expect(instance.Finalizers).To(BeEmpty(), "owner references already handle GC; no finalizer should be added")
 
@@ -481,7 +481,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			By("Checking that the resource is deleted without a reconcile")
 			Eventually(func() error {
-				updatedInstance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				updatedInstance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				return k8sClient.Get(ctx, typeNamespacedName, updatedInstance)
 			}, time.Minute, time.Second).ShouldNot(Succeed(), "Resource without a finalizer should be deleted immediately")
 		})
@@ -571,9 +571,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 			By("Creating StrimziSchemaRegistry with minimal spec (empty CompatibilityLevel, SecurityProtocol, Listener)")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					CompatibilityLevel: "", // Should default to "forward"
 					SecurityProtocol:   "", // Should default to "SSL"
@@ -585,7 +585,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				_ = k8sClient.Delete(ctx, found)
@@ -726,9 +726,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 			By("Creating StrimziSchemaRegistry")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         true,
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
@@ -740,7 +740,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				_ = k8sClient.Delete(ctx, found)
@@ -768,7 +768,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(initialHash).NotTo(BeEmpty())
 
 			By("Updating CompatibilityLevel to 'backward'")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			instance.Spec.CompatibilityLevel = "backward"
 			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
@@ -887,9 +887,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 			By("Creating StrimziSchemaRegistry")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         true,
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
@@ -901,7 +901,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				_ = k8sClient.Delete(ctx, found)
@@ -931,7 +931,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(rfPresent).To(BeFalse(), "replication factor env var should be absent when unset")
 
 			By("Updating KafkastoreTopicReplicationFactor to 1")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			instance.Spec.KafkastoreTopicReplicationFactor = ptr.To(int32(1))
 			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
@@ -1043,9 +1043,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 			By("Creating StrimziSchemaRegistry with initial image")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         true,
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
@@ -1057,7 +1057,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				_ = k8sClient.Delete(ctx, found)
@@ -1085,7 +1085,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(initialHash).NotTo(BeEmpty())
 
 			By("Updating the container resources in the CR template")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			instance.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
@@ -1199,9 +1199,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 			By("Creating StrimziSchemaRegistry with SecureHTTP=true")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true,
 					Listener:   "TLS",
 					Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
@@ -1211,7 +1211,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				_ = k8sClient.Delete(ctx, found)
@@ -1242,7 +1242,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(svc.Spec.Ports[0].Name).To(Equal("https"))
 
 			By("Updating SecureHTTP to false")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			instance.Spec.SecureHTTP = false
 			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
@@ -1359,9 +1359,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 			By("Creating StrimziSchemaRegistry with SecureHTTP=true")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true,
 					Listener:   "TLS",
 					Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
@@ -1371,7 +1371,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				if len(found.Finalizers) > 0 {
@@ -1533,9 +1533,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 			By("Creating StrimziSchemaRegistry with SecureHTTP=true")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: namespace.Name, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         true,
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
@@ -1547,7 +1547,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				if len(found.Finalizers) > 0 {
@@ -1593,7 +1593,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SchemaRegistryName + "-tls", Namespace: SchemaRegistryName}, tlsBefore)).To(Succeed())
 
 			By("Changing CompatibilityLevel to trigger deployment update")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			instance.Spec.CompatibilityLevel = "backward"
 			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
@@ -1692,9 +1692,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
@@ -1706,7 +1706,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -1820,9 +1820,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
@@ -1834,7 +1834,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -1929,9 +1929,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
@@ -1943,7 +1943,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -2042,9 +2042,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					Listener:           "TLS",
 					CompatibilityLevel: "forward",
@@ -2056,7 +2056,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -2120,13 +2120,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      namespaceName,
 					Namespace: namespaceName,
 					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
 				},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
@@ -2144,7 +2144,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -2164,7 +2164,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			Expect(meta.FindStatusCondition(instance.Status.Conditions, "Ready")).NotTo(BeNil())
 			beforeResourceVersion := instance.ResourceVersion
@@ -2172,7 +2172,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			after := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			after := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, after)).To(Succeed())
 			Expect(after.ResourceVersion).To(Equal(beforeResourceVersion))
 		})
@@ -2192,7 +2192,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 
 			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
@@ -2249,9 +2249,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
@@ -2268,7 +2268,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -2309,7 +2309,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(initialHash).NotTo(BeEmpty())
 
 			By("Updating the configuration map")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			instance.Spec.Configuration = map[string]string{
 				"access.control.allow.origin": "*",
@@ -2369,18 +2369,18 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "PLAINTEXT",
-					Service: &strimziregistryoperatorv1alpha1.Service{
+					Service: &strimziregistryoperatorv1beta1.Service{
 						Annotations: map[string]string{"prometheus.io/scrape": "true"},
 						Labels:      map[string]string{"monitoring.example.com/team": "schemas"},
 					},
-					NetworkPolicy: &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true},
+					NetworkPolicy: &strimziregistryoperatorv1beta1.NetworkPolicy{Enabled: true},
 					Template:      corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
@@ -2388,7 +2388,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -2463,7 +2463,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
 			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 			DeferCleanup(func() {
-				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 					if len(found.Finalizers) > 0 {
 						found.Finalizers = []string{}
@@ -2499,14 +2499,14 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 			DeferCleanup(func() { _ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE") })
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "PLAINTEXT",
-					Service: &strimziregistryoperatorv1alpha1.Service{
+					Service: &strimziregistryoperatorv1beta1.Service{
 						Annotations: map[string]string{"prometheus.io/scrape": "true"},
 						Labels:      map[string]string{"monitoring.example.com/team": "schemas"},
 					},
@@ -2563,7 +2563,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			npName := types.NamespacedName{Name: SchemaRegistryName + "-network-policy", Namespace: SchemaRegistryName}
 			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 			DeferCleanup(func() {
-				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 					if len(found.Finalizers) > 0 {
 						found.Finalizers = []string{}
@@ -2599,14 +2599,14 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 			DeferCleanup(func() { _ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE") })
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         false,
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "PLAINTEXT",
-					NetworkPolicy:      &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true},
+					NetworkPolicy:      &strimziregistryoperatorv1beta1.NetworkPolicy{Enabled: true},
 					Template:           corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
 			}
@@ -2697,9 +2697,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         true,
 					ClientAuth:         true,
 					Listener:           "plain",
@@ -2712,7 +2712,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -2784,7 +2784,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			jksName := types.NamespacedName{Name: SchemaRegistryName + "-jks", Namespace: SchemaRegistryName}
 			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 			DeferCleanup(func() {
-				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				if getErr := k8sClient.Get(ctx, typeNamespacedName, found); getErr == nil {
 					if len(found.Finalizers) > 0 {
 						found.Finalizers = []string{}
@@ -2829,9 +2829,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 			DeferCleanup(func() { _ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE") })
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         true,
 					ClientAuth:         true,
 					Listener:           "plain",
@@ -2950,9 +2950,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, userTLSSecret)).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         true,
 					Listener:           "plain",
 					CompatibilityLevel: "forward",
@@ -2965,7 +2965,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -3061,7 +3061,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			typeNamespacedName := types.NamespacedName{Name: SchemaRegistryName, Namespace: SchemaRegistryName}
 			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 			DeferCleanup(func() {
-				found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 					if len(found.Finalizers) > 0 {
 						found.Finalizers = []string{}
@@ -3072,9 +3072,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				_ = k8sClient.Delete(ctx, namespace)
 			})
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: SchemaRegistryName, Namespace: SchemaRegistryName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:    true,
 					TLSSecretName: "missing-user-tls-secret",
 					Listener:      "plain",
@@ -3206,13 +3206,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Status().Update(ctx, updatedCluster)).To(Succeed())
 
 			By("Creating a StrimziSchemaRegistry with the SSL protocol and no KafkaUser")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      SchemaRegistryName,
 					Namespace: SchemaRegistryName,
 					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
 				},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					Listener:           "tls",
 					CompatibilityLevel: "forward",
 					SecurityProtocol:   "SSL",
@@ -3223,7 +3223,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -3240,7 +3240,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).To(HaveOccurred())
 
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 
 			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
@@ -3355,13 +3355,13 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Status().Update(ctx, updatedCluster)).To(Succeed())
 
 			By("Creating a StrimziSchemaRegistry referencing a missing user TLS secret")
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      SchemaRegistryName,
 					Namespace: specNamespace,
 					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
 				},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:         true,
 					TLSSecretName:      UserTLSSecretName,
 					Listener:           "plain",
@@ -3374,7 +3374,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -3391,7 +3391,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 
 			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
@@ -3448,7 +3448,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Verifying the Ready condition is no longer InvalidTLSSecret")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
 			Expect(cond).NotTo(BeNil())
@@ -3479,7 +3479,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			cond := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
 			Expect(cond).NotTo(BeNil())
@@ -3535,10 +3535,10 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 				_ = k8sClient.Delete(ctx, namespace)
 			})
 
-			newCR := func(name, heapOpts string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
-				return &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			newCR := func(name, heapOpts string) *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
+				return &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespaceName},
-					Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+					Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 						SecureHTTP: false,
 						HeapOpts:   heapOpts,
 						Template:   corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
@@ -3603,14 +3603,14 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			typeNamespacedName types.NamespacedName
 		)
 
-		newCR := func(image string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
-			return &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		newCR := func(image string) *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
+			return &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      namespaceName,
 					Namespace: namespaceName,
 					Labels:    map[string]string{"strimzi.io/cluster": "kafka-cluster"},
 				},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP: false,
 					Listener:   "plain",
 					// PLAINTEXT keeps the scenario free of KafkaUser and
@@ -3668,7 +3668,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -3696,7 +3696,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			originalUID := deployment.UID
 
 			By("Changing the CR image to B")
-			cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			cr := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, cr)).To(Succeed())
 			cr.Spec.Template.Spec.Containers[0].Image = "confluentinc/cp-schema-registry:8.4.1"
 			Expect(k8sClient.Update(ctx, cr)).To(Succeed())
@@ -3754,7 +3754,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			legacyUID := legacyDeployment.UID
 
 			By("Changing the CR image to B")
-			cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			cr := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, cr)).To(Succeed())
 			cr.Spec.Template.Spec.Containers[0].Image = "confluentinc/cp-schema-registry:8.4.1"
 			Expect(k8sClient.Update(ctx, cr)).To(Succeed())
@@ -3866,9 +3866,9 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-			resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{Name: namespaceName, Namespace: namespaceName, Labels: map[string]string{"strimzi.io/cluster": "kafka-cluster"}},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP:       true,
 					Listener:         "TLS",
 					SecurityProtocol: "SASL_SSL",
@@ -3879,7 +3879,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 				if len(found.Finalizers) > 0 {
 					found.Finalizers = []string{}
@@ -3975,15 +3975,15 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			typeNamespacedName types.NamespacedName
 		)
 
-		newFinalizerResource := func(finalizers []string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
-			return &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		newFinalizerResource := func(finalizers []string) *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
+			return &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       namespaceName,
 					Namespace:  namespaceName,
 					Labels:     map[string]string{"strimzi.io/cluster": "kafka-cluster"},
 					Finalizers: finalizers,
 				},
-				Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 					SecureHTTP: true, Listener: "TLS",
 					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}}}},
 				},
@@ -4006,7 +4006,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 		})
 
 		AfterEach(func() {
-			found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := k8sClient.Get(ctx, typeNamespacedName, found)
 			if err == nil {
 				found.Finalizers = []string{} // Remove finalizers to allow deletion
@@ -4022,7 +4022,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Create(ctx, newFinalizerResource([]string{legacyFinalizer}))).To(Succeed())
 
 			By("Deleting the CR (the legacy finalizer keeps it in Terminating)")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, instance)).To(Succeed())
 
@@ -4033,7 +4033,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			By("Checking that the CR is fully deleted")
 			Eventually(func() error {
-				updatedInstance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				updatedInstance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				return k8sClient.Get(ctx, typeNamespacedName, updatedInstance)
 			}, time.Minute, time.Second).ShouldNot(Succeed(), "CR with only the legacy finalizer should be deleted")
 		})
@@ -4043,7 +4043,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			Expect(k8sClient.Create(ctx, newFinalizerResource([]string{finalizer}))).To(Succeed())
 
 			By("Deleting the CR")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, instance)).To(Succeed())
 
@@ -4054,7 +4054,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 
 			By("Checking that the CR is fully deleted")
 			Eventually(func() error {
-				updatedInstance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+				updatedInstance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 				return k8sClient.Get(ctx, typeNamespacedName, updatedInstance)
 			}, time.Minute, time.Second).ShouldNot(Succeed(), "CR with the current finalizer should be deleted")
 		})
@@ -4068,7 +4068,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 
 			By("Checking that the legacy finalizer was removed and no new one was added")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			Expect(instance.Finalizers).To(BeEmpty(), "the no-op finalizer must not be replaced")
 		})
@@ -4082,7 +4082,7 @@ var _ = Describe("StrimziSchemaRegistry Controller", func() {
 			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 
 			By("Checking that the no-op finalizer was removed")
-			instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, instance)).To(Succeed())
 			Expect(instance.Finalizers).To(BeEmpty(), "upgraded live CRs must drop the no-op finalizer")
 		})

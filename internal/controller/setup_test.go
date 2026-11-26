@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 )
@@ -90,7 +90,7 @@ var _ = Describe("Kafka CR watch pipeline (T-2)", func() {
 		if cancelMgr != nil {
 			cancelMgr()
 		}
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, registryKey, found); err == nil {
 			if len(found.Finalizers) > 0 {
 				found.Finalizers = []string{}
@@ -136,13 +136,13 @@ var _ = Describe("Kafka CR watch pipeline (T-2)", func() {
 	}
 
 	createRegistry := func(name, clusterLabel string) {
-		resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
 				Namespace: specNamespace,
 				Labels:    map[string]string{"strimzi.io/cluster": clusterLabel},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				Listener:           "plain",
 				CompatibilityLevel: "forward",
 				SecurityProtocol:   "PLAINTEXT",
@@ -173,13 +173,13 @@ var _ = Describe("Kafka CR watch pipeline (T-2)", func() {
 			},
 		})).To(Succeed())
 
-		resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
 				Namespace: specNamespace,
 				Labels:    map[string]string{"strimzi.io/cluster": clusterLabel},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				Listener:           "plain",
 				CompatibilityLevel: "forward",
 				SecurityProtocol:   "PLAINTEXT",

@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -41,10 +41,10 @@ import (
 // newSpecDriftFixture builds an operator-complete Deployment fixture (built by
 // buildDeploymentSpec, so it matches the desired build exactly) together with
 // the reconciler needed to exercise updateExistingDeployment.
-func newSpecDriftFixture(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
+func newSpecDriftFixture(t *testing.T, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) (*StrimziSchemaRegistryReconciler, *apps.Deployment) {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -63,7 +63,7 @@ func newSpecDriftFixture(t *testing.T, inst *strimziregistryoperatorv1alpha1.Str
 // the CR does not pin spec.replicas and is reverted when it does, and the
 // rotation rollout markers survive a spec patch.
 func TestUpdateExistingDeploymentPatchesSpecDrift(t *testing.T) {
-	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInst := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.Spec.SecurityProtocol = "PLAINTEXT"
 		inst.Spec.Listener = "tls"
@@ -180,7 +180,7 @@ func TestUpdateExistingDeploymentPatchesSpecDrift(t *testing.T) {
 
 	t.Run("rollout markers survive a spec patch", func(t *testing.T) {
 		scheme := runtime.NewScheme()
-		_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+		_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 		_ = corev1.AddToScheme(scheme)
 		_ = apps.AddToScheme(scheme)
 		_ = kafka.AddToScheme(scheme)
@@ -228,7 +228,7 @@ func TestUpdateExistingDeploymentPatchesSpecDrift(t *testing.T) {
 // successful reconcile must converge — the migration is retried, not lost.
 func TestRecreateDeploymentForLegacySelector_CreateError(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)

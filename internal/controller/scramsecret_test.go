@@ -34,7 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // C-5: a SASL registry whose KafkaUser SCRAM credentials secret does not exist
@@ -64,7 +64,7 @@ var _ = Describe("Reconcile with a missing KafkaUser SCRAM credential secret (C-
 	})
 
 	AfterEach(func() {
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, registryKey, found); err == nil {
 			if len(found.Finalizers) > 0 {
 				found.Finalizers = []string{}
@@ -116,13 +116,13 @@ var _ = Describe("Reconcile with a missing KafkaUser SCRAM credential secret (C-
 		})).To(Succeed())
 
 		By("creating the SASL_PLAINTEXT registry CR")
-		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      registryName,
 				Namespace: namespace.Name,
 				Labels:    map[string]string{strimziClusterLabel: "kafka-cluster"},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         false,
 				Listener:           "plain",
 				CompatibilityLevel: "forward",
@@ -140,7 +140,7 @@ var _ = Describe("Reconcile with a missing KafkaUser SCRAM credential secret (C-
 		Expect(err).To(HaveOccurred())
 
 		By("asserting the failure is surfaced on the CR status")
-		instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, registryKey, instance)).To(Succeed())
 		Expect(instance.Status.Status).To(Equal("ReconcileError"))
 		ready := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
@@ -189,7 +189,7 @@ var _ = Describe("Reconcile with a missing KafkaUser SCRAM credential secret (C-
 			_, reconcileErr := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: registryKey})
 			g.Expect(reconcileErr).NotTo(HaveOccurred())
 
-			current := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			current := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			g.Expect(k8sClient.Get(ctx, registryKey, current)).To(Succeed())
 			return current.Status.Status
 		}, 30*time.Second, 250*time.Millisecond).ShouldNot(Equal("ReconcileError"))

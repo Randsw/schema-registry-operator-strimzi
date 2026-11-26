@@ -15,7 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	"github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // The InvalidTLSSecret recovery scenario (plan §4.3 item 6) proves the
@@ -56,7 +56,7 @@ var _ = Describe("StrimziSchemaRegistry e2e InvalidTLSSecret recovery scenario",
 		fixture.ensureKafkaUser(ctx)
 
 		By("applying the CR pointing at a missing TLS secret")
-		Expect(fixture.apply(ctx, false, true, nil, func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
+		Expect(fixture.apply(ctx, false, true, nil, func(spec *v1beta1.StrimziSchemaRegistrySpec) {
 			spec.TLSSecretName = missingSecret
 		})).To(Succeed())
 
@@ -66,7 +66,7 @@ var _ = Describe("StrimziSchemaRegistry e2e InvalidTLSSecret recovery scenario",
 		})
 
 		By("verifying the CR status mirrors the invalid TLS secret")
-		cr := &v1alpha1.StrimziSchemaRegistry{}
+		cr := &v1beta1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{
 			Name:      fixture.Name,
 			Namespace: scenario.Namespace,
@@ -93,7 +93,7 @@ var _ = Describe("StrimziSchemaRegistry e2e InvalidTLSSecret recovery scenario",
 		fixture.waitReady(ctx)
 		fixture.waitRollout(ctx)
 
-		cr = &v1alpha1.StrimziSchemaRegistry{}
+		cr = &v1beta1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{
 			Name:      fixture.Name,
 			Namespace: scenario.Namespace,

@@ -30,7 +30,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	apps "k8s.io/api/apps/v1"
@@ -273,7 +273,7 @@ func TestUserTLSSecretValidationError(t *testing.T) {
 // updates) on subsequent reconciles.
 func TestHandleUserTLSSecretRotation(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
@@ -297,7 +297,7 @@ func TestHandleUserTLSSecretRotation(t *testing.T) {
 			Data:       validUserTLSSecretData(),
 		}
 	}
-	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInstance := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = true
 		inst.Spec.TLSSecretName = "user-tls"
@@ -455,7 +455,7 @@ func TestHandleUserTLSSecretRotation(t *testing.T) {
 // spec.tlssecretname, and a CR matching both paths is enqueued exactly once.
 func TestMapSecretToRequests(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 
 	// sr-name: matches the label path (secret named after the CR) and, via its
 	// own spec.tlssecretname, the name path too — must be enqueued once.
@@ -582,7 +582,7 @@ func TestMapSecretToRequests(t *testing.T) {
 				Name:      name,
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 					Kind:       "StrimziSchemaRegistry",
 					Name:       "sr-name",
 					UID:        "test-uid",
@@ -716,7 +716,7 @@ func TestSecretWatchPredicate(t *testing.T) {
 				Name:      name,
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 					Kind:       "StrimziSchemaRegistry",
 					Name:       "sr-name",
 					UID:        "test-uid",
@@ -805,7 +805,7 @@ func TestSecretWatchPredicate(t *testing.T) {
 // event enqueues the owning CR exactly once.
 func TestSecretEventPipelineBounded(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 
 	sr := newTestInstance()
 	sr.Name = "sr-name"
@@ -818,7 +818,7 @@ func TestSecretEventPipelineBounded(t *testing.T) {
 			Name:      "sr-name-jks",
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+				APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 				Kind:       "StrimziSchemaRegistry",
 				Name:       "sr-name",
 				UID:        "test-uid",
@@ -866,7 +866,7 @@ func TestSecretEventPipelineBounded(t *testing.T) {
 // the CA key secret is created after the CA cert secret.
 func TestCASecretEventPipelineBounded(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 
 	sr := newTestInstance()
 	sr.Name = "sr-name"
@@ -912,7 +912,7 @@ func TestCASecretEventPipelineBounded(t *testing.T) {
 				Name:      name,
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 					Kind:       "StrimziSchemaRegistry",
 					Name:       "sr-name",
 					UID:        "test-uid",
@@ -1014,10 +1014,10 @@ func jksCertificates(t *testing.T, keystoreBytes []byte, password string) []*x50
 // error naming the offending key.
 func TestBuildDerivedJKSSecretThreadCACert(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInstance := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = true
 		inst.Spec.TLSSecretName = "user-tls"
@@ -1185,7 +1185,7 @@ func TestHasPEMTLSSecretKeys(t *testing.T) {
 // the PEM content, and partial PEM secrets must surface the missing key
 // instead of falling back to the keystore contract.
 func TestValidateUserTLSSecret(t *testing.T) {
-	newInstance := func(tlsSecretName string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInstance := func(tlsSecretName string) *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = true
 		inst.Spec.TLSSecretName = tlsSecretName
@@ -1201,7 +1201,7 @@ func TestValidateUserTLSSecret(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		instance     *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
+		instance     *strimziregistryoperatorv1beta1.StrimziSchemaRegistry
 		secret       *corev1.Secret
 		wantInvalid  bool
 		wantMentions []string
@@ -1285,7 +1285,7 @@ func TestValidateUserTLSSecret(t *testing.T) {
 		},
 		{
 			name: "derived secret name exceeding the 253-character limit is invalid",
-			instance: func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+			instance: func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 				inst := newInstance("user-tls")
 				inst.Name = strings.Repeat("a", 241)
 				return inst
@@ -1366,10 +1366,10 @@ func TestDerivedSecretNameValid(t *testing.T) {
 // only when the user secret's resourceVersion changes.
 func TestEnsureDerivedJKSSecret(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInstance := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = true
 		inst.Spec.TLSSecretName = "user-tls"
@@ -1476,7 +1476,7 @@ func TestEnsureDerivedJKSSecret(t *testing.T) {
 				Name:      "test-sr-user-tls-jks",
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 					Kind:       "StrimziSchemaRegistry",
 					Name:       "other-sr",
 					UID:        "other-uid",
@@ -1564,11 +1564,11 @@ func newRestAPITLSDeployment(mountSecretName string) *apps.Deployment {
 // stays stable, and a stale mount is repointed at the derived secret.
 func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
-	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInstance := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = true
 		inst.Spec.TLSSecretName = "user-tls"
@@ -1644,7 +1644,7 @@ func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
 				Name:      "test-sr-user-tls-jks",
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 					Kind:       "StrimziSchemaRegistry",
 					Name:       "test-sr",
 					UID:        "test-uid",
@@ -1747,7 +1747,7 @@ func TestHandleUserTLSSecretRotationPEM(t *testing.T) {
 // the deployment must not be rolled.
 func TestHandleUserTLSSecretRotationPEM_DerivedSecretError(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
@@ -1765,7 +1765,7 @@ func TestHandleUserTLSSecretRotationPEM_DerivedSecretError(t *testing.T) {
 			Name:      "test-sr-user-tls-jks",
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+				APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 				Kind:       "StrimziSchemaRegistry",
 				Name:       "another-registry",
 				UID:        "other-uid",
@@ -1811,7 +1811,7 @@ func TestHandleUserTLSSecretRotationPEM_DerivedSecretError(t *testing.T) {
 // rolled exactly once, then the state must be stable.
 func TestHandleUserTLSSecretRotationPEM_LegacyMountMigration(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
@@ -1829,7 +1829,7 @@ func TestHandleUserTLSSecretRotationPEM_LegacyMountMigration(t *testing.T) {
 			Name:      "test-sr-user-tls-jks",
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+				APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 				Kind:       "StrimziSchemaRegistry",
 				Name:       "test-sr",
 				UID:        "test-uid",

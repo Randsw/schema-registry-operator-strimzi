@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	"github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // The service-networking scenario (E2-5) covers the documented
@@ -71,8 +71,8 @@ var _ = Describe("StrimziSchemaRegistry e2e service networking scenario", Ordere
 		ctx := context.Background()
 
 		By("applying the CR with the NetworkPolicy enabled")
-		Expect(applyRegistryCR(ctx, false, false, nil, func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
-			spec.NetworkPolicy = &v1alpha1.NetworkPolicy{Enabled: true}
+		Expect(applyRegistryCR(ctx, false, false, nil, func(spec *v1beta1.StrimziSchemaRegistrySpec) {
+			spec.NetworkPolicy = &v1beta1.NetworkPolicy{Enabled: true}
 		})).To(Succeed())
 		waitForReadyCondition(ctx, readyTimeout)
 		waitForDeploymentRollout(ctx, readyTimeout)

@@ -123,7 +123,7 @@ vet: ## Run go vet against code.
 
 # Coverage intentionally excludes two non-project entries (filtered from
 # cover.out by hack/coverage-filter.sh, and never tested directly):
-#   * api/v1alpha1/zz_generated.deepcopy.go is controller-gen output from
+#   * api/v1beta1/zz_generated.deepcopy.go is controller-gen output from
 #     `make generate`; it is regenerated, not hand-written project code.
 #   * main() in cmd/main.go is process wiring (flags, manager construction,
 #     signal handling) that only runs inside the operator binary. The rest of

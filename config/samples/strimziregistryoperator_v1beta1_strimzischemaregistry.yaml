@@ -1,6 +1,6 @@
 # SSL (default): TLS transport with mTLS (client certificates).
 # Requires a KafkaUser named after this CR with `authentication.type: tls`.
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   labels:
@@ -23,7 +23,7 @@ spec:
 ---
 # SASL_SSL: TLS transport with SCRAM-SHA-512 authentication.
 # Requires a KafkaUser named after this CR with `authentication.type: scram-sha-512`.
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   labels:
@@ -46,7 +46,7 @@ spec:
 ---
 # SASL_PLAINTEXT: plaintext transport with SCRAM-SHA-512 authentication (no TLS/certificates).
 # Requires a KafkaUser named after this CR with `authentication.type: scram-sha-512`.
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   labels:
@@ -69,7 +69,7 @@ spec:
 ---
 # PLAINTEXT: plaintext transport with no authentication and no certificates.
 # No KafkaUser secret is required.
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   labels:

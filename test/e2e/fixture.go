@@ -23,7 +23,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	"github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 )
@@ -66,7 +66,7 @@ func newRegistryFixture(suffix string) *registryFixture {
 
 // apply creates or updates the fixture CR with the shared spec builder.
 func (f *registryFixture) apply(ctx context.Context, clientAuth, secureHTTP bool, replicas *int32,
-	mutators ...func(*v1alpha1.StrimziSchemaRegistrySpec)) error {
+	mutators ...func(*v1beta1.StrimziSchemaRegistrySpec)) error {
 	return applyRegistryCRFor(ctx, f.Name, f.Topic, f.GroupID, clientAuth, secureHTTP, replicas, mutators...)
 }
 

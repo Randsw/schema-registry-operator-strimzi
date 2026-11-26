@@ -26,7 +26,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
@@ -121,7 +121,7 @@ const strimziClusterLabel = "strimzi.io/cluster"
 
 // getStrimziClusterName extracts the strimzi.io/cluster label value from the instance.
 // Returns an error if labels are nil or the required label is missing.
-func getStrimziClusterName(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (string, error) {
+func getStrimziClusterName(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) (string, error) {
 	labels := instance.GetLabels()
 	if labels == nil {
 		return "", fmt.Errorf("StrimziSchemaRegistry %s/%s has no labels; required label %q is missing",
@@ -137,7 +137,7 @@ func getStrimziClusterName(instance *strimziregistryoperatorv1alpha1.StrimziSche
 
 // clientAuthValidationError returns a non-empty message describing why the
 // ClientAuth spec is invalid, or an empty string when it is valid.
-func clientAuthValidationError(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+func clientAuthValidationError(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) string {
 	if instance.Spec.ClientAuth && !instance.Spec.SecureHTTP {
 		return "spec.clientauth is only valid when spec.securehttp is true"
 	}
@@ -152,7 +152,7 @@ func clientAuthValidationError(instance *strimziregistryoperatorv1alpha1.Strimzi
 // host.name, so inter-instance HTTPS forwarding between replicas fails TLS
 // verification. A user-provided TLS secret (spec.tlssecretname) may cover
 // the replica addresses and is therefore accepted.
-func httpsMultiReplicaValidationError(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+func httpsMultiReplicaValidationError(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) string {
 	if instance.Spec.SecureHTTP && instance.Spec.TLSSecretName == "" &&
 		instance.Spec.Replicas != nil && *instance.Spec.Replicas > 1 {
 		return "spec.replicas > 1 with securehttp and no spec.tlssecretname is unsupported: the operator-generated REST API certificate covers DNS names only, while each replica advertises its pod IP as host.name, so inter-instance HTTPS forwarding fails TLS verification; provide spec.tlssecretname with a certificate covering the replica addresses, or set replicas to 1 or securehttp to false"
@@ -167,7 +167,7 @@ func httpsMultiReplicaValidationError(instance *strimziregistryoperatorv1alpha1.
 // with "nodePort: Forbidden", which would deadlock reconciliation in a
 // ReconcileError loop. Controller-side defense-in-depth — the CRD CEL rule
 // rejects the combination at admission time.
-func serviceValidationError(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+func serviceValidationError(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) string {
 	if instance.Spec.Service == nil || instance.Spec.Service.NodePort == nil {
 		return ""
 	}
@@ -274,7 +274,7 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 
 	// Reconcile watch deployment, StrimziSchemaRegistry and secret managed by Strimzi operator
 	logger.Info("Reconciling StrimziSchemaRegistry")
-	instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -769,8 +769,8 @@ func (r *StrimziSchemaRegistryReconciler) Reconcile(ctx context.Context, req ctr
 // state.
 func (r *StrimziSchemaRegistryReconciler) setReconcileErrorStatus(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
-	origStatus *strimziregistryoperatorv1alpha1.StrimziSchemaRegistryStatus,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
+	origStatus *strimziregistryoperatorv1beta1.StrimziSchemaRegistryStatus,
 	logger logr.Logger,
 	reconcileErr error,
 ) {
@@ -841,7 +841,7 @@ func readyCondition(desiredReplicas, replicas, readyReplicas, updatedReplicas in
 //   - PLAINTEXT: no secret material, so there is nothing to rotate.
 func (r *StrimziSchemaRegistryReconciler) handleSecretRotation(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 	strimziClusterName string,
 ) (ctrl.Result, error) {
@@ -895,7 +895,7 @@ func (r *StrimziSchemaRegistryReconciler) handleSecretRotation(
 // rolls the deployment when the KafkaUser or cluster CA secret changes (SSL).
 func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 	strimziClusterName string,
 	auth kafkaAuth,
@@ -1049,7 +1049,7 @@ func (r *StrimziSchemaRegistryReconciler) handleMTLSSecretRotation(
 //     SCRAM credential secret changes.
 func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 	strimziClusterName string,
 	auth kafkaAuth,
@@ -1158,7 +1158,7 @@ func (r *StrimziSchemaRegistryReconciler) handleSASLSecretRotation(
 // trigger a rollout.
 func (r *StrimziSchemaRegistryReconciler) handleClientAuthTruststoreRotation(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 	strimziClusterName string,
 ) (ctrl.Result, error) {
@@ -1191,7 +1191,7 @@ func (r *StrimziSchemaRegistryReconciler) handleClientAuthTruststoreRotation(
 // credentials have changed and the pods need to be rolled.
 func (r *StrimziSchemaRegistryReconciler) saslUserSecretChanged(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	userSecret *v1.Secret,
 ) (bool, error) {
 	dep := &apps.Deployment{}
@@ -1212,7 +1212,7 @@ func (r *StrimziSchemaRegistryReconciler) saslUserSecretChanged(
 // on the deployment pod template, triggering a rollout so pods pick up the new
 // SASL credentials.
 func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSASLUserSecret(
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context,
 	logger logr.Logger,
 	userSecret *v1.Secret,
@@ -1245,7 +1245,7 @@ func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSASLUserSecret(
 // annotation already matches (no spurious rollout).
 func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSecretVersion(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 	annotationKey string,
 	secretVersion string,
@@ -1301,7 +1301,7 @@ func (r *StrimziSchemaRegistryReconciler) kafkaWatchMapper() func(ctx context.Co
 // name keeps Kafka events (including status.listeners/bootstrap changes)
 // flowing to reconciliation without any artificial label on the watched CR.
 func (r *StrimziSchemaRegistryReconciler) mapKafkaToRequests(ctx context.Context, obj client.Object) []reconcile.Request {
-	list := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+	list := &strimziregistryoperatorv1beta1.StrimziSchemaRegistryList{}
 	if err := r.List(ctx, list,
 		client.InNamespace(obj.GetNamespace()),
 		client.MatchingLabels{strimziClusterLabel: obj.GetName()},
@@ -1331,7 +1331,7 @@ func (r *StrimziSchemaRegistryReconciler) mapStrimziResourceToRequests(ctx conte
 	if clusterName == "" {
 		return nil
 	}
-	list := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+	list := &strimziregistryoperatorv1beta1.StrimziSchemaRegistryList{}
 	if err := r.List(ctx, list,
 		client.InNamespace(obj.GetNamespace()),
 		client.MatchingLabels{strimziClusterLabel: clusterName},
@@ -1413,7 +1413,7 @@ func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Contex
 	// List scope (typically 1 CR per cluster).
 	secretClusterName := obj.GetLabels()[strimziClusterLabel]
 	if secretClusterName != "" {
-		attachedStrimziRegistryOperators := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+		attachedStrimziRegistryOperators := &strimziregistryoperatorv1beta1.StrimziSchemaRegistryList{}
 		if err := r.List(ctx, attachedStrimziRegistryOperators,
 			client.InNamespace(obj.GetNamespace()),
 			client.MatchingLabels{strimziClusterLabel: secretClusterName},
@@ -1449,7 +1449,7 @@ func (r *StrimziSchemaRegistryReconciler) mapSecretToRequests(ctx context.Contex
 	// entirely for cluster CA cert secrets, which can only match via the
 	// label path (B11).
 	if !isClusterCA {
-		tlsReferencing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+		tlsReferencing := &strimziregistryoperatorv1beta1.StrimziSchemaRegistryList{}
 		if err := r.List(ctx, tlsReferencing, client.InNamespace(obj.GetNamespace())); err == nil {
 			for i := range tlsReferencing.Items {
 				item := &tlsReferencing.Items[i]
@@ -1507,7 +1507,7 @@ func secretWatchPredicate() predicate.Funcs {
 // suppressed while deletions of operator-managed secrets are observed.
 func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}).
+		For(&strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}).
 		Watches(
 			&v1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.mapSecretToRequests),
@@ -1538,7 +1538,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 // deletion paths; a List error is logged and ignored so it never fails
 // reconciliation.
 func (r *StrimziSchemaRegistryReconciler) updateInstanceCountMetric(ctx context.Context) {
-	list := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistryList{}
+	list := &strimziregistryoperatorv1beta1.StrimziSchemaRegistryList{}
 	if err := r.List(ctx, list); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to list StrimziSchemaRegistry CRs for the instance count metric")
 		return
@@ -1555,7 +1555,7 @@ func (r *StrimziSchemaRegistryReconciler) updateInstanceCountMetric(ctx context.
 // so a live upgraded CR never keeps a dangling finalizer.
 func (r *StrimziSchemaRegistryReconciler) removeManagedFinalizers(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 ) error {
 	changed := false
@@ -1589,7 +1589,7 @@ func (r *StrimziSchemaRegistryReconciler) removeManagedFinalizers(
 // quiet cluster.
 func (r *StrimziSchemaRegistryReconciler) handleTLSCertExpiry(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 	strimziClusterName string,
 ) (ctrl.Result, time.Duration, error) {
@@ -1744,7 +1744,7 @@ func certRecheckInterval(notAfter time.Time) time.Duration {
 // secret on first reconcile.
 func (r *StrimziSchemaRegistryReconciler) recreateMissingTLSSecret(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 	strimziClusterName string,
 ) (ctrl.Result, error) {
@@ -1803,7 +1803,7 @@ func (r *StrimziSchemaRegistryReconciler) recreateMissingTLSSecret(
 // createDeployment records the version at creation time).
 func (r *StrimziSchemaRegistryReconciler) handleUserTLSSecretRotation(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
 	if !instance.Spec.SecureHTTP || instance.Spec.TLSSecretName == "" {
@@ -1876,7 +1876,7 @@ func (r *StrimziSchemaRegistryReconciler) handleUserTLSSecretRotation(
 
 // emitConfigOverriddenEvents records a Warning event for each spec.configuration
 // key that was skipped because it is operator-managed.
-func (r *StrimziSchemaRegistryReconciler) emitConfigOverriddenEvents(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, overridden []string) {
+func (r *StrimziSchemaRegistryReconciler) emitConfigOverriddenEvents(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, overridden []string) {
 	if r.Recorder == nil {
 		return
 	}

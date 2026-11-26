@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -48,7 +48,7 @@ const saslMechanismSCRAMSHA512 = "SCRAM-SHA-512"
 
 // resolveKafkaAuth determines the effective Kafka authentication configuration
 // from the StrimziSchemaRegistry security protocol and the referenced KafkaUser.
-func resolveKafkaAuth(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, kafkaUser *kafka.KafkaUser) (kafkaAuth, error) {
+func resolveKafkaAuth(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, kafkaUser *kafka.KafkaUser) (kafkaAuth, error) {
 	protocol := instance.Spec.SecurityProtocol
 	if protocol == "" {
 		protocol = "SSL"
@@ -107,7 +107,7 @@ func resolveKafkaAuth(instance *strimziregistryoperatorv1alpha1.StrimziSchemaReg
 // instance, or nil when no such KafkaUser exists. The lookup is a direct Get
 // by name (the KafkaUser is conventionally named after the CR) instead of
 // listing every KafkaUser in the namespace.
-func (r *StrimziSchemaRegistryReconciler) getKafkaUser(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, ctx context.Context) (*kafka.KafkaUser, error) {
+func (r *StrimziSchemaRegistryReconciler) getKafkaUser(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, ctx context.Context) (*kafka.KafkaUser, error) {
 	kafkaUser := &kafka.KafkaUser{}
 	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, kafkaUser)
 	if err != nil {

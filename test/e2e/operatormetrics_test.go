@@ -23,7 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	"github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // The operator-metrics scenario (E2-8) verifies the operator's own metrics
@@ -85,7 +85,7 @@ var _ = Describe("StrimziSchemaRegistry e2e operator metrics scenario", Ordered,
 			"the metrics endpoint did not expose %s within %s", instanceCountMetric, statusTimeout)
 
 		By("verifying the gauge matches the live CR count")
-		crList := &v1alpha1.StrimziSchemaRegistryList{}
+		crList := &v1beta1.StrimziSchemaRegistryList{}
 		Expect(k8sClient.List(ctx, crList)).To(Succeed())
 		gauge, err := metricValue(body, instanceCountMetric)
 		Expect(err).NotTo(HaveOccurred())
