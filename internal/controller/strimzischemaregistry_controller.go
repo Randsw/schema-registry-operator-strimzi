@@ -58,6 +58,13 @@ type StrimziSchemaRegistryReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder recorder.EventRecorder
+
+	// KafkaWatchMapper overrides the Kafka watch mapper installed by
+	// SetupWithManager (P3.7). A nil value selects the production
+	// mapKafkaToRequests (C-1). It is a constructor argument of the watch
+	// wiring so a test can drive the pipeline through a stub without reaching
+	// into package internals.
+	KafkaWatchMapper func(ctx context.Context, obj client.Object) []reconcile.Request
 }
 
 // finalizer and legacyFinalizer are only ever removed, never added. The
@@ -1272,6 +1279,18 @@ func (r *StrimziSchemaRegistryReconciler) rollDeploymentForSecretVersion(
 	return true, nil
 }
 
+// kafkaWatchMapper returns the function SetupWithManager installs for the
+// Kafka watch: the injected KafkaWatchMapper when set, otherwise the
+// production name-based mapper. Keeping the mapper behind this accessor means
+// the watch wiring does not depend on package internals and a test can inject
+// a stub without touching production code.
+func (r *StrimziSchemaRegistryReconciler) kafkaWatchMapper() func(ctx context.Context, obj client.Object) []reconcile.Request {
+	if r.KafkaWatchMapper != nil {
+		return r.KafkaWatchMapper
+	}
+	return r.mapKafkaToRequests
+}
+
 // mapKafkaToRequests enqueues reconcile requests for the StrimziSchemaRegistry
 // CRs attached to the Kafka cluster represented by the watched Kafka CR.
 //
@@ -1496,7 +1515,7 @@ func (r *StrimziSchemaRegistryReconciler) SetupWithManager(mgr ctrl.Manager) err
 		).
 		Watches(
 			&kafka.Kafka{},
-			handler.EnqueueRequestsFromMapFunc(r.mapKafkaToRequests),
+			handler.EnqueueRequestsFromMapFunc(r.kafkaWatchMapper()),
 		).
 		Watches(
 			&kafka.KafkaUser{},
