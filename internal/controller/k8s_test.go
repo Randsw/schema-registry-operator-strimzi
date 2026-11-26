@@ -478,32 +478,6 @@ func TestBuildDeploymentSpecReplicas(t *testing.T) {
 	})
 }
 
-// TestComputeSpecHashReplicas covers B20: changing spec.replicas must change
-// the spec hash so a replica change triggers a deployment update, while an
-// explicit 1 and an unset replicas (both meaning 1) must hash identically to
-// avoid a spurious rollout.
-func TestComputeSpecHashReplicas(t *testing.T) {
-	inst := newTestInstance()
-	inst.Spec.SecurityProtocol = "PLAINTEXT"
-	inst.Spec.Template = corev1.PodTemplateSpec{
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
-	}
-
-	unset := computeSpecHash(inst)
-
-	inst.Spec.Replicas = ptr.To(int32(1))
-	explicitOne := computeSpecHash(inst)
-	if explicitOne != unset {
-		t.Errorf("expected an explicit replicas=1 to hash like the unset default, got %s vs %s", explicitOne, unset)
-	}
-
-	inst.Spec.Replicas = ptr.To(int32(2))
-	explicitTwo := computeSpecHash(inst)
-	if explicitTwo == unset {
-		t.Error("expected a replicas change (1 -> 2) to change the spec hash")
-	}
-}
-
 // TestUpdateExistingDeploymentAppliesCRReplicas covers B20: when the CR sets
 // spec.replicas, the desired replica count must win over a manually scaled
 // Deployment on a spec change. The B6 preservation applies only when the CR
@@ -1121,6 +1095,161 @@ func TestComputeSpecHash(t *testing.T) {
 			t.Errorf("expected different hashes for different container env vars: both %q", hash1)
 		}
 	})
+
+	// B20: replicas must participate in the hash so a replica change triggers
+	// a deployment update, while an explicit 1 and an unset replicas (both
+	// meaning 1) must hash identically to avoid a spurious rollout.
+	t.Run("replicas: explicit one matches unset and two changes the hash", func(t *testing.T) {
+		inst := newTestInstance()
+		inst.Spec.SecurityProtocol = "PLAINTEXT"
+		inst.Spec.Template = corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sr", Image: "confluentinc/cp-schema-registry:8.4.1"}}},
+		}
+
+		unset := computeSpecHash(inst)
+
+		inst.Spec.Replicas = ptr.To(int32(1))
+		explicitOne := computeSpecHash(inst)
+		if explicitOne != unset {
+			t.Errorf("expected an explicit replicas=1 to hash like the unset default, got %s vs %s", explicitOne, unset)
+		}
+
+		inst.Spec.Replicas = ptr.To(int32(2))
+		explicitTwo := computeSpecHash(inst)
+		if explicitTwo == unset {
+			t.Error("expected a replicas change (1 -> 2) to change the spec hash")
+		}
+	})
+
+	// The storage-identity fields must participate in the hash so changes
+	// trigger a deployment rollout.
+	t.Run("different KafkastoreTopic produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.KafkastoreTopic = "custom-schemas"
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different KafkastoreTopic: both %q", hash1)
+		}
+	})
+
+	t.Run("different KafkastoreTopicReplicationFactor produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		rf := int32(1)
+		inst2.Spec.KafkastoreTopicReplicationFactor = &rf
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different KafkastoreTopicReplicationFactor: both %q", hash1)
+		}
+	})
+
+	t.Run("different SchemaRegistryGroupID produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.SchemaRegistryGroupID = "custom-group"
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different SchemaRegistryGroupID: both %q", hash1)
+		}
+	})
+
+	t.Run("different MasterEligibility produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		masterEligibility := false
+		inst2.Spec.MasterEligibility = &masterEligibility
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different MasterEligibility: both %q", hash1)
+		}
+	})
+
+	// spec.configuration must be hashed deterministically regardless of map
+	// insertion order.
+	t.Run("same configuration with different insertion order produces same hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Configuration = map[string]string{
+			"access.control.allow.origin": "*",
+			"authentication.realm":        "Basic",
+			"debug":                       "true",
+		}
+		inst2 := newTestInstance()
+		inst2.Spec.Configuration = map[string]string{
+			"debug":                       "true",
+			"access.control.allow.origin": "*",
+			"authentication.realm":        "Basic",
+		}
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 != hash2 {
+			t.Errorf("expected same hash for same configuration with different insertion order: %q vs %q", hash1, hash2)
+		}
+	})
+
+	t.Run("different configuration produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.Configuration = map[string]string{"debug": "true"}
+		inst2 := newTestInstance()
+		inst2.Spec.Configuration = map[string]string{"debug": "false"}
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different configuration values: both %q", hash1)
+		}
+	})
+
+	// spec.keystoretype must participate in the hash so switching the keystore
+	// type triggers a deployment rollout, while unset and explicit JKS (the
+	// default) hash identically.
+	t.Run("different KeystoreType produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.KeystoreType = "PKCS12"
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different KeystoreType: both %q", hash1)
+		}
+	})
+
+	t.Run("unset and explicit JKS KeystoreType produce the same hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst2 := newTestInstance()
+		inst2.Spec.KeystoreType = "JKS"
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 != hash2 {
+			t.Errorf("expected same hash for unset and explicit JKS: %q vs %q", hash1, hash2)
+		}
+	})
+
+	t.Run("different ClientAuth produces different hash", func(t *testing.T) {
+		inst1 := newTestInstance()
+		inst1.Spec.SecureHTTP = true
+		inst1.Spec.ClientAuth = false
+		inst2 := newTestInstance()
+		inst2.Spec.SecureHTTP = true
+		inst2.Spec.ClientAuth = true
+
+		hash1 := computeSpecHash(inst1)
+		hash2 := computeSpecHash(inst2)
+		if hash1 == hash2 {
+			t.Errorf("expected different hashes for different ClientAuth: both %q", hash1)
+		}
+	})
 }
 
 // TestGetStrimziClusterName covers T3: verify that getStrimziClusterName
@@ -1557,60 +1686,6 @@ func TestBuildPodEnvStorageIdentity(t *testing.T) {
 	})
 }
 
-// TestComputeSpecHashStorageIdentity verifies that the four new spec fields
-// participate in the spec hash so changes trigger a deployment rollout.
-func TestComputeSpecHashStorageIdentity(t *testing.T) {
-	t.Run("different KafkastoreTopic produces different hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst2 := newTestInstance()
-		inst2.Spec.KafkastoreTopic = "custom-schemas"
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for different KafkastoreTopic: both %q", hash1)
-		}
-	})
-
-	t.Run("different KafkastoreTopicReplicationFactor produces different hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst2 := newTestInstance()
-		rf := int32(1)
-		inst2.Spec.KafkastoreTopicReplicationFactor = &rf
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for different KafkastoreTopicReplicationFactor: both %q", hash1)
-		}
-	})
-
-	t.Run("different SchemaRegistryGroupID produces different hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst2 := newTestInstance()
-		inst2.Spec.SchemaRegistryGroupID = "custom-group"
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for different SchemaRegistryGroupID: both %q", hash1)
-		}
-	})
-
-	t.Run("different MasterEligibility produces different hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst2 := newTestInstance()
-		masterEligibility := false
-		inst2.Spec.MasterEligibility = &masterEligibility
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for different MasterEligibility: both %q", hash1)
-		}
-	})
-}
-
 func TestConfluentPropertyToEnvName(t *testing.T) {
 	tests := []struct {
 		key  string
@@ -1841,42 +1916,6 @@ func TestBuildPodEnvConfigurationReserved(t *testing.T) {
 		requireEnvValue(t, env, "SCHEMA_REGISTRY_DEBUG", "true")
 		if len(overridden) != 1 || overridden[0] != "debug" {
 			t.Errorf("expected overridden to contain the colliding key, got %v", overridden)
-		}
-	})
-}
-
-func TestComputeSpecHashConfigurationDeterministic(t *testing.T) {
-	t.Run("same configuration with different insertion order produces same hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst1.Spec.Configuration = map[string]string{
-			"access.control.allow.origin": "*",
-			"authentication.realm":        "Basic",
-			"debug":                       "true",
-		}
-		inst2 := newTestInstance()
-		inst2.Spec.Configuration = map[string]string{
-			"debug":                       "true",
-			"access.control.allow.origin": "*",
-			"authentication.realm":        "Basic",
-		}
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 != hash2 {
-			t.Errorf("expected same hash for same configuration with different insertion order: %q vs %q", hash1, hash2)
-		}
-	})
-
-	t.Run("different configuration produces different hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst1.Spec.Configuration = map[string]string{"debug": "true"}
-		inst2 := newTestInstance()
-		inst2.Spec.Configuration = map[string]string{"debug": "false"}
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for different configuration values: both %q", hash1)
 		}
 	})
 }
@@ -3864,35 +3903,6 @@ func TestBuildPodEnvKeystoreType(t *testing.T) {
 	})
 }
 
-// TestComputeSpecHashKeystoreType verifies that spec.keystoretype participates
-// in the spec hash so switching the keystore type triggers a deployment
-// rollout.
-func TestComputeSpecHashKeystoreType(t *testing.T) {
-	t.Run("different KeystoreType produces different hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst2 := newTestInstance()
-		inst2.Spec.KeystoreType = "PKCS12"
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for different KeystoreType: both %q", hash1)
-		}
-	})
-
-	t.Run("unset and explicit JKS produce the same hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst2 := newTestInstance()
-		inst2.Spec.KeystoreType = "JKS"
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 != hash2 {
-			t.Errorf("expected same hash for unset and explicit JKS: %q vs %q", hash1, hash2)
-		}
-	})
-}
-
 func TestBuildPodVolumesClientAuth(t *testing.T) {
 	t.Run("client auth mounts JKS volume even for PLAINTEXT", func(t *testing.T) {
 		inst := newTestInstance()
@@ -3910,23 +3920,6 @@ func TestBuildPodVolumesClientAuth(t *testing.T) {
 		}
 		if len(mounts) == 0 || mounts[0].MountPath != "/var/schemaregistry" {
 			t.Errorf("expected /var/schemaregistry volume mount")
-		}
-	})
-}
-
-func TestComputeSpecHashClientAuth(t *testing.T) {
-	t.Run("different ClientAuth produces different hash", func(t *testing.T) {
-		inst1 := newTestInstance()
-		inst1.Spec.SecureHTTP = true
-		inst1.Spec.ClientAuth = false
-		inst2 := newTestInstance()
-		inst2.Spec.SecureHTTP = true
-		inst2.Spec.ClientAuth = true
-
-		hash1 := computeSpecHash(inst1)
-		hash2 := computeSpecHash(inst2)
-		if hash1 == hash2 {
-			t.Errorf("expected different hashes for different ClientAuth: both %q", hash1)
 		}
 	})
 }
