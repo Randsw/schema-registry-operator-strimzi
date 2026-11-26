@@ -3549,6 +3549,25 @@ func TestGetKafkaBootstrapServersError(t *testing.T) {
 			t.Errorf("expected the error to mention the missing status.listeners, got: %s", err.Error())
 		}
 	})
+
+	t.Run("nil status is reported as no listeners instead of panicking", func(t *testing.T) {
+		// A Kafka CR that Strimzi has never reconciled carries a nil status
+		// rather than an empty one; the lookup must not dereference it.
+		kafkaCR := newTestKafkaCR("kafka-cluster", "default")
+		kafkaCR.Status = nil
+		client := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(newInstance("tls"), kafkaCR).
+			Build()
+		r := &StrimziSchemaRegistryReconciler{Client: client, Scheme: scheme}
+
+		_, _, err := r.getKafkaBootstrapServers(newInstance("tls"), context.Background(), logr.Logger{})
+		if err == nil {
+			t.Fatal("expected an error when the Kafka CR status is nil")
+		}
+		if !strings.Contains(err.Error(), "no status.listeners") {
+			t.Errorf("expected the error to mention the missing status.listeners, got: %s", err.Error())
+		}
+	})
 }
 
 // TestReconcileSkipsInvalidClientAuthCombination covers B12: when
