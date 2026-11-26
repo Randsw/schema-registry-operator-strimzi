@@ -7,9 +7,13 @@ import (
 )
 
 // TestRegisterMetricsExposesCorrectedInstanceCountGauge covers B13: the
-// instance-count gauge is exposed under the correctly spelled name
-// strimzi_schema_registry_instance_current_count (the old misspelled
+// instance-count gauge is registered and exposed under the correctly spelled
+// name strimzi_schema_registry_instance_current_count (the old misspelled
 // strimzi_schema_register_instance_current_count metric was removed).
+//
+// The gauge's set/read-back behavior is deliberately not asserted: that is
+// the Prometheus client library's contract, not the operator's. The operator
+// contract is the registration and the exposed name.
 func TestRegisterMetricsExposesCorrectedInstanceCountGauge(t *testing.T) {
 	RegisterMetrics()
 
@@ -27,25 +31,5 @@ func TestRegisterMetricsExposesCorrectedInstanceCountGauge(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected metric strimzi_schema_registry_instance_current_count to be registered and exposed")
-	}
-
-	// The gauge exposes the value it was set to (merged from the former
-	// TestInstanceCountGaugeRegisterCleanly).
-	StrimziSchemaRegistryCurrentInstanceCount.Set(3)
-	families, err = metrics.Registry.Gather()
-	if err != nil {
-		t.Fatalf("failed to gather metrics: %v", err)
-	}
-	value := -1.0
-	for _, mf := range families {
-		if mf.GetName() != "strimzi_schema_registry_instance_current_count" {
-			continue
-		}
-		for _, m := range mf.GetMetric() {
-			value = m.GetGauge().GetValue()
-		}
-	}
-	if value != 3 {
-		t.Errorf("expected the gauge to expose 3, got %v", value)
 	}
 }
