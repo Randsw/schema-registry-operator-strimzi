@@ -32,7 +32,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 )
 
@@ -142,7 +142,7 @@ var _ = Describe("KafkaUser secret watch pipeline", func() {
 		Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 		By("Creating the StrimziSchemaRegistry CR in SASL_PLAINTEXT mode")
-		resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      SchemaRegistryName,
 				Namespace: SchemaRegistryName,
@@ -150,7 +150,7 @@ var _ = Describe("KafkaUser secret watch pipeline", func() {
 					"strimzi.io/cluster": "kafka-cluster",
 				},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         false,
 				Listener:           "saslplain",
 				CompatibilityLevel: "forward",
@@ -185,7 +185,7 @@ var _ = Describe("KafkaUser secret watch pipeline", func() {
 
 	AfterEach(func() {
 		By("Cleaning up the CR and the namespace")
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 			if len(found.Finalizers) > 0 {
 				found.Finalizers = []string{}
@@ -298,7 +298,7 @@ var _ = Describe("Service ClusterIP to NodePort transition", func() {
 		Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 		By("Creating the StrimziSchemaRegistry CR with the default ClusterIP Service")
-		resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		resource := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      SchemaRegistryName,
 				Namespace: SchemaRegistryName,
@@ -306,7 +306,7 @@ var _ = Describe("Service ClusterIP to NodePort transition", func() {
 					"strimzi.io/cluster": "kafka-cluster",
 				},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         false,
 				Listener:           "plain",
 				CompatibilityLevel: "forward",
@@ -345,7 +345,7 @@ var _ = Describe("Service ClusterIP to NodePort transition", func() {
 
 	AfterEach(func() {
 		By("Cleaning up the CR and the namespace")
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
 			if len(found.Finalizers) > 0 {
 				found.Finalizers = []string{}
@@ -359,8 +359,8 @@ var _ = Describe("Service ClusterIP to NodePort transition", func() {
 
 	It("transitions the Service to NodePort and preserves the allocation when un-pinned", func() {
 		By("Pinning the node port on the live CR")
-		Expect(transitionServiceSpec(typeNamespacedName, func(spec *strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec) {
-			spec.Service = &strimziregistryoperatorv1alpha1.Service{
+		Expect(transitionServiceSpec(typeNamespacedName, func(spec *strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec) {
+			spec.Service = &strimziregistryoperatorv1beta1.Service{
 				Type:     "NodePort",
 				NodePort: ptr.To(pinnedNodePort),
 			}
@@ -384,8 +384,8 @@ var _ = Describe("Service ClusterIP to NodePort transition", func() {
 			"the Service must expose the pinned node port")
 
 		By("Un-pinning the node port")
-		Expect(transitionServiceSpec(typeNamespacedName, func(spec *strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec) {
-			spec.Service = &strimziregistryoperatorv1alpha1.Service{Type: "NodePort"}
+		Expect(transitionServiceSpec(typeNamespacedName, func(spec *strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec) {
+			spec.Service = &strimziregistryoperatorv1beta1.Service{Type: "NodePort"}
 		})).To(Succeed())
 
 		By("Reconciling and verifying the allocated node port is preserved")
@@ -406,9 +406,9 @@ var _ = Describe("Service ClusterIP to NodePort transition", func() {
 // transitionServiceSpec updates the live CR's spec.service through the
 // retry-on-conflict pattern (the operator mutates the CR while reconciling
 // it, so a plain Get+Update races the reconcile).
-func transitionServiceSpec(key types.NamespacedName, mutate func(*strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec)) error {
+func transitionServiceSpec(key types.NamespacedName, mutate func(*strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec)) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		existing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		existing := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, key, existing); err != nil {
 			return err
 		}

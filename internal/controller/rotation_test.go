@@ -23,7 +23,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
@@ -41,7 +41,7 @@ import (
 func annotationRolloutScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	return scheme

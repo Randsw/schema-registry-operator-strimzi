@@ -32,7 +32,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 )
 
@@ -141,13 +141,13 @@ var _ = Describe("SASL_PLAINTEXT client-auth CA rotation (T-6)", func() {
 		Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
 		By("Creating the SASL_PLAINTEXT StrimziSchemaRegistry with client auth enabled")
-		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      registryName,
 				Namespace: nsName,
 				Labels:    map[string]string{strimziClusterLabel: "kafka-cluster"},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         true,
 				ClientAuth:         true,
 				Listener:           "plain",
@@ -162,7 +162,7 @@ var _ = Describe("SASL_PLAINTEXT client-auth CA rotation (T-6)", func() {
 	})
 
 	AfterEach(func() {
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, registryKey, found); err == nil {
 			_ = k8sClient.Delete(ctx, found)
 		}

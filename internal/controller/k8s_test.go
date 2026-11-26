@@ -29,7 +29,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
@@ -114,7 +114,7 @@ func TestHTTPSMultiReplicaValidationError(t *testing.T) {
 // unchanged; otherwise the pods keep the stale bootstrap address forever.
 func TestUpdateExistingDeploymentBootstrapDrift(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -225,7 +225,7 @@ func TestUpdateExistingDeploymentBootstrapDrift(t *testing.T) {
 // event per overridden key.
 func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -344,7 +344,7 @@ func TestUpdateExistingDeploymentConfigOverriddenEventSpam(t *testing.T) {
 // a Deployment left at the default (nil) must stay nil.
 func TestUpdateExistingDeploymentPreservesManualReplicas(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -436,12 +436,12 @@ func TestUpdateExistingDeploymentPreservesManualReplicas(t *testing.T) {
 // field existed behave unchanged).
 func TestBuildDeploymentSpecReplicas(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
 
-	build := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+	build := func(t *testing.T, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) *apps.Deployment {
 		t.Helper()
 		r := &StrimziSchemaRegistryReconciler{Scheme: scheme}
 		dep, _, err := r.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "",
@@ -452,7 +452,7 @@ func TestBuildDeploymentSpecReplicas(t *testing.T) {
 		return dep
 	}
 
-	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInst := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.Spec.SecurityProtocol = "PLAINTEXT"
 		inst.Spec.Template = corev1.PodTemplateSpec{
@@ -484,7 +484,7 @@ func TestBuildDeploymentSpecReplicas(t *testing.T) {
 // leaves replicas unset.
 func TestUpdateExistingDeploymentAppliesCRReplicas(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -583,7 +583,7 @@ func TestSelectorLabelsInvariance(t *testing.T) {
 // in the pod labels so matching holds).
 func TestBuildDeploymentSpecStableSelector(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 
 	inst := newTestInstance()
 	inst.Spec.SecurityProtocol = "PLAINTEXT"
@@ -628,7 +628,7 @@ func TestBuildDeploymentSpecStableSelector(t *testing.T) {
 // operator-created deployments (stable selector) on the normal update path.
 func TestUpdateExistingDeploymentRecreatesLegacySelector(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -887,13 +887,13 @@ func crdSpecProperty(crd map[string]any, name string) (map[string]any, error) {
 }
 
 // newTestInstance creates a minimal StrimziSchemaRegistry for testing.
-func newTestInstance() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
-	return &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+func newTestInstance() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
+	return &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-sr",
 			Namespace: "default",
 		},
-		Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+		Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 			Listener:           "tls",
 			SecurityProtocol:   "SSL",
 			CompatibilityLevel: "backward",
@@ -1258,11 +1258,11 @@ func TestComputeSpecHash(t *testing.T) {
 	// on unrelated metadata edits.
 	t.Run("different service annotations produce the same hash", func(t *testing.T) {
 		inst1 := newTestInstance()
-		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+		inst1.Spec.Service = &strimziregistryoperatorv1beta1.Service{
 			Annotations: map[string]string{"prometheus.io/scrape": "true"},
 		}
 		inst2 := newTestInstance()
-		inst2.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+		inst2.Spec.Service = &strimziregistryoperatorv1beta1.Service{
 			Annotations: map[string]string{"prometheus.io/scrape": "false"},
 		}
 
@@ -1275,9 +1275,9 @@ func TestComputeSpecHash(t *testing.T) {
 
 	t.Run("different service labels produce the same hash", func(t *testing.T) {
 		inst1 := newTestInstance()
-		inst1.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "a"}}
+		inst1.Spec.Service = &strimziregistryoperatorv1beta1.Service{Labels: map[string]string{"team": "a"}}
 		inst2 := newTestInstance()
-		inst2.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Labels: map[string]string{"team": "b"}}
+		inst2.Spec.Service = &strimziregistryoperatorv1beta1.Service{Labels: map[string]string{"team": "b"}}
 
 		hash1 := computeSpecHash(inst1)
 		hash2 := computeSpecHash(inst2)
@@ -1289,7 +1289,7 @@ func TestComputeSpecHash(t *testing.T) {
 	t.Run("networkpolicy toggle produces the same hash", func(t *testing.T) {
 		inst1 := newTestInstance()
 		inst2 := newTestInstance()
-		inst2.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
+		inst2.Spec.NetworkPolicy = &strimziregistryoperatorv1beta1.NetworkPolicy{Enabled: true}
 
 		hash1 := computeSpecHash(inst1)
 		hash2 := computeSpecHash(inst2)
@@ -1410,7 +1410,7 @@ func TestGetStrimziClusterName(t *testing.T) {
 // handleTLSCertExpiry can detect a cluster CA rotation in every auth mode.
 func TestCreateTLSSecretRecordsCAVersion(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	ca, err := testutil.GenerateClusterCACert("test-ca-version")
@@ -1461,7 +1461,7 @@ func TestCreateTLSSecretRecordsCAVersion(t *testing.T) {
 // matches, only the expiry-based behavior applies.
 func TestHandleTLSCertExpiryRenewsOnCAChange(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
@@ -2006,7 +2006,7 @@ func assertQuantity(t *testing.T, got resource.Quantity, want string) {
 // limits are defaulted per-field, rather than only when both are nil.
 func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
 	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
@@ -2115,7 +2115,7 @@ func TestBuildDeploymentSpecResourceDefaults(t *testing.T) {
 // user-supplied template fields (B3 merge inputs) must also stay pristine.
 func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
 	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
@@ -2162,12 +2162,12 @@ func TestBuildDeploymentSpecDoesNotMutateInput(t *testing.T) {
 // spec.template must be preserved.
 func TestBuildDeploymentSpecDeclaresContainerPort(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
 
-	build := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+	build := func(t *testing.T, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) *apps.Deployment {
 		t.Helper()
 		r := &StrimziSchemaRegistryReconciler{Scheme: scheme}
 		dep, _, err := r.buildDeploymentSpec(inst, "kafka:9092", "kafka-cluster", "", "", "", "",
@@ -2418,12 +2418,12 @@ func TestMergeVolumeMounts(t *testing.T) {
 // semantics stay stable).
 func TestBuildDeploymentSpecMergesUserTemplateFields(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
 	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
 
-	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInst := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.Spec.SecureHTTP = true
 		inst.Spec.Template = corev1.PodTemplateSpec{
@@ -2670,14 +2670,14 @@ func TestMergeServicePorts(t *testing.T) {
 
 func TestCreateServicePassthrough(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
 
 	inst := newTestInstance()
 	inst.Labels = map[string]string{"strimzi.io/cluster": "kafka-cluster"}
-	inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+	inst.Spec.Service = &strimziregistryoperatorv1beta1.Service{
 		Annotations: map[string]string{"prometheus.io/scrape": "true"},
 		Labels:      map[string]string{"monitoring.example.com/team": "schemas"},
 	}
@@ -2703,7 +2703,7 @@ func TestCreateServicePassthrough(t *testing.T) {
 
 func TestCreateServiceTypePortPassthrough(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	reconciler := &StrimziSchemaRegistryReconciler{Scheme: scheme}
@@ -2731,7 +2731,7 @@ func TestCreateServiceTypePortPassthrough(t *testing.T) {
 		inst.Spec.SecureHTTP = true
 		port := int32(8443)
 		nodePort := int32(30443)
-		inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+		inst.Spec.Service = &strimziregistryoperatorv1beta1.Service{
 			Type:     "NodePort",
 			Port:     &port,
 			NodePort: &nodePort,
@@ -2762,19 +2762,19 @@ func TestServiceValidationError(t *testing.T) {
 	nodePort := int32(30123)
 	tests := []struct {
 		name    string
-		service *strimziregistryoperatorv1alpha1.Service
+		service *strimziregistryoperatorv1beta1.Service
 		want    string
 	}{
 		{name: "no service block is valid", service: nil, want: ""},
-		{name: "nodeport unset is valid", service: &strimziregistryoperatorv1alpha1.Service{Type: "ClusterIP"}, want: ""},
+		{name: "nodeport unset is valid", service: &strimziregistryoperatorv1beta1.Service{Type: "ClusterIP"}, want: ""},
 		{name: "nodeport with default (ClusterIP) type is invalid",
-			service: &strimziregistryoperatorv1alpha1.Service{NodePort: &nodePort},
+			service: &strimziregistryoperatorv1beta1.Service{NodePort: &nodePort},
 			want:    "spec.service.nodeport is only valid when spec.service.type is NodePort or LoadBalancer, not ClusterIP"},
 		{name: "nodeport with explicit ClusterIP is invalid",
-			service: &strimziregistryoperatorv1alpha1.Service{Type: "ClusterIP", NodePort: &nodePort},
+			service: &strimziregistryoperatorv1beta1.Service{Type: "ClusterIP", NodePort: &nodePort},
 			want:    "spec.service.nodeport is only valid when spec.service.type is NodePort or LoadBalancer, not ClusterIP"},
-		{name: "nodeport with NodePort is valid", service: &strimziregistryoperatorv1alpha1.Service{Type: "NodePort", NodePort: &nodePort}, want: ""},
-		{name: "nodeport with LoadBalancer is valid", service: &strimziregistryoperatorv1alpha1.Service{Type: "LoadBalancer", NodePort: &nodePort}, want: ""},
+		{name: "nodeport with NodePort is valid", service: &strimziregistryoperatorv1beta1.Service{Type: "NodePort", NodePort: &nodePort}, want: ""},
+		{name: "nodeport with LoadBalancer is valid", service: &strimziregistryoperatorv1beta1.Service{Type: "LoadBalancer", NodePort: &nodePort}, want: ""},
 	}
 
 	for _, tt := range tests {
@@ -2854,14 +2854,14 @@ func TestServiceAnnotationsDrifted(t *testing.T) {
 // corrected in place.
 func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
 
 	ctx := context.Background()
 
-	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInst := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.UID = "cr-uid"
 		inst.Spec.SecurityProtocol = "PLAINTEXT"
@@ -2877,7 +2877,7 @@ func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
 
 	// A Deployment in its desired shape (operator-complete, built by
 	// buildDeploymentSpec) so reconciliation reaches the Service block.
-	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) *apps.Deployment {
 		t.Helper()
 		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
 		return newOperatorDeployment(t, scheme, inst, bootstrap, "")
@@ -2885,7 +2885,7 @@ func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
 
 	// driftedService builds the desired Service (without the controller
 	// reference) and applies the given drift to it.
-	driftedService := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, drift func(*corev1.Service)) *corev1.Service {
+	driftedService := func(t *testing.T, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, drift func(*corev1.Service)) *corev1.Service {
 		t.Helper()
 		emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		r0 := &StrimziSchemaRegistryReconciler{Client: emptyClient, Scheme: scheme}
@@ -2898,7 +2898,7 @@ func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
 		return svc
 	}
 
-	reconcileOnce := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, svc *corev1.Service) client.Client {
+	reconcileOnce := func(t *testing.T, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, svc *corev1.Service) client.Client {
 		t.Helper()
 		c := fake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(inst, newTestKafkaCR("kafka-cluster", inst.Namespace), newDeployment(t, inst), svc).
@@ -2913,7 +2913,7 @@ func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
 		return c
 	}
 
-	fetchService := func(t *testing.T, c client.Client, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *corev1.Service {
+	fetchService := func(t *testing.T, c client.Client, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) *corev1.Service {
 		t.Helper()
 		svc := &corev1.Service{}
 		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, svc); err != nil {
@@ -2946,7 +2946,7 @@ func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
 
 	t.Run("foreign annotation survives and operator annotations are corrected", func(t *testing.T) {
 		inst := newInst()
-		inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{
+		inst.Spec.Service = &strimziregistryoperatorv1beta1.Service{
 			Annotations: map[string]string{"prometheus.io/scrape": "false"},
 		}
 		svc := driftedService(t, inst, func(s *corev1.Service) {
@@ -2979,7 +2979,7 @@ func TestReconcileServiceDriftAndAnnotationPreservation(t *testing.T) {
 // Deployment or Service is created or updated.
 func TestReconcileSkipsNodePortWithClusterIP(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -2990,7 +2990,7 @@ func TestReconcileSkipsNodePortWithClusterIP(t *testing.T) {
 	inst.Spec.SecurityProtocol = "PLAINTEXT"
 	inst.Spec.Listener = "tls"
 	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
-	inst.Spec.Service = &strimziregistryoperatorv1alpha1.Service{Type: "ClusterIP", NodePort: &nodePort}
+	inst.Spec.Service = &strimziregistryoperatorv1beta1.Service{Type: "ClusterIP", NodePort: &nodePort}
 
 	recorder := eventsfake.NewFakeRecorder(16)
 	c := fake.NewClientBuilder().WithScheme(scheme).
@@ -3006,7 +3006,7 @@ func TestReconcileSkipsNodePortWithClusterIP(t *testing.T) {
 		t.Errorf("expected no requeue for an invalid spec, got %v", result.RequeueAfter)
 	}
 
-	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	updated := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
 		t.Fatalf("failed to get the CR: %v", err)
 	}
@@ -3046,7 +3046,7 @@ func TestReconcileSkipsNodePortWithClusterIP(t *testing.T) {
 // TestReconcileSkipsNodePortWithClusterIP.
 func TestReconcileSkipsMultiReplicaHTTPSWithoutUserTLSSecret(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -3074,7 +3074,7 @@ func TestReconcileSkipsMultiReplicaHTTPSWithoutUserTLSSecret(t *testing.T) {
 		t.Errorf("expected no requeue for an invalid spec, got %v", result.RequeueAfter)
 	}
 
-	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	updated := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
 		t.Fatalf("failed to get the CR: %v", err)
 	}
@@ -3102,7 +3102,7 @@ func TestReconcileSkipsMultiReplicaHTTPSWithoutUserTLSSecret(t *testing.T) {
 func TestBuildNetworkPolicyCrossNamespaceIngress(t *testing.T) {
 	inst := newTestInstance()
 	inst.Spec.SecureHTTP = false
-	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{
+	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1beta1.NetworkPolicy{
 		Enabled:                    true,
 		AllowCrossNamespaceIngress: true,
 	}
@@ -3226,7 +3226,7 @@ func TestBuildNetworkPolicy(t *testing.T) {
 // user-managed annotations on every spec change.
 func TestReconcileNetworkPolicyPreservesAnnotations(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -3238,7 +3238,7 @@ func TestReconcileNetworkPolicyPreservesAnnotations(t *testing.T) {
 	inst.Spec.SecurityProtocol = "PLAINTEXT"
 	inst.Spec.Listener = "tls"
 	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
-	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
+	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1beta1.NetworkPolicy{Enabled: true}
 
 	existing := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3286,7 +3286,7 @@ func TestReconcileNetworkPolicyPreservesAnnotations(t *testing.T) {
 // survive.
 func TestReconcileNetworkPolicyDisableDeletesExisting(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -3294,15 +3294,15 @@ func TestReconcileNetworkPolicyDisableDeletesExisting(t *testing.T) {
 
 	// A nil spec.networkpolicy is disabled, but the explicit false value is
 	// the case under test.
-	newInstance := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInstance := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
-		inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: false}
+		inst.Spec.NetworkPolicy = &strimziregistryoperatorv1beta1.NetworkPolicy{Enabled: false}
 		return inst
 	}
 
 	// newOperatorPolicy returns a policy in the shape the operator creates:
 	// the suffixed name, the operator labels, and the CR as controller owner.
-	newOperatorPolicy := func(inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *networkingv1.NetworkPolicy {
+	newOperatorPolicy := func(inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) *networkingv1.NetworkPolicy {
 		policy := &networkingv1.NetworkPolicy{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      inst.Name + networkPolicySuffix,
@@ -3458,7 +3458,7 @@ func TestNetworkPoliciesEqual(t *testing.T) {
 // egress port).
 func TestReconcileNetworkPolicyGetBootstrapError(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -3470,7 +3470,7 @@ func TestReconcileNetworkPolicyGetBootstrapError(t *testing.T) {
 	inst.Spec.SecurityProtocol = "PLAINTEXT"
 	inst.Spec.Listener = "tls"
 	inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
-	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
+	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1beta1.NetworkPolicy{Enabled: true}
 
 	// The Kafka CR exists but exposes only a "plain" listener.
 	kafkaCR := newTestKafkaCR("kafka-cluster", inst.Namespace)
@@ -3501,12 +3501,12 @@ func TestReconcileNetworkPolicyGetBootstrapError(t *testing.T) {
 // and the requesting CR, and lists the listeners the Kafka CR exposes.
 func TestGetKafkaBootstrapServersError(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
 
-	newInstance := func(listener string) *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInstance := func(listener string) *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.Spec.Listener = listener
 		inst.Labels = map[string]string{strimziClusterLabel: "kafka-cluster"}
@@ -3577,7 +3577,7 @@ func TestGetKafkaBootstrapServersError(t *testing.T) {
 // the stale-deployment situation is visible, not just the validation error.
 func TestReconcileSkipsInvalidClientAuthCombination(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
@@ -3630,7 +3630,7 @@ func TestReconcileSkipsInvalidClientAuthCombination(t *testing.T) {
 	}
 
 	// The CR status must still report the invalid spec.
-	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	updated := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
 		t.Fatalf("failed to get the updated CR: %v", err)
 	}
@@ -3665,7 +3665,7 @@ func TestPortFromBootstrapServer(t *testing.T) {
 
 func TestRemoveManagedFinalizers(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 
 	// H-2: the operator no longer adds a finalizer (owner references already
 	// garbage-collect the managed resources), but it must strip the no-op
@@ -3680,7 +3680,7 @@ func TestRemoveManagedFinalizers(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		got := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		got := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := client.Get(context.Background(), types.NamespacedName{Name: "test-sr", Namespace: "default"}, got); err != nil {
 			t.Fatalf("unexpected get error: %v", err)
 		}
@@ -3699,7 +3699,7 @@ func TestRemoveManagedFinalizers(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		got := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		got := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := client.Get(context.Background(), types.NamespacedName{Name: "test-sr", Namespace: "default"}, got); err != nil {
 			t.Fatalf("unexpected get error: %v", err)
 		}
@@ -3713,7 +3713,7 @@ func TestRemoveManagedFinalizers(t *testing.T) {
 		updates := 0
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				if _, ok := obj.(*strimziregistryoperatorv1alpha1.StrimziSchemaRegistry); ok {
+				if _, ok := obj.(*strimziregistryoperatorv1beta1.StrimziSchemaRegistry); ok {
 					updates++
 				}
 				return c.Update(ctx, obj, opts...)
@@ -3948,7 +3948,7 @@ func TestBuildPodVolumesClientAuth(t *testing.T) {
 // TestMapKafkaToRequests.
 func TestMapStrimziResourceToRequests(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 
 	srA := newTestInstance()
 	srA.Name = "sr-a"
@@ -4027,7 +4027,7 @@ func TestMapStrimziResourceToRequests(t *testing.T) {
 //     requeue.
 func TestHandleTLSCertExpiry(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
@@ -4517,7 +4517,7 @@ func TestCertRecheckInterval(t *testing.T) {
 // path), and a complete secret proceeds to build the JKS secret.
 func TestCreateMTLSSecretFieldValidation(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	ca, err := testutil.GenerateTestCA()
@@ -4633,7 +4633,7 @@ func dropKey(m map[string][]byte, key string) map[string][]byte {
 // CA/user secrets are never touched.
 func TestGCOrphanedSecrets(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	// controlledSecret returns a secret carrying a controller owner
@@ -4646,7 +4646,7 @@ func TestGCOrphanedSecrets(t *testing.T) {
 				Namespace: "default",
 				Labels:    map[string]string{operatorAppLabelKey: operatorAppLabelValue},
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+					APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 					Kind:       "StrimziSchemaRegistry",
 					Name:       ownerName,
 					UID:        types.UID("uid-" + ownerName),
@@ -4812,7 +4812,7 @@ func TestGCOrphanedSecrets(t *testing.T) {
 // reconciliation.
 func TestGCOrphanedSecretsOwnerGetError(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	inst := newTestInstance()
@@ -4823,7 +4823,7 @@ func TestGCOrphanedSecretsOwnerGetError(t *testing.T) {
 			Namespace: "default",
 			Labels:    map[string]string{operatorAppLabelKey: operatorAppLabelValue},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "strimziregistryoperator.randsw.code/v1alpha1",
+				APIVersion: "strimziregistryoperator.randsw.code/v1beta1",
 				Kind:       "StrimziSchemaRegistry",
 				Name:       "other-sr",
 				UID:        types.UID("uid-other-sr"),
@@ -4836,7 +4836,7 @@ func TestGCOrphanedSecretsOwnerGetError(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(inst, owned).
-		WithInterceptorFuncs(failGets(&strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}, "other-sr", injected)).
+		WithInterceptorFuncs(failGets(&strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}, "other-sr", injected)).
 		Build()
 	r := &StrimziSchemaRegistryReconciler{Client: c, Scheme: scheme}
 
@@ -4931,7 +4931,7 @@ func TestImageVersionLabel(t *testing.T) {
 // event.
 func TestReconcileServiceOwnership(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -4939,7 +4939,7 @@ func TestReconcileServiceOwnership(t *testing.T) {
 	ctx := context.Background()
 	logger := logr.Logger{}
 
-	newInst := func() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+	newInst := func() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 		inst := newTestInstance()
 		inst.UID = "cr-uid"
 		inst.Spec.SecurityProtocol = "PLAINTEXT"
@@ -4955,7 +4955,7 @@ func TestReconcileServiceOwnership(t *testing.T) {
 
 	// desiredService builds the Service the operator wants (without the
 	// controller reference) so fixtures can start from the desired shape.
-	desiredService := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *corev1.Service {
+	desiredService := func(t *testing.T, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) *corev1.Service {
 		t.Helper()
 		emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		r0 := &StrimziSchemaRegistryReconciler{Client: emptyClient, Scheme: scheme}
@@ -4969,13 +4969,13 @@ func TestReconcileServiceOwnership(t *testing.T) {
 
 	// A Deployment in its desired shape (operator-complete, built by
 	// buildDeploymentSpec) so reconciliation reaches the Service block.
-	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) *apps.Deployment {
+	newDeployment := func(t *testing.T, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) *apps.Deployment {
 		t.Helper()
 		bootstrap := newTestKafkaCR("kafka-cluster", inst.Namespace).Status.Listeners[0].BootstrapServers
 		return newOperatorDeployment(t, scheme, inst, bootstrap, "")
 	}
 
-	reconcile := func(t *testing.T, inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, svc *corev1.Service) (client.Client, *eventsfake.FakeRecorder, reconcile.Result, error) {
+	reconcile := func(t *testing.T, inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, svc *corev1.Service) (client.Client, *eventsfake.FakeRecorder, reconcile.Result, error) {
 		t.Helper()
 		recorder := eventsfake.NewFakeRecorder(16)
 		c := fake.NewClientBuilder().WithScheme(scheme).
@@ -5039,7 +5039,7 @@ func TestReconcileServiceOwnership(t *testing.T) {
 			}
 		}
 
-		updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		updated := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := c.Get(ctx, types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
 			t.Fatalf("failed to get the updated CR: %v", err)
 		}
@@ -5116,7 +5116,7 @@ func TestReconcileServiceOwnership(t *testing.T) {
 		svc := desiredService(t, inst)
 		svc.Spec.Ports[0].Port = 9999
 		svc.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion: strimziregistryoperatorv1alpha1.GroupVersion.String(),
+			APIVersion: strimziregistryoperatorv1beta1.GroupVersion.String(),
 			Kind:       "StrimziSchemaRegistry",
 			Name:       inst.Name,
 			UID:        inst.UID,
@@ -5156,7 +5156,7 @@ func TestReconcileServiceOwnership(t *testing.T) {
 // only on the final reconcile path, so it is correct on the first reconcile.
 func TestReconcileUpdatesInstanceCountGaugeOnCreatePath(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -5224,7 +5224,7 @@ func TestReconcileUpdatesInstanceCountGaugeOnCreatePath(t *testing.T) {
 // fail reconciliation.
 func TestUpdateInstanceCountMetricListError(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 
 	gauge := monitoring.StrimziSchemaRegistryCurrentInstanceCount
 	original := promtestutil.ToFloat64(gauge)

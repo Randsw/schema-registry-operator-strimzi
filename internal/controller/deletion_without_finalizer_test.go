@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // T-10: deleting a StrimziSchemaRegistry must not depend on a live operator.
@@ -90,13 +90,13 @@ var _ = Describe("CR deletion without a finalizer (T-10)", func() {
 
 		Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
 
-		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      registryName,
 				Namespace: nsName,
 				Labels:    map[string]string{strimziClusterLabel: "kafka-cluster"},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				Listener:           "plain",
 				CompatibilityLevel: "forward",
 				SecurityProtocol:   "PLAINTEXT",
@@ -119,7 +119,7 @@ var _ = Describe("CR deletion without a finalizer (T-10)", func() {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: registryKey})
 		Expect(err).NotTo(HaveOccurred())
 
-		live := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		live := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, registryKey, live)).To(Succeed())
 		Expect(live.Finalizers).To(BeEmpty(),
 			"the operator must not add a finalizer: owner references already handle cleanup (H-2)")
@@ -131,7 +131,7 @@ var _ = Describe("CR deletion without a finalizer (T-10)", func() {
 
 		By("Asserting the CR is gone instead of stuck Terminating")
 		Eventually(func() bool {
-			err := k8sClient.Get(ctx, registryKey, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{})
+			err := k8sClient.Get(ctx, registryKey, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{})
 			return apierrors.IsNotFound(err)
 		}, 30, 1).Should(BeTrue(), "the CR must be removed without a live operator")
 	})

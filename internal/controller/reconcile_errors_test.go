@@ -39,7 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
 )
 
@@ -48,7 +48,7 @@ import (
 // the NetworkPolicy.
 func newErrorPathScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = networkingv1.AddToScheme(scheme)
@@ -59,7 +59,7 @@ func newErrorPathScheme() *runtime.Scheme {
 // newErrorPathInstance returns a PLAINTEXT CR whose only live dependency is
 // the Kafka CR status, so an injected client failure is the sole reason a
 // reconcile can fail.
-func newErrorPathInstance() *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry {
+func newErrorPathInstance() *strimziregistryoperatorv1beta1.StrimziSchemaRegistry {
 	inst := newTestInstance()
 	inst.UID = "cr-uid"
 	inst.Spec.SecurityProtocol = "PLAINTEXT"
@@ -127,9 +127,9 @@ func reconcileErrorsDelta(fn func()) float64 {
 // status.status=ReconcileError plus a Ready=False condition with the
 // ReconcileError reason carrying the injected error message.
 func assertReconcileErrorStatus(t *testing.T, c client.Client,
-	inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, wantMsg string) {
+	inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, wantMsg string) {
 	t.Helper()
-	updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+	updated := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 	if err := c.Get(context.Background(),
 		types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
 		t.Fatalf("failed to get the updated CR: %v", err)
@@ -328,7 +328,7 @@ func TestReconcileServiceGetError(t *testing.T) {
 func TestReconcileNetworkPolicyCreateError(t *testing.T) {
 	scheme := newErrorPathScheme()
 	inst := newErrorPathInstance()
-	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1alpha1.NetworkPolicy{Enabled: true}
+	inst.Spec.NetworkPolicy = &strimziregistryoperatorv1beta1.NetworkPolicy{Enabled: true}
 	kafkaCR := newTestKafkaCR("kafka-cluster", inst.Namespace)
 	dep := newOperatorDeployment(t, scheme, inst, kafkaCR.Status.Listeners[0].BootstrapServers, "")
 

@@ -23,7 +23,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 const (
@@ -141,7 +141,7 @@ var _ = Describe("StrimziSchemaRegistry e2e scenario", Ordered, Serial, func() {
 // customize the spec before the apply (e.g. setting spec.tlssecretname). It
 // returns the apply error so callers can assert admission rejections.
 func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas *int32,
-	mutators ...func(*strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec)) error {
+	mutators ...func(*strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec)) error {
 	return applyRegistryCRFor(ctx, scenario.RegistryName, "registry-schemas", "schema-registry",
 		clientAuth, secureHTTP, replicas, mutators...)
 }
@@ -152,10 +152,10 @@ func applyRegistryCR(ctx context.Context, clientAuth, secureHTTP bool, replicas 
 // against, or read the schemas of, another live registry.
 func applyRegistryCRFor(ctx context.Context, name, topic, groupID string,
 	clientAuth, secureHTTP bool, replicas *int32,
-	mutators ...func(*strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec)) error {
+	mutators ...func(*strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec)) error {
 	replicationFactor := int32(1)
 
-	cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+	cr := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: scenario.Namespace,
@@ -163,7 +163,7 @@ func applyRegistryCRFor(ctx context.Context, name, topic, groupID string,
 				"strimzi.io/cluster": scenario.ClusterName,
 			},
 		},
-		Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+		Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 			Listener:                         scenario.Listener,
 			SecurityProtocol:                 scenario.SecurityProtocol,
 			CompatibilityLevel:               "forward",
@@ -199,7 +199,7 @@ func applyRegistryCRFor(ctx context.Context, name, topic, groupID string,
 	// Conflict. Retry on conflict, re-reading the object inside the closure so
 	// every attempt carries the latest resourceVersion.
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		existing := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		existing := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}, existing)
 		if apierrors.IsNotFound(err) {
 			err = k8sClient.Create(ctx, cr)
@@ -208,7 +208,7 @@ func applyRegistryCRFor(ctx context.Context, name, topic, groupID string,
 				// re-reads the object and takes the update path.
 				return apierrors.NewConflict(
 					schema.GroupResource{
-						Group:    strimziregistryoperatorv1alpha1.GroupVersion.Group,
+						Group:    strimziregistryoperatorv1beta1.GroupVersion.Group,
 						Resource: "strimzischemaregistries",
 					},
 					cr.Name, err)
@@ -243,7 +243,7 @@ func waitForReadyConditionFor(ctx context.Context, name string, timeout time.Dur
 // first poll.
 func waitForConditionFor(ctx context.Context, name string, timeout time.Duration, match func(*metav1.Condition) bool) {
 	Eventually(func(g Gomega) {
-		cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		cr := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		g.Expect(k8sClient.Get(ctx, types.NamespacedName{
 			Name:      name,
 			Namespace: scenario.Namespace,
@@ -515,7 +515,7 @@ func deleteRegistryCR(ctx context.Context, timeout time.Duration) {
 // operator-managed Deployment are gone, so a spec that fails mid-way cannot
 // leave a CR behind to poison the next spec.
 func deleteRegistryCRFor(ctx context.Context, name string, timeout time.Duration) {
-	cr := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+	cr := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: scenario.Namespace},
 	}
 	err := k8sClient.Delete(ctx, cr)
@@ -526,7 +526,7 @@ func deleteRegistryCRFor(ctx context.Context, name string, timeout time.Duration
 		err := k8sClient.Get(ctx, types.NamespacedName{
 			Name:      name,
 			Namespace: scenario.Namespace,
-		}, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{})
+		}, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{})
 		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the CR is still present (err: %v)", err)
 	}, timeout, 2*time.Second).Should(Succeed(),
 		"timed out after %s waiting for the deletion of the CR %s/%s",

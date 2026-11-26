@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
@@ -41,7 +41,7 @@ import (
 // reports no drift. hashOverride replaces the computed spec hash annotation
 // (simulating a stale hash) when non-empty.
 func newOperatorDeployment(t *testing.T, scheme *runtime.Scheme,
-	inst *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, bootstrap, hashOverride string) *apps.Deployment {
+	inst *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, bootstrap, hashOverride string) *apps.Deployment {
 	t.Helper()
 	// Resolve the REST API TLS secret name the same way updateExistingDeployment
 	// does, so the fixture matches the desired build exactly.
@@ -75,7 +75,7 @@ func newOperatorDeployment(t *testing.T, scheme *runtime.Scheme,
 // second time.
 func TestReconcileAppliesSpecChangeBeforeRotationRollout(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -194,7 +194,7 @@ func TestReconcileAppliesSpecChangeBeforeRotationRollout(t *testing.T) {
 // marker and roll the pods a second time.
 func TestUpdateExistingDeploymentPreservesTLSVersionMarker(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)
@@ -242,7 +242,7 @@ func TestUpdateExistingDeploymentPreservesTLSVersionMarker(t *testing.T) {
 // must still propagate to the Deployment metadata.
 func TestUpdateExistingDeploymentSyncsLabels(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = kafka.AddToScheme(scheme)

@@ -27,7 +27,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	"github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 )
@@ -108,7 +108,7 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 		})
 
 		By("applying the CR with spec.tlssecretname")
-		Expect(applyRegistryCR(ctx, false, true, nil, func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
+		Expect(applyRegistryCR(ctx, false, true, nil, func(spec *v1beta1.StrimziSchemaRegistrySpec) {
 			spec.TLSSecretName = userTLSSecretName
 		})).To(Succeed())
 		waitForReadyCondition(ctx, readyTimeout)
@@ -178,7 +178,7 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 		applySecret(ctx, userTLSSecretNameAlt, corev1.SecretTypeTLS, secondMaterial.pemData())
 
 		By("switching spec.tlssecretname to the second secret")
-		Expect(applyRegistryCR(ctx, false, true, nil, func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
+		Expect(applyRegistryCR(ctx, false, true, nil, func(spec *v1beta1.StrimziSchemaRegistrySpec) {
 			spec.TLSSecretName = userTLSSecretNameAlt
 		})).To(Succeed())
 
@@ -225,7 +225,7 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 		})
 
 		By("applying the CR with spec.keystoretype=PKCS12")
-		Expect(applyRegistryCR(ctx, false, true, nil, func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
+		Expect(applyRegistryCR(ctx, false, true, nil, func(spec *v1beta1.StrimziSchemaRegistrySpec) {
 			spec.TLSSecretName = userTLSSecretName
 			spec.KeystoreType = "PKCS12"
 		})).To(Succeed())

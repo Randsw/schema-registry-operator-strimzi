@@ -38,7 +38,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/controller"
 	monitoring "github.com/randsw/schema-registry-operator-strimzi/metrics"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
@@ -52,7 +52,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(strimziregistryoperatorv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(strimziregistryoperatorv1beta1.AddToScheme(scheme))
 	utilruntime.Must(kafka.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }

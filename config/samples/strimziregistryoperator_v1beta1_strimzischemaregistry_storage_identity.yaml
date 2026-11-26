@@ -2,7 +2,7 @@
 # Demonstrates overriding the default kafkastore topic and consumer group,
 # disabling master eligibility, and pinning the replication factor for
 # auto-created topics on small/single-node clusters.
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   labels:

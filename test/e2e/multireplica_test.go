@@ -12,7 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 
-	"github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	"github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // registryHTTPSContainerPort is the Schema Registry HTTPS listener container
@@ -93,7 +93,7 @@ var _ = Describe("StrimziSchemaRegistry e2e multi-replica HTTPS scenario", Order
 
 		By("applying the CR with replicas=2, securehttp and the user TLS secret")
 		Expect(fixture.apply(ctx, false, true, ptr.To(int32(2)),
-			func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
+			func(spec *v1beta1.StrimziSchemaRegistrySpec) {
 				spec.TLSSecretName = userTLSSecret
 				// Inter-instance HTTPS contacts pod IPs, which cannot be
 				// pre-provisioned into a static certificate; the README

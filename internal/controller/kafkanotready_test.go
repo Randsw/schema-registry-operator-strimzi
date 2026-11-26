@@ -35,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // C-2: a Strimzi Kafka cluster that is not ready yet (its CR carries no
@@ -67,7 +67,7 @@ var _ = Describe("Reconcile with a Kafka cluster that is not ready (C-2)", func(
 	})
 
 	AfterEach(func() {
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		found := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := k8sClient.Get(ctx, registryKey, found); err == nil {
 			if len(found.Finalizers) > 0 {
 				found.Finalizers = []string{}
@@ -95,13 +95,13 @@ var _ = Describe("Reconcile with a Kafka cluster that is not ready (C-2)", func(
 		})).To(Succeed())
 
 		By("creating the registry CR pointing at the plain listener")
-		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+		Expect(k8sClient.Create(ctx, &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      registryName,
 				Namespace: namespace.Name,
 				Labels:    map[string]string{strimziClusterLabel: "kafka-cluster"},
 			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+			Spec: strimziregistryoperatorv1beta1.StrimziSchemaRegistrySpec{
 				SecureHTTP:         false,
 				Listener:           "plain",
 				CompatibilityLevel: "forward",
@@ -120,7 +120,7 @@ var _ = Describe("Reconcile with a Kafka cluster that is not ready (C-2)", func(
 		Expect(err.Error()).To(ContainSubstring("no status.listeners"))
 
 		By("asserting the failure is surfaced on the CR status")
-		instance := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		instance := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		Expect(k8sClient.Get(ctx, registryKey, instance)).To(Succeed())
 		Expect(instance.Status.Status).To(Equal("ReconcileError"))
 		ready := meta.FindStatusCondition(instance.Status.Conditions, "Ready")
@@ -172,7 +172,7 @@ var _ = Describe("Reconcile with a Kafka cluster that is not ready (C-2)", func(
 			_, reconcileErr := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: registryKey})
 			g.Expect(reconcileErr).NotTo(HaveOccurred())
 
-			current := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			current := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			g.Expect(k8sClient.Get(ctx, registryKey, current)).To(Succeed())
 			return current.Status.Status
 		}, 30*time.Second, 250*time.Millisecond).ShouldNot(Equal("ReconcileError"))

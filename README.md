@@ -164,7 +164,7 @@ Now that there is a topic and a user, you can deploy the Schema Registry itself.
 The strimzi-schema-registry operator deploys the Schema Registry given a `StrimziSchemaRegistry` resource:
 
 ```yaml
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   name: confluent-schema-registry
@@ -193,7 +193,7 @@ Schema Registry can be accessed using service in namespace where StrimziSchemaRe
 These configurations can be set as fields of the StrimziSchemaRegistry's spec field:
 
 ```yaml
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   name: confluent-schema-registry
@@ -765,7 +765,7 @@ spec:
 To use the encrypted internal listener, the `spec.listener` field in your `StrimziSchemaRegistry` resource should be `tls`:
 
 ```yaml
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   name: confluent-schema-registry
@@ -776,7 +776,7 @@ spec:
 To use the unencrypted internal listener instead, the `spec.listener` field in your `StrimziSchemaRegistry` resource should be `plain` instead:
 
 ```yaml
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   name: confluent-schema-registry

@@ -24,7 +24,7 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	"github.com/randsw/schema-registry-operator-strimzi/metrics"
 	apps "k8s.io/api/apps/v1"
@@ -79,14 +79,14 @@ func isPEMTLSSecret(secret *v1.Secret) bool {
 // secret: a shared, single-owner secret would be garbage-collected when the
 // owning registry is deleted, breaking every other registry still mounting
 // it.
-func derivedJKSSecretName(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+func derivedJKSSecretName(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) string {
 	return instance.Name + "-" + instance.Spec.TLSSecretName + jksSecretSuffix
 }
 
 // derivedSecretNameValid returns a non-empty message when the per-registry
 // derived secret name would exceed the Kubernetes object-name limit
 // (253 characters), or an empty string otherwise.
-func derivedSecretNameValid(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+func derivedSecretNameValid(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) string {
 	derived := derivedJKSSecretName(instance)
 	if len(derived) > 253 {
 		return fmt.Sprintf("user-provided TLS secret %q would be converted into derived secret %q whose name exceeds the Kubernetes 253-character object-name limit; choose a shorter spec.tlssecretname or CR name",
@@ -104,7 +104,7 @@ func derivedSecretNameValid(instance *strimziregistryoperatorv1alpha1.StrimziSch
 //     limit;
 //   - a pre-built keystore: validated by userTLSSecretValidationError
 //     following spec.keystoretype (tls-keystore.jks or tls-keystore.p12).
-func validateUserTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, secret *v1.Secret) string {
+func validateUserTLSSecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, secret *v1.Secret) string {
 	if secret == nil {
 		return fmt.Sprintf("user-provided TLS secret %q not found", instance.Spec.TLSSecretName)
 	}
@@ -177,7 +177,7 @@ func pemPrivateKeyParses(keyPEM string) bool {
 // cancellation check in the conversion (B5).
 func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	userSecret *v1.Secret,
 	logger logr.Logger,
 ) (*v1.Secret, error) {
@@ -230,7 +230,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDerivedJKSSecret(
 // user-managed material.
 func (r *StrimziSchemaRegistryReconciler) ensureDerivedJKSSecret(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	userSecret *v1.Secret,
 	logger logr.Logger,
 ) error {
@@ -284,7 +284,7 @@ func (r *StrimziSchemaRegistryReconciler) ensureDerivedJKSSecret(
 // <tlssecretname>-jks secret for PEM user secrets, the user secret itself
 // for pre-built keystores, and the operator-managed <name>-tls secret when
 // no user secret is set.
-func restAPITLSMountSecretName(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, userSecret *v1.Secret) string {
+func restAPITLSMountSecretName(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, userSecret *v1.Secret) string {
 	if instance.Spec.TLSSecretName == "" {
 		return instance.Name + tlsSecretSuffix
 	}

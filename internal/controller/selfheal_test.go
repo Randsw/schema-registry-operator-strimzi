@@ -24,7 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/go-logr/logr"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	"github.com/randsw/schema-registry-operator-strimzi/internal/testutil"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -56,7 +56,7 @@ func countSecretDeletes(deleted *int) interceptor.Funcs {
 // exists: without this the next pod restart fails to mount the secret.
 func TestHandleMTLSSecretRotationSelfHeal(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
@@ -241,7 +241,7 @@ func TestHandleMTLSSecretRotationSelfHeal(t *testing.T) {
 // Deployment exists (createDeployment bootstraps the secret then).
 func TestHandleTLSCertExpirySelfHeal(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 
@@ -369,7 +369,7 @@ func TestHandleTLSCertExpirySelfHeal(t *testing.T) {
 // reconciliation reports success.
 func TestRecreateMissingTLSSecretErrorPaths(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 

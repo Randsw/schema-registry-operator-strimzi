@@ -3,7 +3,7 @@
 #
 # Two entries are excluded from coverage; neither is hand-written project
 # logic and neither may be tested directly:
-#   * api/v1alpha1/zz_generated.deepcopy.go — controller-gen output
+#   * api/v1beta1/zz_generated.deepcopy.go — controller-gen output
 #     (`make generate`); its content is regenerated, never hand-edited.
 #   * the main() function of cmd/main.go — process wiring (flags, manager
 #     construction, signal handling) that only executes inside the operator
@@ -67,7 +67,7 @@ awk -v main_first="$main_first" -v main_last="$main_last" '
 		sub(/\..*/, "", block)     # leading source line of the block
 
 		# Generated deepcopy code: not project logic.
-		if (file ~ /(^|\/)api\/v1alpha1\/zz_generated\.deepcopy\.go$/) { next }
+		if (file ~ /(^|\/)api\/v1beta1\/zz_generated\.deepcopy\.go$/) { next }
 
 		# Only main() of cmd/main.go is excluded, not the whole file.
 		if (file ~ /(^|\/)cmd\/main\.go$/) {
@@ -81,4 +81,4 @@ awk -v main_first="$main_first" -v main_last="$main_last" '
 mv "$tmp" "$profile"
 trap - EXIT HUP INT TERM
 
-echo "coverage-filter: excluded api/v1alpha1/zz_generated.deepcopy.go and cmd/main.go main() (lines $main_first-$main_last)"
+echo "coverage-filter: excluded api/v1beta1/zz_generated.deepcopy.go and cmd/main.go main() (lines $main_first-$main_last)"

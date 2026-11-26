@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // countStatusUpdates returns interceptor.Funcs that count Status().Update
@@ -57,7 +57,7 @@ func countStatusUpdates(updates *int) interceptor.Funcs {
 // number of status updates performed since the last call.
 type statusCountFixture struct {
 	r     *StrimziSchemaRegistryReconciler
-	inst  *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
+	inst  *strimziregistryoperatorv1beta1.StrimziSchemaRegistry
 	count func() int
 }
 
@@ -69,7 +69,7 @@ type statusCountFixture struct {
 func newSteadyStateFixture(t *testing.T) statusCountFixture {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = apps.AddToScheme(scheme)
 	_ = networkingv1.AddToScheme(scheme)
@@ -154,7 +154,7 @@ func TestReconcileStatusUpdateCounting(t *testing.T) {
 
 	t.Run("repeated reconcile after a reconcile error performs no redundant status update", func(t *testing.T) {
 		scheme := runtime.NewScheme()
-		_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+		_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 		_ = corev1.AddToScheme(scheme)
 		_ = apps.AddToScheme(scheme)
 		_ = kafka.AddToScheme(scheme)
@@ -195,7 +195,7 @@ func TestReconcileStatusUpdateCounting(t *testing.T) {
 		}
 
 		// The error state must still be visible on the CR.
-		updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		updated := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := c.Get(context.Background(), types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace}, updated); err != nil {
 			t.Fatalf("failed to get the updated CR: %v", err)
 		}
@@ -249,7 +249,7 @@ func TestReconcileStatusUpdateCounting(t *testing.T) {
 		}
 
 		// The new state must be visible on the CR.
-		updated := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+		updated := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 		if err := f.r.Get(context.Background(), types.NamespacedName{Name: f.inst.Name, Namespace: f.inst.Namespace}, updated); err != nil {
 			t.Fatalf("failed to get the updated CR: %v", err)
 		}

@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 	certprocessor "github.com/randsw/schema-registry-operator-strimzi/certProcessor"
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 	apps "k8s.io/api/apps/v1"
@@ -130,7 +130,7 @@ func labelsForStrimziSchemaRegistryOperator(name, image, kafkaClusterName string
 // It handles both initial deployment creation and secret bootstrapping. For
 // spec-only updates where secrets should NOT be recreated, use updateExistingDeployment
 // instead (which calls buildDeploymentSpec directly, bypassing secret creation).
-func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger) (*apps.Deployment, error) {
 	logger.Info("Creating a new Deployment", "Deployment.Namespace", instance.Namespace, "Deployment.Name", instance.Name+deploySuffix)
 
@@ -275,7 +275,7 @@ func (r *StrimziSchemaRegistryReconciler) createDeployment(instance *strimziregi
 // Kubernetes resources (no side effects). All secret creation and external reads must happen before
 // calling this function.
 func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	kafkaBootstrapServer string,
 	kafkaClusterName string,
 	jksResourceVersion string,
@@ -412,7 +412,7 @@ func (r *StrimziSchemaRegistryReconciler) buildDeploymentSpec(
 // effectiveReplicas returns the desired number of Schema Registry replicas
 // (B20). An unset spec.replicas defaults to 1, matching the Deployment API
 // default so CRs created before the field existed keep working unchanged.
-func effectiveReplicas(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) int32 {
+func effectiveReplicas(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) int32 {
 	if instance.Spec.Replicas != nil {
 		return *instance.Spec.Replicas
 	}
@@ -420,7 +420,7 @@ func effectiveReplicas(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRe
 }
 
 // listenerPortAndScheme returns the container port and URI scheme based on SecureHTTP.
-func listenerPortAndScheme(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) (int32, v1.URIScheme) {
+func listenerPortAndScheme(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) (int32, v1.URIScheme) {
 	if instance.Spec.SecureHTTP {
 		return 8085, v1.URISchemeHTTPS
 	}
@@ -446,7 +446,7 @@ const (
 // API TLS secret (spec.tlssecretname). An unset value defaults to JKS
 // (Confluent's built-in default), so CRs created before the keystoretype
 // field existed keep working unchanged.
-func effectiveKeystoreType(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+func effectiveKeystoreType(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) string {
 	if instance.Spec.KeystoreType == keystoreTypePKCS12 {
 		return keystoreTypePKCS12
 	}
@@ -566,7 +566,7 @@ func appendConfigurationEnv(podEnv []v1.EnvVar, configuration map[string]string)
 // buildPodEnv constructs the environment variables for the Schema Registry
 // container and returns them along with the spec.configuration keys that were
 // skipped because they are operator-managed.
-func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, kafkaBootstrapServer, TLSSecretName string, auth kafkaAuth) ([]v1.EnvVar, []string) {
+func buildPodEnv(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, kafkaBootstrapServer, TLSSecretName string, auth kafkaAuth) ([]v1.EnvVar, []string) {
 	podEnv := []v1.EnvVar{
 		{Name: "SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", Value: kafkaBootstrapServer},
 		{Name: "SCHEMA_REGISTRY_HOST_NAME", ValueFrom: &v1.EnvVarSource{
@@ -729,7 +729,7 @@ func buildPodEnv(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry
 }
 
 // buildPodVolumes constructs the volumes and volume mounts for the deployment.
-func buildPodVolumes(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, TLSSecretName string, auth kafkaAuth) ([]v1.Volume, []v1.VolumeMount) {
+func buildPodVolumes(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, TLSSecretName string, auth kafkaAuth) ([]v1.Volume, []v1.VolumeMount) {
 	var defaultMode int32 = 420
 	var containerVolumeMount []v1.VolumeMount
 	var podVolume []v1.Volume
@@ -874,11 +874,11 @@ func authenticationMethodConfigured(configuration map[string]string) bool {
 // clientAuthNeedsTruststoreSecret reports whether REST API mutual TLS requires
 // an operator-managed cluster-CA truststore secret that is not already produced
 // for the Kafka auth mode (i.e. PLAINTEXT and SASL_PLAINTEXT).
-func clientAuthNeedsTruststoreSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, auth kafkaAuth) bool {
+func clientAuthNeedsTruststoreSecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, auth kafkaAuth) bool {
 	return instance.Spec.ClientAuth && instance.Spec.SecureHTTP && !auth.NeedsTruststore
 }
 
-func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger) (string, string, error) {
 	// Get Kafka cluster name from the StrimziSchemaRegistry labels. This keeps
 	// bootstrap server discovery independent of the KafkaUser so that PLAINTEXT
@@ -941,7 +941,7 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaBootstrapServers(instance *str
 //   - mTLS (SSL): truststore + keystore.
 //   - SASL_SSL: truststore only.
 //   - SASL_PLAINTEXT / PLAINTEXT: no JKS secret is produced (returns nil, false, nil).
-func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret,
 	userCASecret *v1.Secret, auth kafkaAuth) (*v1.Secret, bool, error) {
 	switch auth.Mode {
@@ -957,7 +957,7 @@ func (r *StrimziSchemaRegistryReconciler) createSecret(instance *strimziregistry
 
 // getClusterCASecret returns the cluster CA cert secret, fetching it when the
 // provided secret is nil.
-func (r *StrimziSchemaRegistryReconciler) getClusterCASecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+func (r *StrimziSchemaRegistryReconciler) getClusterCASecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret) (*v1.Secret, error) {
 	if clusterCASecret != nil {
 		return clusterCASecret, nil
@@ -974,7 +974,7 @@ func (r *StrimziSchemaRegistryReconciler) getClusterCASecret(instance *strimzire
 
 // getKafkaUserSecret returns the KafkaUser secret (named after the instance),
 // fetching it when the provided secret is nil.
-func (r *StrimziSchemaRegistryReconciler) getKafkaUserSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+func (r *StrimziSchemaRegistryReconciler) getKafkaUserSecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, userCASecret *v1.Secret) (*v1.Secret, error) {
 	if userCASecret != nil {
 		return userCASecret, nil
@@ -993,7 +993,7 @@ func (r *StrimziSchemaRegistryReconciler) getKafkaUserSecret(instance *strimzire
 // that carries the SCRAM credentials for SASL modes. This version is stored on
 // the deployment pod template so credential changes can trigger a rollout.
 func (r *StrimziSchemaRegistryReconciler) getSASLUserSecretVersion(
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context,
 	logger logr.Logger,
 ) (string, error) {
@@ -1012,7 +1012,7 @@ func (r *StrimziSchemaRegistryReconciler) getSASLUserSecretVersion(
 // Delete-then-recreate left a window in which a pod restarting in between
 // failed to mount the secret — the same failure mode already fixed for the
 // REST TLS secret path in createTLSSecret.
-func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+func (r *StrimziSchemaRegistryReconciler) existingJKSSecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, isUpToDate func(annotations map[string]string) bool) (*v1.Secret, bool, error) {
 	jks_secret := &v1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{Name: instance.Name + jksSecretSuffix, Namespace: instance.Namespace}, jks_secret)
@@ -1069,7 +1069,7 @@ func (r *StrimziSchemaRegistryReconciler) persistJKSSecret(ctx context.Context, 
 // back to the CR named in the owner reference. For a deleted owner the
 // reconcile finds the CR gone and returns without error (no loop); for a live
 // owner the extra reconcile observes the secret is gone and converges.
-func (r *StrimziSchemaRegistryReconciler) gcOrphanedSecrets(ctx context.Context, instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger logr.Logger) {
+func (r *StrimziSchemaRegistryReconciler) gcOrphanedSecrets(ctx context.Context, instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, logger logr.Logger) {
 	secretList := &v1.SecretList{}
 	if err := r.List(ctx, secretList,
 		client.InNamespace(instance.Namespace),
@@ -1087,7 +1087,7 @@ func (r *StrimziSchemaRegistryReconciler) gcOrphanedSecrets(ctx context.Context,
 			continue
 		}
 		if owner.Name != instance.Name {
-			ownerCR := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
+			ownerCR := &strimziregistryoperatorv1beta1.StrimziSchemaRegistry{}
 			err := r.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: instance.Namespace}, ownerCR)
 			if err == nil {
 				continue // another live CR's secret
@@ -1122,7 +1122,7 @@ func (r *StrimziSchemaRegistryReconciler) gcOrphanedSecrets(ctx context.Context,
 // output left behind by a spec.tlssecretname transition. The mTLS keystore
 // (<name>-jks, empty middle segment) and the REST API TLS secret
 // (<name>-tls, not -jks suffixed) never match.
-func isStaleDerivedJKSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, secretName string) bool {
+func isStaleDerivedJKSSecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, secretName string) bool {
 	prefix := instance.Name + "-"
 	if !strings.HasPrefix(secretName, prefix) {
 		return false
@@ -1144,7 +1144,7 @@ func isStaleDerivedJKSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSc
 // createMTLSSecret creates or returns an up-to-date JKS secret containing both
 // the truststore (built from the cluster CA) and the keystore (built from the
 // KafkaUser client certificate) for mTLS authentication.
-func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret,
 	userCASecret *v1.Secret) (*v1.Secret, bool, error) {
 	logger.Info("Creating secret for schema registry Kafkastore TLS")
@@ -1257,7 +1257,7 @@ func (r *StrimziSchemaRegistryReconciler) createMTLSSecret(instance *strimziregi
 // createTruststoreSecret creates or returns an up-to-date JKS secret
 // containing only the truststore (built from the cluster CA). It is used for
 // SASL_SSL and for REST API mutual TLS in PLAINTEXT/SASL_PLAINTEXT modes.
-func (r *StrimziSchemaRegistryReconciler) createTruststoreSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+func (r *StrimziSchemaRegistryReconciler) createTruststoreSecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, clusterName string, clusterCASecret *v1.Secret) (*v1.Secret, bool, error) {
 	logger.Info("Creating truststore secret for schema registry")
 
@@ -1322,7 +1322,7 @@ func (r *StrimziSchemaRegistryReconciler) createTruststoreSecret(instance *strim
 // opposed to already up-to-date). A rebuilt secret is persisted in place when
 // a stale secret existed (B4).
 func (r *StrimziSchemaRegistryReconciler) ensureClientAuthTruststoreSecret(
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context,
 	logger logr.Logger,
 	clusterName string,
@@ -1341,7 +1341,7 @@ func (r *StrimziSchemaRegistryReconciler) ensureClientAuthTruststoreSecret(
 	return secret, true, nil
 }
 
-func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, logger logr.Logger) (*v1.Service, error) {
+func (r *StrimziSchemaRegistryReconciler) createService(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, logger logr.Logger) (*v1.Service, error) {
 	logger.Info("Creating a new Service", "Service.Namespace", instance.Namespace, "Service.Name", instance.Name)
 
 	// Defaults: ClusterIP on port 80 (http) or 443 (https), overridable via
@@ -1578,14 +1578,14 @@ func mergeContainerPorts(operator, user []v1.ContainerPort) []v1.ContainerPort {
 
 // networkPolicyEnabled reports whether the optional NetworkPolicy should be
 // created for the Schema Registry pods.
-func networkPolicyEnabled(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) bool {
+func networkPolicyEnabled(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) bool {
 	return instance.Spec.NetworkPolicy != nil && instance.Spec.NetworkPolicy.Enabled
 }
 
 // buildNetworkPolicy constructs the desired NetworkPolicy for the Schema Registry
 // pods. It allows ingress on the SR listener port from within the namespace and
 // egress to the Kafka bootstrap service (identified by the Strimzi cluster label).
-func buildNetworkPolicy(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry, kafkaClusterName, kafkaBootstrapServer string) (*networkingv1.NetworkPolicy, error) {
+func buildNetworkPolicy(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry, kafkaClusterName, kafkaBootstrapServer string) (*networkingv1.NetworkPolicy, error) {
 	listenerPort, _ := listenerPortAndScheme(instance)
 	kafkaPort, err := portFromBootstrapServer(kafkaBootstrapServer)
 	if err != nil {
@@ -1733,7 +1733,7 @@ func networkPoliciesEqual(existing, desired *networkingv1.NetworkPolicy) bool {
 // Schema Registry pods according to spec.networkpolicy.enabled.
 func (r *StrimziSchemaRegistryReconciler) reconcileNetworkPolicy(
 	ctx context.Context,
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	logger logr.Logger,
 ) error {
 	name := types.NamespacedName{Name: instance.Name + networkPolicySuffix, Namespace: instance.Namespace}
@@ -1792,7 +1792,7 @@ func (r *StrimziSchemaRegistryReconciler) reconcileNetworkPolicy(
 // that case). The existing secret is never deleted: updating in place keeps
 // the secret present for pods mounting it, avoiding the window where a
 // delete-then-create left the secret absent and pod mounts failed.
-func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+func (r *StrimziSchemaRegistryReconciler) createTLSSecret(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, clusterName string) (*v1.Secret, bool, error) {
 	logger.Info("Creating secret for schema registry TLS")
 	clusterCertSecret := &v1.Secret{}
@@ -1905,7 +1905,7 @@ func writeHashf(h hash.Hash64, format string, args ...any) {
 // probability across spec versions (64-bit vs 32-bit digest). Changing the
 // algorithm rewrites every stored hash value once, which triggers a one-time
 // rollout of existing Schema Registry deployments on operator upgrade.
-func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry) string {
+func computeSpecHash(instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry) string {
 	h := fnv.New64a()
 
 	writeHash(h, string(instance.Spec.CompatibilityLevel))
@@ -1983,7 +1983,7 @@ func computeSpecHash(instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegi
 // annotation, and updates the deployment spec + triggers a rollout via annotation change
 // if needed.
 func (r *StrimziSchemaRegistryReconciler) updateExistingDeployment(
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context, logger logr.Logger, found *apps.Deployment,
 ) (*apps.Deployment, bool, error) {
 	// F1: the Deployment selector is immutable at the API server. A
@@ -2394,7 +2394,7 @@ func deploymentSelectorMatches(found *apps.Deployment, name string) bool {
 // specChanged=false: the object already exists in its desired form and needs
 // no further update this pass.
 func (r *StrimziSchemaRegistryReconciler) recreateDeploymentForLegacySelector(
-	instance *strimziregistryoperatorv1alpha1.StrimziSchemaRegistry,
+	instance *strimziregistryoperatorv1beta1.StrimziSchemaRegistry,
 	ctx context.Context,
 	logger logr.Logger,
 	found *apps.Deployment,

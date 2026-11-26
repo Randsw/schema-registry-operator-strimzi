@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	strimziregistryoperatorv1alpha1 "github.com/randsw/schema-registry-operator-strimzi/api/v1alpha1"
+	strimziregistryoperatorv1beta1 "github.com/randsw/schema-registry-operator-strimzi/api/v1beta1"
 )
 
 // sortedRequestNames returns the requested names as a deterministically
@@ -55,7 +55,7 @@ func sortedRequestNames(requests []reconcile.Request) []types.NamespacedName {
 // regresses to the old label lookup, every Kafka subtest fails.
 func TestMapKafkaToRequests(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 
 	matching := newTestInstance()
 	matching.Name = "sr-matching"
@@ -162,7 +162,7 @@ func TestMapKafkaToRequests(t *testing.T) {
 // watch pipeline can be exercised without reaching into package internals.
 func TestKafkaWatchMapperInjection(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = strimziregistryoperatorv1alpha1.AddToScheme(scheme)
+	_ = strimziregistryoperatorv1beta1.AddToScheme(scheme)
 
 	matching := newTestInstance()
 	matching.Name = "sr-injected"

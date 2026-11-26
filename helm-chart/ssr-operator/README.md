@@ -14,7 +14,7 @@ The Schema Registry **image is supplied by the user** through
 `spec.template` of the `StrimziSchemaRegistry` custom resource, e.g.:
 
 ```yaml
-apiVersion: strimziregistryoperator.randsw.code/v1alpha1
+apiVersion: strimziregistryoperator.randsw.code/v1beta1
 kind: StrimziSchemaRegistry
 metadata:
   name: confluent-schema-registry
