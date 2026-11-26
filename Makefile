@@ -131,15 +131,16 @@ vet: ## Run go vet against code.
 #     and is covered by cmd/main_test.go.
 #
 # The filtered project coverage is then gated by hack/coverage-gate.sh.
-# COVERAGE_THRESHOLD sits inside the plan's 82-85% target band and leaves
-# ~1.5 points of headroom below the measured post-Phase-2 filtered coverage
-# (85.5%). Coverage variance on a green suite is negligible, so that margin
-# fails genuine regressions without making CI flaky. Override deliberately,
-# e.g. `make test COVERAGE_THRESHOLD=83.0`.
-COVERAGE_THRESHOLD ?= 84.0
+# COVERAGE_THRESHOLD is the Phase 3 target: raised from 84.0 after the T-3,
+# T-6, T-7 and T-10 additions landed. It leaves ~0.5 points of headroom below
+# the measured post-Phase-3 filtered coverage (85.5%). Coverage variance on a
+# green suite is negligible, so that margin fails genuine regressions without
+# making CI flaky. Override deliberately, e.g.
+# `make test COVERAGE_THRESHOLD=84.0`.
+COVERAGE_THRESHOLD ?= 85.0
 
 .PHONY: coverage-gate
-coverage-gate: ## Check filtered cover.out against COVERAGE_THRESHOLD (default 84.0%).
+coverage-gate: ## Check filtered cover.out against COVERAGE_THRESHOLD (default 85.0%).
 	./hack/coverage-gate.sh cover.out $(COVERAGE_THRESHOLD)
 
 .PHONY: test
