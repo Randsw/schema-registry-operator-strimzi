@@ -37,6 +37,10 @@ const (
 	tlsVersionAnnotationKey      = "strimziregistryoperator.randsw.code/tlsVersion"
 	jksVersionAnnotationKey      = "strimziregistryoperator.randsw.code/jksVersion"
 	saslUserVersionAnnotationKey = "strimziregistryoperator.randsw.code/saslUserSecretVersion"
+	// specHashAnnotationKey is the operator-computed hash of the CR spec
+	// fields that affect the Deployment. It is derived purely from one CR's
+	// spec, so it is the stable signal for cross-CR independence assertions.
+	specHashAnnotationKey = "strimziregistryoperator.randsw.code/specHash"
 )
 
 // registryFixture is an isolated registry scenario. Its CR name, kafkastore
