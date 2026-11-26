@@ -43,6 +43,7 @@ import (
 // is proven in all four auth modes without a fifth cluster.
 const (
 	userTLSSecretName     = "schema-registry-tls"
+	userTLSSecretNameAlt  = "schema-registry-tls-alt"
 	userTLSKeystorePass   = "e2e-keystore-pass"
 	restAPITLSVolumeName  = "rest-api-tls"
 	restAPIKeystoreLocJKS = "/var/rest-api-tls/tls-keystore.jks"
@@ -76,7 +77,7 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 		By("deleting the StrimziSchemaRegistry CR to leave a clean slate")
 		deleteRegistryCR(context.Background(), readyTimeout)
 
-		By("deleting the user-provided TLS secret")
+		By("deleting the user-provided TLS secrets")
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      userTLSSecretName,
@@ -85,6 +86,7 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 		}
 		err := k8sClient.Delete(context.Background(), secret)
 		Expect(client.IgnoreNotFound(err)).To(Succeed())
+		deleteSecretIfExists(context.Background(), userTLSSecretNameAlt)
 	})
 
 	// E2-1: a pre-built JKS keystore secret is mounted as-is; the operator
@@ -167,6 +169,39 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 
 		By("passing the REST round-trip trusting the user CA after the rollout")
 		verifyRoundTrip(userCA, nil)
+
+		// Derived-JKS garbage collection: switching spec.tlssecretname to a
+		// second PEM secret must repoint the mounts at the new derived secret
+		// and delete the stale derived secret of the previous one.
+		By("creating a second user PEM TLS secret")
+		secondMaterial := newUserTLSMaterial(scenario.RegistryName)
+		applySecret(ctx, userTLSSecretNameAlt, corev1.SecretTypeTLS, secondMaterial.pemData())
+
+		By("switching spec.tlssecretname to the second secret")
+		Expect(applyRegistryCR(ctx, false, true, nil, func(spec *v1alpha1.StrimziSchemaRegistrySpec) {
+			spec.TLSSecretName = userTLSSecretNameAlt
+		})).To(Succeed())
+
+		secondDerived := scenario.RegistryName + "-" + userTLSSecretNameAlt + "-jks"
+		By("waiting for the derived JKS secret of the second secret")
+		waitForSecretWithKey(ctx, secondDerived, "tls-keystore.jks")
+
+		By("waiting for the deployment mounts to be repointed at the second derived secret")
+		Eventually(func() string {
+			return restAPITLSMountedSecret(ctx)
+		}, statusTimeout, 2*time.Second).Should(Equal(secondDerived),
+			"the rest-api-tls volume must mount the second derived secret")
+
+		By("waiting for the stale derived JKS secret to be garbage-collected")
+		waitForSecretDeletion(ctx, derivedName)
+
+		By("waiting for the deployment to track the second user secret")
+		waitForDeploymentTLSVersion(ctx, scenario.RegistryName, userTLSSecretNameAlt)
+		waitForReadyCondition(ctx, readyTimeout)
+		waitForDeploymentRollout(ctx, readyTimeout)
+
+		By("passing the REST round-trip trusting the second user CA after the GC rollout")
+		verifyRoundTrip(secondMaterial.cluster, nil)
 	})
 
 	// E2-3: a PKCS12 keystore secret (spec.keystoretype: PKCS12) is mounted
@@ -204,10 +239,37 @@ var _ = Describe("StrimziSchemaRegistry e2e user TLS secret scenario", Ordered, 
 		By("verifying the deployment mounts the user secret")
 		Expect(restAPITLSMountedSecret(ctx)).To(Equal(userTLSSecretName))
 
+		By("waiting for the deployment to track the rotated user secret")
+		waitForDeploymentTLSVersion(ctx, scenario.RegistryName, userTLSSecretName)
+		waitForReadyCondition(ctx, readyTimeout)
+		waitForDeploymentRollout(ctx, readyTimeout)
+
 		By("passing the REST round-trip trusting the user CA")
 		verifyRoundTrip(userCA, nil)
 	})
 })
+
+// waitForDeploymentTLSVersion waits until the named CR's Deployment carries
+// the given user TLS secret's resourceVersion in its tlsVersion rollout
+// annotation. The operator bumps the annotation on its own reconcile pass, so
+// a spec change and a secret rotation can land as two successive rollouts;
+// settling the annotation first prevents a REST round-trip from racing the
+// rotation-triggered pod replacement.
+func waitForDeploymentTLSVersion(ctx context.Context, name, secretName string) {
+	Eventually(func(g Gomega) {
+		dep := &appsv1.Deployment{}
+		g.Expect(k8sClient.Get(ctx, deploymentKeyFor(name), dep)).To(Succeed())
+		secret := &corev1.Secret{}
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      secretName,
+			Namespace: scenario.Namespace,
+		}, secret)).To(Succeed())
+		g.Expect(dep.Spec.Template.Annotations).To(
+			HaveKeyWithValue(tlsVersionAnnotationKey, secret.ResourceVersion),
+			"the tlsVersion marker must track %s", secretName)
+	}, statusTimeout, 2*time.Second).Should(Succeed(),
+		"timed out after %s waiting for the deployment to track secret %s", statusTimeout, secretName)
+}
 
 // userTLSDNSNames returns the DNS SANs the user REST API certificate of the
 // scenario's shared CR must carry.

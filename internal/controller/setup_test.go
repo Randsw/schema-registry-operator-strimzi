@@ -27,6 +27,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -40,310 +41,25 @@ import (
 	kafka "github.com/scholzj/strimzi-go/pkg/apis/kafka.strimzi.io/v1"
 )
 
-// U-1: SetupWithManager is the only production entry point with no other
-// coverage. These specs run it against a real envtest manager and prove the
-// watch wiring behaviorally — controller-runtime exposes no public registry
-// of installed controllers, so "the controller is registered" is asserted by
-// the manager-driven reconcile loop producing its expected artifacts.
-var _ = Describe("SetupWithManager wiring", func() {
-	const SchemaRegistryName = "test-wiring"
-
-	ctx := context.Background()
-
-	namespace := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: SchemaRegistryName,
-		},
-	}
-
-	typeNamespacedName := types.NamespacedName{
-		Name:      SchemaRegistryName,
-		Namespace: SchemaRegistryName,
-	}
-	deploymentNamespacedName := types.NamespacedName{
-		Name:      SchemaRegistryName + "-deploy",
-		Namespace: SchemaRegistryName,
-	}
-
-	var (
-		testCA    *testutil.TestCA
-		clusterCA *testutil.TestCA
-		userCert  *testutil.TestUserCert
-
-		mgr       ctrl.Manager
-		mgrCtx    context.Context
-		cancelMgr context.CancelFunc
-	)
-
-	BeforeEach(func() {
-		var err error
-		testCA, err = testutil.GenerateTestCA()
-		Expect(err).NotTo(HaveOccurred())
-
-		clusterCA, err = testutil.GenerateClusterCACert("STRIMZI-SR-WIRING")
-		Expect(err).NotTo(HaveOccurred())
-
-		userCert, err = testutil.GenerateTestUserCert(testCA, "test1234")
-		Expect(err).NotTo(HaveOccurred())
-
-		By("Creating the namespace to perform the tests")
-		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
-
-		By("Creating the Strimzi Kafka cluster with TLS listener and status")
-		// Strimzi never labels the Kafka CR itself: the cluster identity is
-		// the CR name, which the CR below carries under strimzi.io/cluster.
-		cluster := &kafka.Kafka{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "kafka-cluster",
-				Namespace: SchemaRegistryName,
-			},
-			Spec: &kafka.KafkaSpec{
-				Kafka: &kafka.KafkaClusterSpec{
-					Listeners: []kafka.GenericKafkaListener{
-						{
-							Name: "plain",
-							Port: 9092,
-							Tls:  false,
-							Type: kafka.INTERNAL_KAFKALISTENERTYPE,
-						},
-						{
-							Name: "tls",
-							Port: 9093,
-							Tls:  true,
-							Type: kafka.INTERNAL_KAFKALISTENERTYPE,
-							Authentication: &kafka.KafkaListenerAuthentication{
-								Type: kafka.TLS_KAFKALISTENERAUTHENTICATIONTYPE,
-							},
-						},
-					},
-					Version: "4.1.0",
-				},
-			},
-		}
-		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-
-		updatedCluster := &kafka.Kafka{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updatedCluster)).To(Succeed())
-		updatedCluster.Status = &kafka.KafkaStatus{
-			ClusterId: "wiring-cluster-id",
-			Listeners: []kafka.ListenerStatus{
-				{
-					BootstrapServers: "kafka-cluster-kafka-bootstrap." + SchemaRegistryName + ".svc:9092",
-					Name:             "plain",
-				},
-				{
-					BootstrapServers: "kafka-cluster-kafka-bootstrap." + SchemaRegistryName + ".svc:9093",
-					Name:             "TLS",
-					Certificates:     []string{clusterCA.CACertPEM},
-				},
-			},
-		}
-		Expect(k8sClient.Status().Update(ctx, updatedCluster)).To(Succeed())
-
-		By("Creating the KafkaUser")
-		user := &kafka.KafkaUser{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      SchemaRegistryName,
-				Namespace: SchemaRegistryName,
-				Labels: map[string]string{
-					"strimzi.io/cluster": "kafka-cluster",
-				},
-			},
-			Spec: &kafka.KafkaUserSpec{
-				Authentication: &kafka.KafkaUserAuthentication{
-					Type: kafka.TLS_KAFKAUSERAUTHENTICATIONTYPE,
-				},
-			},
-		}
-		Expect(k8sClient.Create(ctx, user)).To(Succeed())
-
-		By("Creating the cluster CA secrets")
-		clusterKeySecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "kafka-cluster-cluster-ca",
-				Namespace: SchemaRegistryName,
-			},
-			Data: map[string][]byte{
-				"ca.key": []byte(clusterCA.CAKeyPEM),
-			},
-		}
-		Expect(k8sClient.Create(ctx, clusterKeySecret)).To(Succeed())
-
-		clusterCertSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "kafka-cluster-cluster-ca-cert",
-				Namespace: SchemaRegistryName,
-			},
-			Data: map[string][]byte{
-				"ca.crt": []byte(clusterCA.CACertPEM),
-			},
-		}
-		Expect(k8sClient.Create(ctx, clusterCertSecret)).To(Succeed())
-
-		By("Creating the KafkaUser client secret")
-		clientSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      SchemaRegistryName,
-				Namespace: SchemaRegistryName,
-			},
-			Data: map[string][]byte{
-				"ca.crt":        []byte(testCA.CACertPEM),
-				"user.crt":      []byte(userCert.UserCertPEM),
-				"user.key":      []byte(userCert.UserKeyPEM),
-				"user.p12":      userCert.PKCS12Data,
-				"user.password": []byte(userCert.Password),
-			},
-		}
-		Expect(k8sClient.Create(ctx, clientSecret)).To(Succeed())
-
-		Expect(os.Setenv("STRIMZIREGISTRYOPERATOR_IMAGE", "ghcr.io/randsw/strimzi-schema-registry-operator")).To(Succeed())
-
-		By("Creating the StrimziSchemaRegistry CR")
-		resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      SchemaRegistryName,
-				Namespace: SchemaRegistryName,
-				Labels: map[string]string{
-					"strimzi.io/cluster": "kafka-cluster",
-				},
-			},
-			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
-				SecureHTTP:         true,
-				Listener:           "TLS",
-				CompatibilityLevel: "forward",
-				SecurityProtocol:   "SSL",
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test",
-								Image: "confluentinc/cp-schema-registry:8.4.1",
-							},
-						},
-					},
-				},
-			},
-		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-
-		By("Wiring the controller into a real manager")
-		mgr, err = ctrl.NewManager(cfg, ctrl.Options{
-			Scheme:     scheme.Scheme,
-			Metrics:    metricsserver.Options{BindAddress: "0"},
-			Controller: config.Controller{SkipNameValidation: ptr.To(true)},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		reconciler := &StrimziSchemaRegistryReconciler{
-			Client:   mgr.GetClient(),
-			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorder("strimzischemaregistry-controller"),
-		}
-		Expect(reconciler.SetupWithManager(mgr)).To(Succeed())
-
-		By("Starting the manager")
-		mgrCtx, cancelMgr = context.WithCancel(context.Background())
-		go func() {
-			defer GinkgoRecover()
-			Expect(mgr.Start(mgrCtx)).To(Succeed())
-		}()
-		Eventually(func() bool {
-			return mgr.GetCache().WaitForCacheSync(mgrCtx)
-		}, 30*time.Second, 250*time.Millisecond).Should(BeTrue())
-	})
-
-	AfterEach(func() {
-		By("Stopping the manager")
-		cancelMgr()
-
-		By("Cleaning up the CR and the namespace")
-		found := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{}
-		if err := k8sClient.Get(ctx, typeNamespacedName, found); err == nil {
-			if len(found.Finalizers) > 0 {
-				found.Finalizers = []string{}
-				_ = k8sClient.Update(ctx, found)
-			}
-			_ = k8sClient.Delete(ctx, found)
-		}
-		_ = k8sClient.Delete(ctx, namespace)
-		_ = os.Unsetenv("STRIMZIREGISTRYOPERATOR_IMAGE")
-	})
-
-	It("registers the controller and reacts to Secret and Kafka events", func() {
-		By("Reconciling the CR through the manager loop (For watch)")
-		Eventually(func() error {
-			found := &appsv1.Deployment{}
-			return k8sClient.Get(ctx, deploymentNamespacedName, found)
-		}, time.Minute, time.Second).Should(Succeed())
-
-		By("Waiting for the reconcile loop to settle")
-		Eventually(func() error {
-			found := &corev1.Secret{}
-			return k8sClient.Get(ctx, types.NamespacedName{
-				Name:      SchemaRegistryName + "-tls",
-				Namespace: SchemaRegistryName,
-			}, found)
-		}, 2*time.Minute, time.Second).Should(Succeed())
-		// Let in-flight reconciles drain so the recreation below can only be
-		// caused by the Secret delete event flowing through the watch.
-		time.Sleep(5 * time.Second)
-
-		By("Deleting the operator-owned JKS secret")
-		jks := &corev1.Secret{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{
-			Name:      SchemaRegistryName + "-jks",
-			Namespace: SchemaRegistryName,
-		}, jks)).To(Succeed())
-		Expect(k8sClient.Delete(ctx, jks)).To(Succeed())
-
-		By("Verifying the secret is recreated through the Secret watch pipeline")
-		Eventually(func() error {
-			recreated := &corev1.Secret{}
-			return k8sClient.Get(ctx, types.NamespacedName{
-				Name:      SchemaRegistryName + "-jks",
-				Namespace: SchemaRegistryName,
-			}, recreated)
-		}, time.Minute, time.Second).Should(Succeed())
-
-		By("Changing the Kafka status bootstrap servers")
-		const newBootstrap = "kafka-cluster-kafka-bootstrap.moved.svc:9093"
-		updatedCluster := &kafka.Kafka{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kafka-cluster", Namespace: SchemaRegistryName}, updatedCluster)).To(Succeed())
-		for i := range updatedCluster.Status.Listeners {
-			if updatedCluster.Status.Listeners[i].Name == "TLS" {
-				updatedCluster.Status.Listeners[i].BootstrapServers = newBootstrap
-			}
-		}
-		Expect(k8sClient.Status().Update(ctx, updatedCluster)).To(Succeed())
-
-		By("Verifying the deployment env follows the new bootstrap servers")
-		Eventually(func() string {
-			dep := &appsv1.Deployment{}
-			if err := k8sClient.Get(ctx, deploymentNamespacedName, dep); err != nil {
-				return ""
-			}
-			env, ok := envByName(dep.Spec.Template.Spec.Containers[0].Env, "SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS")
-			if !ok {
-				return ""
-			}
-			return env.Value
-		}, time.Minute, time.Second).Should(Equal(newBootstrap))
-	})
-})
-
-// T-2 (C-1): the Kafka watch must converge listener/status changes for a
-// real-shaped Kafka CR — Strimzi never puts the strimzi.io/cluster label on
-// the Kafka CR itself, so the watch can only work because mapKafkaToRequests
-// matches the Kafka CR name against the StrimziSchemaRegistry label value.
+// T-2 (C-1,U-1): the watch pipeline wired by SetupWithManager. The Kafka watch
+// must converge listener/status changes for a real-shaped Kafka CR — Strimzi
+// never puts the strimzi.io/cluster label on the Kafka CR itself, so the watch
+// can only work because mapKafkaToRequests matches the Kafka CR name against
+// the StrimziSchemaRegistry label value. The Secret watch must recreate an
+// operator-owned secret after it is deleted.
 //
-// The wiring spec above allows a full minute for convergence, which the H-3
-// 60-second requeue could satisfy on its own. The positive spec below bounds
-// convergence at 20 seconds (and the negative control at 3 seconds), so only
-// a watch-driven enqueue can explain the result.
+// Convergence is bounded at 20 seconds (and the negative control at 3
+// seconds), well below the H-3 60-second requeue, so only a watch-driven
+// enqueue can explain the result.
 var _ = Describe("Kafka CR watch pipeline (T-2)", func() {
 	const (
 		namespacePrefix = "test-kafka-watch"
 		registryName    = "watch-sr"
+
+		// userTLSSecretName is the PEM user TLS secret the positive spec
+		// installs so the operator creates a derived JKS secret the Secret
+		// watch can recreate after deletion.
+		userTLSSecretName = "watch-user-tls"
 	)
 
 	ctx := context.Background()
@@ -439,6 +155,44 @@ var _ = Describe("Kafka CR watch pipeline (T-2)", func() {
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 	}
 
+	// createRegistryWithUserTLS creates a PEM user TLS secret plus a SecureHTTP
+	// registry that references it, so the operator creates the derived
+	// <name>-<tlssecretname>-jks secret owned by the CR.
+	createRegistryWithUserTLS := func(name, clusterLabel, tlsSecretName string) {
+		userCA, err := testutil.GenerateTestCA()
+		Expect(err).NotTo(HaveOccurred())
+		userCert, err := testutil.GenerateTestUserCert(userCA, "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: tlsSecretName, Namespace: specNamespace},
+			Type:       corev1.SecretTypeTLS,
+			Data: map[string][]byte{
+				"tls.crt": []byte(userCert.UserCertPEM),
+				"tls.key": []byte(userCert.UserKeyPEM),
+				"ca.crt":  []byte(userCA.CACertPEM),
+			},
+		})).To(Succeed())
+
+		resource := &strimziregistryoperatorv1alpha1.StrimziSchemaRegistry{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: specNamespace,
+				Labels:    map[string]string{"strimzi.io/cluster": clusterLabel},
+			},
+			Spec: strimziregistryoperatorv1alpha1.StrimziSchemaRegistrySpec{
+				Listener:           "plain",
+				CompatibilityLevel: "forward",
+				SecurityProtocol:   "PLAINTEXT",
+				SecureHTTP:         true,
+				TLSSecretName:      tlsSecretName,
+				Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test", Image: "confluentinc/cp-schema-registry:8.4.1"}},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+	}
+
 	startManager := func() {
 		var err error
 		// Each spec starts its own manager, but controller-runtime enforces
@@ -481,13 +235,13 @@ var _ = Describe("Kafka CR watch pipeline (T-2)", func() {
 		return env.Value
 	}
 
-	It("converges within 20s when an unlabeled Kafka CR changes its listener bootstrap", func() {
+	It("converges on Kafka changes within 20s and recreates a deleted operator secret", func() {
 		kafkaName := "kafka"
 		initialBootstrap := fmt.Sprintf("%s-kafka-bootstrap.%s.svc:9092", kafkaName, specNamespace)
 		newBootstrap := fmt.Sprintf("%s-kafka-bootstrap.%s.svc:9192", kafkaName, specNamespace)
 
 		createKafkaWithStatus(kafkaName, initialBootstrap)
-		createRegistry(registryName, kafkaName)
+		createRegistryWithUserTLS(registryName, kafkaName, userTLSSecretName)
 		startManager()
 
 		By("letting the first reconcile settle on the initial bootstrap servers")
@@ -508,6 +262,34 @@ var _ = Describe("Kafka CR watch pipeline (T-2)", func() {
 		Eventually(func() string {
 			return deploymentBootstrap(deploymentKey)
 		}, 20*time.Second, 250*time.Millisecond).Should(Equal(newBootstrap))
+
+		// Secret-watch recreation: deleting an operator-owned secret must
+		// trigger a reconcile that puts it back.
+		derivedKey := types.NamespacedName{
+			Name:      registryName + "-" + userTLSSecretName + jksSecretSuffix,
+			Namespace: specNamespace,
+		}
+
+		By("waiting for the operator-owned derived JKS secret")
+		Eventually(func() error {
+			return k8sClient.Get(ctx, derivedKey, &corev1.Secret{})
+		}, 20*time.Second, 250*time.Millisecond).Should(Succeed())
+
+		By("deleting the operator-owned derived JKS secret")
+		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name:      derivedKey.Name,
+			Namespace: derivedKey.Namespace,
+		}})).To(Succeed())
+
+		By("waiting until the deletion is actually observed (drain proof)")
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, derivedKey, &corev1.Secret{}))
+		}, 20*time.Second, 100*time.Millisecond).Should(BeTrue())
+
+		By("asserting the Secret watch recreates the secret")
+		Eventually(func() error {
+			return k8sClient.Get(ctx, derivedKey, &corev1.Secret{})
+		}, 20*time.Second, 250*time.Millisecond).Should(Succeed())
 	})
 
 	It("does not reconcile a CR when a different Kafka CR changes", func() {
