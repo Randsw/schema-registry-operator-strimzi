@@ -1,3 +1,25 @@
+## [1.21.0](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.20.3...1.21.0) (2026-11-26)
+
+### ⚠ BREAKING CHANGES
+
+* the CRD no longer serves strimziregistryoperator.randsw.code/v1alpha1; StrimziSchemaRegistry resources must use apiVersion strimziregistryoperator.randsw.code/v1beta1.
+
+### :scissors: Refactor
+
+* **controller:** inject the Kafka watch mapper behind an accessor (P3.7) ([#340](https://github.com/Randsw/schema-registry-operator-strimzi/issues/340)) ([607e371](https://github.com/Randsw/schema-registry-operator-strimzi/commit/607e3716c380efc57f887a6172b1a18d38545b93))
+
+### 🧪 Tests
+
+* phase 1 — delete redundant and unit-covered test scenarios ([#341](https://github.com/Randsw/schema-registry-operator-strimzi/issues/341)) ([d375377](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d37537715a528f17d649d298c5042e7a24aa42f6))
+* phase 2 — consolidate duplicate test specs ([#342](https://github.com/Randsw/schema-registry-operator-strimzi/issues/342)) ([d0e1dde](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d0e1dde513199a2791153952192db215d9d542ea))
+* phase 3+4 — downgrade client-library assertions, deflake SCRAM truststore, poll ownership settle ([#343](https://github.com/Randsw/schema-registry-operator-strimzi/issues/343)) ([101b998](https://github.com/Randsw/schema-registry-operator-strimzi/commit/101b998a76d7d7d61ccb9ed4787cb168ac7ded04))
+* phase 5 — new envtest scenarios and nil-status crash fix ([#344](https://github.com/Randsw/schema-registry-operator-strimzi/issues/344)) ([d5e2c5a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/d5e2c5a1ed3da6dc603dcd9fad6a9bd747a92425))
+* phase 6 — real CA rotation and multi-CR e2e scenarios ([#345](https://github.com/Randsw/schema-registry-operator-strimzi/issues/345)) ([8ca8c5a](https://github.com/Randsw/schema-registry-operator-strimzi/commit/8ca8c5a175b647d21cf8fac718bd5cf0b4ced00d))
+
+### 🚀 Features
+
+* promote StrimziSchemaRegistry CRD from v1alpha1 to v1beta1 ([#346](https://github.com/Randsw/schema-registry-operator-strimzi/issues/346)) ([33d3070](https://github.com/Randsw/schema-registry-operator-strimzi/commit/33d307005fe435f6f344458d622231053807c09d))
+
 ## [1.20.3](https://github.com/Randsw/schema-registry-operator-strimzi/compare/1.20.2...1.20.3) (2026-11-26)
 
 ### 🛠 Fixes
